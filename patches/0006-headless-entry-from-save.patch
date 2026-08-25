@@ -1,3 +1,60 @@
+diff --git a/tuxemon/base_client.py b/tuxemon/base_client.py
+index 51aa833..9ab518e 100644
+--- a/tuxemon/base_client.py
++++ b/tuxemon/base_client.py
+@@ -82,7 +82,12 @@ class BaseClient(ABC):
+     Handles shared setup and lifecycle management for both graphical and headless clients.
+     """
+ 
+-    def __init__(self, config: TuxemonConfig, context: DisplayContext) -> None:
++    def __init__(
++        self,
++        config: TuxemonConfig,
++        context: DisplayContext,
++        start_networking: bool = True,
++    ) -> None:
+         init_assets()
+         self.config = config
+         self.context = context
+@@ -113,9 +118,20 @@ class BaseClient(ABC):
+             self.context.resolution,
+         )
+ 
+-        # Set up our networking for multiplayer.
++        # Set up our networking for multiplayer. Headless clients pass
++        # start_networking=False: TuxemonServer binds a *fixed* port
++        # (40081/0.0.0.0) as a side effect of construction, and upstream's
++        # own NetworkManager.shutdown() never actually releases it (it
++        # never calls WebsocketServerWrapper.stop_listening()), so a
++        # second client built in the same process would either fail an
++        # unhandled bind in a background thread or, worse, report
++        # is_host() == True from a server that never actually bound --
++        # TuxemonServer.__init__ sets `listening = True` unconditionally
++        # regardless of whether the bind succeeded. Not starting the
++        # server at all for headless clients avoids both failure modes.
+         self.network_manager = NetworkManager(self)
+-        self.network_manager.initialize()
++        if start_networking:
++            self.network_manager.initialize()
+ 
+         # Set up our game's event engine which executes actions based on
+         # conditions defined in map files.
+diff --git a/tuxemon/headless_client.py b/tuxemon/headless_client.py
+index 8178281..4044767 100644
+--- a/tuxemon/headless_client.py
++++ b/tuxemon/headless_client.py
+@@ -27,7 +27,10 @@ class HeadlessClient(BaseClient):
+     """
+ 
+     def __init__(self, config: TuxemonConfig, context: DisplayContext) -> None:
+-        super().__init__(config, context)
++        # Headless clients never need multiplayer networking; see the
++        # start_networking comment in BaseClient.__init__ for why skipping
++        # it (rather than starting then shutting it down) is required.
++        super().__init__(config, context, start_networking=False)
+ 
+     def main(self) -> None:
+         FIXED_DT = 1.0 / 60.0
 diff --git a/tuxemon/main.py b/tuxemon/main.py
 index 6ca5a56..9478a4c 100644
 --- a/tuxemon/main.py
