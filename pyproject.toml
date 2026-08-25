@@ -1,0 +1,27 @@
+[project]
+name = "tuxghost"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.10.6"]
+
+[project.optional-dependencies]
+dev = ["pytest", "mypy", "ruff"]
+
+[tool.setuptools.packages.find]
+include = ["tuxghost*"]
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+# tuxemon upstream is unannotated and not ours to fix
+[[tool.mypy.overrides]]
+module = "tuxemon.*"
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: drives a real game loop for minutes; opt-in"]

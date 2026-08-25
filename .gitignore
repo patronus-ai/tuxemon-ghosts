@@ -4,3 +4,5 @@ clone.log
 *.pyc
 __pycache__/
 spike/_p.py
+*.egg-info/
+.pytest_cache/
