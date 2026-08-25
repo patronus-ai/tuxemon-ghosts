@@ -1,0 +1,27 @@
+diff --git a/tuxemon/main.py b/tuxemon/main.py
+index 6ca5a56..9478a4c 100644
+--- a/tuxemon/main.py
++++ b/tuxemon/main.py
+@@ -55,6 +55,22 @@ def headless(config: TuxemonConfig, context: DisplayContext) -> None:
+     control.main()
+ 
+ 
++def headless_world(
++    config: TuxemonConfig, context: DisplayContext
++) -> HeadlessClient:
++    """
++    Build a headless client able to run the overworld.
++
++    Unlike headless(), this does not push HeadlessServerState -- that
++    state loads no world and returns None from process_event, so it
++    cannot play. Callers are responsible for pushing a WorldState (or
++    restoring one from a save) and driving the client themselves.
++    """
++    client = HeadlessClient(config, context)
++    local_session.set_client(client)
++    return client
++
++
+ def configure_game_states(
+     client: LocalPygameClient,
+     config: TuxemonConfig,

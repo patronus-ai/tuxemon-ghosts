@@ -22,3 +22,69 @@ def headless_context() -> Any:
     from tuxemon.prepare import headless_init
 
     return headless_init()
+
+
+def build_client(seed: int) -> tuple[Any, Any]:
+    """Build a headless client on a fresh game at the given seed."""
+    import random
+
+    context = headless_context()
+
+    from tuxemon.database.runtime import db
+    from tuxemon.launcher import GameLauncher
+    from tuxemon.main import headless_world
+    from tuxemon.session import local_session
+    from tuxemon.user_config import CONFIG
+
+    client = headless_world(CONFIG.copy(), context)
+
+    random.seed(seed)
+
+    meta = db.mod_metadata.get_mod_metadata("tuxemon")
+    GameLauncher(client).launch(local_session, meta)
+    return client, local_session
+
+
+def snapshot_save(session: Any) -> Any:
+    """Serialise the live session into upstream's SaveData model."""
+    from tuxemon.save_system import save
+
+    return save.get_save_data(session)
+
+
+def boot_from_save(save_data: Any, seed: int) -> tuple[Any, Any]:
+    """Boot a headless client and restore `save_data` into it."""
+    import random
+
+    context = headless_context()
+
+    from tuxemon.constants.asset_loader import fetch_asset
+    from tuxemon.entity.npc import NPC
+    from tuxemon.main import headless_world
+    from tuxemon.platform.const.sizes import PLAYER_NPC
+    from tuxemon.session import local_session
+    from tuxemon.user_config import CONFIG
+
+    # `local_session` is a module-level singleton shared with any prior
+    # session in this process (e.g. the one that produced `save_data`).
+    # Reset it so `create_player` below actually creates a fresh NPC
+    # instead of reusing whatever player/world/client is already
+    # attached -- otherwise restoration would trivially "work" by
+    # aliasing the old objects rather than by `load_state` doing
+    # anything.
+    local_session.reset()
+
+    client = headless_world(CONFIG.copy(), context)
+    random.seed(seed)
+
+    npc_state = save_data.npc_state
+    assert npc_state is not None and npc_state.current_map is not None
+
+    NPC.create_player(local_session, slug=npc_state.player_slug or PLAYER_NPC)
+    client.push_state(
+        "WorldState",
+        session=local_session,
+        map_name=fetch_asset("maps", npc_state.current_map),
+    )
+    local_session.load_state(save_data)
+    return client, local_session

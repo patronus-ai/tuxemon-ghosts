@@ -24,3 +24,15 @@ def test_headless_context_leaves_pygame_globally_initialized() -> None:
 
     headless_context()
     assert pg.get_init() is True
+
+
+def test_boot_from_save_restores_position_and_party() -> None:
+    from tuxghost.boot import boot_from_save, build_client, snapshot_save
+
+    _client, session = build_client(seed=1234)
+    session.client.event_engine.execute_action("add_monster", ("rockitten", 12))
+    saved = snapshot_save(session)
+
+    _client2, session2 = boot_from_save(saved, seed=1234)
+    assert [m.slug for m in session2.player.monsters] == ["rockitten"]
+    assert session2.player.tile_pos == session.player.tile_pos
