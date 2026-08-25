@@ -90,7 +90,7 @@ Version *1*. Any other value is rejected outright rather than read.
 {
   "format_version": 1,
   "header": {
-    "upstream_commit":      "59a34164f442bee4c436e3f1a5ba9474e29",
+    "upstream_commit":      "59a34164f442ddecbaee4c436e3f1a5ba9474e29",
     "patch_series_id":      "sha256:…",     // which patches were applied
     "mod_id":               "tuxemon",
     "mod_version":          "0.4.35",
