@@ -1,0 +1,19 @@
+diff --git a/tuxemon/prepare.py b/tuxemon/prepare.py
+index 995c89b..c00a6fd 100644
+--- a/tuxemon/prepare.py
++++ b/tuxemon/prepare.py
+@@ -100,9 +100,14 @@ def headless_init() -> DisplayContext:
+ 
+     core_init()
+ 
++    pg.init()
+     pg.display.init()
+     pg.font.init()
+ 
++    # A display mode must exist before any Surface.convert_alpha(), which
++    # every sprite load performs. The dummy driver opens no window.
++    pg.display.set_mode(CONFIG.resolution)
++
+     screen = pg.Surface(CONFIG.resolution)
+     rect = screen.get_rect()
+ 
