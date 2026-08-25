@@ -1,0 +1,262 @@
+#+TITLE: S1 — Deterministic trace core for Tuxemon
+#+DATE: 2026-08-25
+#+STATUS: design, approved in outline; awaiting spec review
+
+* What this is
+
+The foundation subsystem for an agent-evaluation platform built on Tuxemon: a
+*portable trace format plus an offline executor*, such that a run produced by a
+third party replays here and reaches the same state.
+
+Everything else in the project depends on this and nothing here depends on
+them. Explicit non-goals, each its own later spec:
+
+| S2 | CU-agent harness — agent sees pixels, sends keys |
+| S3 | Offline optimizer — agent edits a trace, executor judges it |
+| S4 | Ghost rendering — named translucent replays in the overworld |
+| S5 | Finish lines and rewards — what "the game is done" means |
+
+Also out of scope: a live ~step(action) -> observation~ API.
+
+* Evidence base
+
+Every claim below is measured, not assumed. The measurements and their controls
+are in [[file:../../2026-08-25-determinism-spike.org][docs/2026-08-25-determinism-spike.org]];
+this spec cites results and does not restate the method.
+
+Headline: *Tuxemon's simulation is deterministic given a seed* — verified at
+120000 steps across ~88700 RNG calls, through the intro, a real battle,
+level-ups, experience, winnings and a party faint, across two ~PYTHONHASHSEED~
+values. Three same-seed runs agreed on every gameplay outcome and on RNG call
+count.
+
+Everything that broke reproducibility was an entropy source *outside the seed*,
+and all of them are named and small. That is what makes verify-by-equality
+viable, and this spec assumes it.
+
+* Architecture: thin patch series plus harness
+
+Upstream stays a vendored checkout at =59a3416=. Our changes are a numbered,
+individually justified patch series; everything else is an ordinary Python
+package.
+
+#+begin_example
+patches/     0001..0006, numbered, each with its rationale and its evidence
+tuxemon/     vendored upstream, otherwise untouched
+tuxghost/    trace.py record.py execute.py digest.py compare.py cli.py
+tests/
+docs/
+#+end_example
+
+*Why not a pure harness.* The spike ran entirely by monkeypatching, so a
+harness-only design is demonstrably possible. It is still wrong here: it cannot
+fix ~EventAction~'s wall-clock ~dt~ (patch 0005), it cannot provide a save-based
+start (patch 0006), and monkeypatching a game with 107 RNG call sites is exactly
+the kind of thing that breaks silently under an upstream refactor.
+
+*Why not an open fork.* Tuxemon is actively developed (0.4.35). An unstructured
+fork makes every upstream pull a rebase and progressively hides which changes
+are ours.
+
+Patches 0001–0004 are small and plausibly upstreamable. Tuxemon is GPL-3 and its
+=CONTRIBUTING.md= carries *no* prohibition on AI-assisted contributions, so this
+is a real option rather than a theoretical one.
+
+* The patch series
+
+Each patch is independently revertable, and each has a test that fails when it
+is reverted (see [[*Validation]]).
+
+| # | Patch | Why | Evidence |
+|---+-------+-----+----------|
+| 0001 | =headless_init()=: add ~pg.init()~ and ~pg.display.set_mode()~ | Stock headless cannot load any sprite, so it cannot create the player | =convert_alpha= raises ~No convert format has been set~; ~pygame_menu~ asserts ~pygame.get_init()~ |
+| 0002 | Pass a seed to ~WorldWeatherManager~ at =base_client.py:189= | The only instance-RNG in the codebase; ignores ~random.seed()~ | 152 unseeded ~inst.random~ calls per run |
+| 0003 | Central seeded ~uuid4~ factory | Entity ids draw from OS entropy | Sole differing field across same-seed runs, pre-fix |
+| 0004 | Injectable clock | Wall clock is persisted into game state | =day_of_year=/=hour=/=daytime=; =Battle.timestamp= (=battle.py:33=) |
+| 0005 | Event-action updates on the step clock | ~EventAction.run()~ spins on ~time.perf_counter()~ and never advances the client | =eventaction.py:178=; deadlocks headless; its own docstring admits it may hang |
+| 0006 | Save-based headless entry: load ~SaveData~, push ~WorldState~ | The executor needs a defined start | Stack-unwind bypass broke twice with ~Missing state SinkState~ |
+
+*Patch 0004 is the highest-value one.* It closes three leaks at once
+(=day_of_year=/=hour=, =Battle.timestamp=, session playtime) and is the only
+thing standing between the current state and byte-identical replay. Both times a
+comparison was silently corrupted during the spike, an unpinned clock was the
+cause, and both times every visible outcome looked correct.
+
+* Trace format
+
+Version *1*. Any other value is rejected outright rather than read.
+
+#+begin_src js
+{
+  "format_version": 1,
+  "header": {
+    "upstream_commit":      "59a34164f442bee4c436e3f1a5ba9474e29",
+    "patch_series_id":      "sha256:…",     // which patches were applied
+    "mod_id":               "tuxemon",
+    "mod_version":          "0.4.35",
+    "seed":                 1234,           // ONE master seed
+    "step_rate":            60,             // the existing FIXED_DT = 1/60
+    "clock_epoch":          1787694000,     // REQUIRED; pins all wall clock
+    "initial_state_digest": "sha256:…",
+    "step_count":           120000
+  },
+  "initial_state": { /* the game's own SaveData model */ },
+  "inputs": [ [step, button, value], … ],   // step-indexed, sorted
+  "provenance": {
+    "recorder":        "cu-agent" | "offline-agent" | "human",
+    "model":           "claude-opus-5",
+    "claimed_outcome": "…",
+    "taints":          ["replay_of_replay", …],
+    "recorded_at":     "2026-08-25T15:00:00Z"
+  }
+}
+#+end_src
+
+Three decisions, each forced by a measurement:
+
+*One master seed, not three.* The spike found exactly three entropy sources
+(global ~random~, ~WorldWeatherManager._rng~, ~uuid4~). One seed derives all
+three. Separate seeds would let a trace be "seeded" while one source stayed
+live — which is precisely the state in which the first probe reported nine
+identical hashes and meant nothing.
+
+*=clock_epoch= is required; its absence is a refusal, not a warning.* An
+unpinned clock silently stops reproducing at midnight, and gates day/night map
+events. It corrupted a comparison twice in one afternoon while every gameplay
+outcome looked perfect. A warning would have been ignored both times.
+
+*=initial_state= reuses ~SaveData~.* Upstream's ~InputRecorder~ stores
+={map, x, y, direction}= and cannot describe a world with a party, an inventory
+or story variables. ~SaveData~ already serializes all of it and is
+pydantic-validated. It is also what makes patch 0006 possible: the executor
+starts from a *saved world*, never a state-stack unwind.
+
+*Inputs are ground truth, step-indexed, never wall-clock indexed.*
+~PlayerInput.timestamp~ (which defaults to ~time.time()~) does not enter the
+format. Button identifiers are the virtual-controller constants from
+=tuxemon/platform/const/buttons.py=. Several inputs may share a step.
+
+** Preconditions: refuse versus warn
+
+| Condition | Result |
+|-----------+--------|
+| ~format_version~ ≠ 1 | refuse |
+| ~seed~ missing or non-integer | refuse |
+| ~clock_epoch~ missing | refuse |
+| ~initial_state_digest~ mismatch | refuse |
+| ~mod_version~ mismatch | refuse |
+| ~step_rate~ mismatch | refuse |
+| ~upstream_commit~ differs | warn |
+| ~patch_series_id~ differs | warn |
+| platform differs | warn |
+
+~--allow-trace-mismatch~ downgrades *only* the ~mod_version~ and ~step_rate~
+refusals, and taints provenance with ~trace_mismatch~. It deliberately does not
+touch ~clock_epoch~ or ~initial_state_digest~: silencing a version quibble must
+not also silence the world having changed underneath the trace.
+
+* Executor and CLI
+
+| Command | Behaviour |
+|---------+-----------|
+| ~execute IN [--record OUT]~ | Replay. Takes *no* map, seed or save — all from the header. On its own writes nothing. |
+| ~verify IN~ | Execute and compare against ~IN~ itself, in process: no temp file, no second process. |
+| ~compare A B~ | Out of engine. Reads provenance and reports *findings* — a wall-clock source, a tainted replay, a replay-of-a-replay — none of which is a divergence. |
+| ~record OUT --from-save S~ | Record a session. |
+| ~info IN~ | Header and provenance. |
+
+~verify~ exit codes, which mean different things: *0* every compared field
+matched; *1* at least one differed; *2* refused (a precondition failed, or the
+trace is unrunnable here). ~execute~ and ~verify~ together are refused. Flags
+the header would overwrite are refused at parse time rather than silently
+ignored.
+
+*There is exactly one stepping loop.* It lives in ~tuxghost.execute~, takes
+exactly N steps at ~1/step_rate~, and uses no wall clock and no sleep. Both
+record and execute call it. ~HeadlessClient.main()~ is *not* usable for
+reproducible execution — it derives its accumulator from ~time.time()~ and calls
+~time.sleep(0.001)~. A second stepping loop would fail nothing, so there is not
+one.
+
+* State digest and divergence reporting
+
+The digest is canonical JSON over: map name, tile position, facing, the state
+stack, the player ~NPCState~, ~world_state~, and game variables — sorted keys,
+floats by ~repr~ so no precision is lost.
+
+*The exemption list is a defect register, and its target size is zero.* The
+spike had to exempt ~uuid~/~instance_id~ (closed by patch 0003) and
+~start_time~/~duration~/~total_playtime~ (closed by patch 0004). Once those land
+the list is empty. Every entry that remains must name the defect it is waiting
+on. In particular ~timestamp~ is *not* exempt: patch 0004 makes
+~Battle.timestamp~ deterministic, and exempting it would re-hide the exact bug
+that took a checkpoint bisect to find.
+
+Divergence reporting checkpoints the digest every N steps, bisects to the exact
+step on mismatch, and names the field:
+
+#+begin_example
+diverged at step 10000
+  npc_state.battles[0].timestamp: 1787694198.869361 != 1787694387.998919
+#+end_example
+
+* Validation
+
+Validation is a first-class deliverable here, not a risk footnote — and the
+strategy is shaped by a specific hazard this project has already hit.
+
+*The hazard.* =supertux-ghosts/CLAUDE.md= records that about fifteen assertions
+there passed under the very bug they claimed to cover. This spike reproduced
+that failure mode within its first hour: the original probe reported
+"deterministic" across nine runs, including unseeded ones and three different
+seeds, because its digest captured nothing that changed. A check that cannot
+fail proves nothing.
+
+| Layer | What it pins |
+|-------+--------------|
+| Format units | Schema, version rejection, the refuse/warn matrix, all three exit codes |
+| Determinism property | For K seeds: execute twice, require equality |
+| *Discrimination* | Different seeds must produce *different* digests |
+| *Mutation gates* | For each of patches 0002–0006, a test that *fails when that patch is reverted* |
+| Golden traces | Committed ~.tuxghost~ files with expected digests, re-executed in CI |
+| Round trip | record → execute → record → compare = 0 |
+| Taint | A replay of a replay is reported as a finding, not a divergence |
+| Long horizon | One 120000-step trace, opt-in behind an env var (it takes minutes) |
+
+The two load-bearing rows are already proven feasible rather than aspirational:
+the mutation gate is the seeded-versus-unseeded comparison the spike ran, and
+the discrimination test is the control that exposed the worthless probe.
+
+*Rules.* Every determinism assertion must be demonstrated to fail with its fix
+reverted — mutate, watch it fail, restore, watch it pass, report real values. If
+an assertion cannot be made to discriminate, it is written up as an honest gap
+rather than kept as hollow coverage. No suppressed warnings and no unjustified
+ignores. CI gates block on mypy (strict), lint at zero warnings, and the test
+suite; slow probes are opt-in, never skipped silently.
+
+* Known limitations carried out of the spike
+
+Stated plainly, because the headline number is narrower than it sounds.
+
+- *No run ever exited ~CombatState~.* Capture, evolution, and the battle → world
+  transition are unmeasured. Battles were entered, fought, and rewarded, but
+  never left.
+- *Depth flatters itself.* The measured surface stopped changing after step
+  10000, so the later 110000 steps exercised far less than their count suggests.
+  A multi-hour speedrun remains unproven.
+- *~world_state~ coverage is thin* — serialization yields only
+  ~factions_manager~ and ~menu_flags~. Widening it is in scope for S1, and the
+  widened digest must be shown to discriminate before it is believed.
+- *Patch 0005's hazard never surfaced as divergence.* Wall-clock ~dt~ in event
+  actions is a reasoned risk, not an observed failure. The patch stands on the
+  deadlock, which is observed.
+- *One machine, one OS, one Python* (3.12.13, macOS arm64). Cross-platform
+  reproducibility is unknown and untested.
+
+* Open question deferred
+
+Whether combat is deterministic *through a completed battle transition* is the
+one measurement that could still change this format — if the battle → world exit
+proves nondeterministic, ~verify~ needs a divergence-tolerant mode. Current
+evidence says it will not, since every battle outcome reproduced exactly. The
+first task in the implementation plan closes it.
