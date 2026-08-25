@@ -259,4 +259,6 @@ Whether combat is deterministic *through a completed battle transition* is the
 one measurement that could still change this format — if the battle → world exit
 proves nondeterministic, ~verify~ needs a divergence-tolerant mode. Current
 evidence says it will not, since every battle outcome reproduced exactly. The
-first task in the implementation plan closes it.
+earliest task that technically can — Task 6 of the plan, once the
+scaffold, patch 0001, save-based boot, the stepping loop and the digest exist —
+closes it, before any format code is written.
