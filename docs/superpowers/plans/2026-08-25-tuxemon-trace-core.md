@@ -33,6 +33,7 @@
 - Create: `Makefile`
 - Create: `tuxghost/__init__.py`
 - Create: `tests/__init__.py`
+- Create: `tests/conftest.py`
 - Create: `tests/test_scaffold.py`
 
 **Interfaces:**
@@ -47,6 +48,17 @@ def test_package_imports() -> None:
     import tuxghost
 
     assert tuxghost.__version__ == "0.1.0"
+
+
+def test_tuxemon_submodules_are_importable() -> None:
+    """From the repo root `import tuxemon` yields an EMPTY namespace package
+    (__file__ is None) and every submodule import fails. conftest.py fixes
+    both the path and the working directory; this pins that it stays fixed."""
+    import tuxemon
+    from tuxemon.session import local_session
+
+    assert tuxemon.__file__ is not None
+    assert local_session is not None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -61,6 +73,32 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'tuxghost'`
 """Deterministic trace core for Tuxemon."""
 
 __version__ = "0.1.0"
+```
+
+```python
+# tests/conftest.py
+"""Make the vendored Tuxemon importable and its assets findable.
+
+Two separate problems, both measured:
+  * From the repo root, `import tuxemon` resolves to the clone directory as an
+    empty namespace package -- it imports fine, then every submodule raises
+    ModuleNotFoundError. Putting tuxemon/ on sys.path makes the real package
+    (which has __init__.py) win, since a regular package beats a namespace
+    portion regardless of path order.
+  * Asset loading is relative to the working directory: from the repo root the
+    game dies with "Metadata file missing: 'mods/tuxemon/mod.yaml'".
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+TUXEMON_DIR = Path(__file__).resolve().parent.parent / "tuxemon"
+
+sys.path.insert(0, str(TUXEMON_DIR))
+os.chdir(TUXEMON_DIR)
 ```
 
 ```toml
@@ -91,6 +129,7 @@ target-version = "py312"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: drives a real game loop for minutes; opt-in"]
 ```
 
 ```makefile
@@ -111,7 +150,9 @@ test:
 	PYTHONHASHSEED=0 $(PY) -m pytest -q
 
 slow:
-	PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 $(PY) -m pytest -q -m slow
+	# exit 5 means "no tests collected", which is correct until Task 6 adds
+	# the first slow test. Any other non-zero status is a real failure.
+	PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 $(PY) -m pytest -q -m slow || [ $$? -eq 5 ]
 ```
 
 - [ ] **Step 4: Install dev deps and run the gate**
@@ -1126,6 +1167,7 @@ def _minimal(tmp_path, **overrides):
             "clock_epoch": 1787694000,
             "initial_state_digest": "sha256:def",
             "step_count": 10,
+            "final_digest": "sha256:000",
         },
         "initial_state": {},
         "inputs": [[5, 64, 1.0]],
@@ -1250,6 +1292,7 @@ class TraceHeader(BaseModel):
     clock_epoch: int
     initial_state_digest: str
     step_count: int
+    final_digest: str
 
 
 class Provenance(BaseModel):
@@ -1366,6 +1409,7 @@ def test_recorder_indexes_inputs_by_step_not_arrival_order() -> None:
     assert trace.inputs == [(5, 64, 1.0), (9, 64, 0.0)]
     assert trace.header.step_rate == 60
     assert trace.header.clock_epoch == 1787694000
+    assert trace.header.final_digest, "finish() must record the state reached"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1425,8 +1469,15 @@ class Recorder:
         self._inputs.append((step, button, value))
 
     def finish(self, step_count: int) -> Trace:
+        """Seal the trace, recording the state the run actually reached.
+
+        Without a recorded outcome, `verify` could only prove a trace is
+        reproducible -- not that it still reaches what it originally reached,
+        which is what verification means.
+        """
         import hashlib
 
+        from tuxghost.digest import digest_of
         from tuxghost.loop import STEP_RATE
 
         blob = json.dumps(self._initial, sort_keys=True, separators=(",", ":"))
@@ -1443,6 +1494,7 @@ class Recorder:
                 initial_state_digest="sha256:"
                 + hashlib.sha256(blob.encode()).hexdigest(),
                 step_count=step_count,
+                final_digest=digest_of(self._session),
             ),
             initial_state=self._initial,
             inputs=sorted(self._inputs),
@@ -1639,11 +1691,10 @@ def verify(trace: Trace) -> int:
     0 every compared field matched, 1 at least one differed, 2 refused.
     """
     try:
-        first = execute(trace)
-        second = execute(trace)
+        result = execute(trace)
     except Refused:
         return 2
-    return 0 if first.final_digest == second.final_digest else 1
+    return 0 if result.final_digest == trace.header.final_digest else 1
 ```
 
 - [ ] **Step 5: Run the tests**
@@ -1958,15 +2009,9 @@ print("wrote", out)
 PY
 ```
 
-- [ ] **Step 4: Register the slow marker and run**
+- [ ] **Step 4: Run the golden tests**
 
-Add to `pyproject.toml`:
-
-```toml
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-markers = ["slow: drives a real game loop for minutes; opt-in"]
-```
+The `slow` marker is already registered in `pyproject.toml` from Task 1.
 
 Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_golden.py -v`
 Expected: PASS, 2 tests, 1 skipped.
@@ -1974,7 +2019,7 @@ Expected: PASS, 2 tests, 1 skipped.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/golden tests/test_golden.py pyproject.toml
+git add tests/golden tests/test_golden.py
 git commit -m "test: golden trace with committed digest and opt-in long-horizon probe"
 ```
 
