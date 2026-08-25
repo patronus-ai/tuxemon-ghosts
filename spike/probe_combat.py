@@ -44,6 +44,8 @@ def main() -> int:
     ap.add_argument("--battle-steps", type=int, default=6000)
     ap.add_argument("--trace", action="store_true")
     ap.add_argument("--dump-state", type=Path, default=None)
+    ap.add_argument("--checkpoint", type=int, default=0,
+                    help="digest every N steps into --dump-state.ckpt")
     args = ap.parse_args()
 
     global _UUID_RNG
@@ -68,12 +70,18 @@ def main() -> int:
     ex = client.event_engine.execute_action
 
     # The intro leaves a blocking InputMenu (name entry) that A-mashing cannot
-    # dismiss. Drop every state above WorldState so the world is interactive.
-    while len(client.state_manager.active_states) > 1:
-        top = client.state_manager.active_states[0]
-        if top.name == "WorldState":
-            break
-        client.pop_state()
+    # dismiss. Remove ONLY the input-blocking UI states; SinkState must stay,
+    # because the intro script later runs unlock_controls, which looks it up by
+    # name and raises ValueError("Missing state SinkState") if it is gone.
+    BLOCKING = {"DialogState", "InputMenu", "ChoiceState"}
+    for st_name in [x.name for x in client.state_manager.active_states]:
+        if st_name in BLOCKING:
+            try:
+                client.remove_state_by_name(st_name)
+            except Exception as e:
+                if args.trace:
+                    print(f"  could not remove {st_name}: {e}",
+                          file=sys.stderr, flush=True)
     if args.trace:
         print(f"stack after unwind: {stack(client)}", file=sys.stderr, flush=True)
 
@@ -100,14 +108,28 @@ def main() -> int:
               f"stack={stack(client)}", file=sys.stderr, flush=True)
 
     # drive the combat menus
-    install_input_schedule(client, mash(buttons.A, start=0, count=1200, period=5))
-    seen, combat_steps = set(), 0
+    install_input_schedule(client, mash(buttons.A, start=0,
+                                   count=args.battle_steps // 5 + 2, period=5))
+    seen, combat_steps, ended_at = set(), 0, None
+    was_in = False
+    ckpts = []
     for i in range(args.battle_steps):
         client.update(1/60.0)
         st = stack(client)
         seen.update(st)
         if "CombatState" in st:
             combat_steps += 1
+            was_in = True
+        elif was_in and ended_at is None:
+            ended_at = i
+            if args.trace:
+                print(f"  COMBAT ENDED at step {i}: {st}",
+                      file=sys.stderr, flush=True)
+            break
+        if args.checkpoint and i and i % args.checkpoint == 0:
+            _d = digest_state(session)
+            _b = json.dumps(_d, sort_keys=True, separators=(",", ":"))
+            ckpts.append((i, hashlib.sha256(_b.encode()).hexdigest()[:16]))
         if args.trace and i % 200 == 0:
             print(f"  step {i:5d} t={_t.time()-_t0:6.1f}s: {st}",
                   file=sys.stderr, flush=True)
@@ -115,11 +137,18 @@ def main() -> int:
     d = digest_state(session)
     if args.dump_state:
         args.dump_state.write_text(json.dumps(d, indent=2, sort_keys=True))
+        if ckpts:
+            Path(str(args.dump_state) + ".ckpt").write_text(
+                "\n".join(f"{i}\t{h}" for i, h in ckpts))
     blob = json.dumps(d, sort_keys=True, separators=(",", ":"))
     print(json.dumps({
         "label": args.label, "seed": args.seed,
         "techs": techs,
         "combat_entered": "CombatState" in seen,
+        "combat_ended_at": ended_at,
+        "levels": [m.get("level") for m in d["npc_state"]["monsters"]],
+        "exp": [m.get("total_experience") for m in d["npc_state"]["monsters"]],
+        "money": d["npc_state"]["money"]["money"],
         "combat_steps": combat_steps,
         "rng_battle": len(CALLS) - pre,
         "rng_seq_sha": hashlib.sha256("\n".join(CALLS).encode()).hexdigest()[:16],

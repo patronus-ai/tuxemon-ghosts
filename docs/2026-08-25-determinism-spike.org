@@ -183,6 +183,57 @@ in the crude bypass, not evidence of nondeterminism — but it does mean *the re
 executor needs a principled way to start from a defined world*, not a stack
 unwind. Loading a save is the obvious answer.
 
+* Gate 3 — depth: 120000 steps, and the last leak
+
+Extending to 120000 steps (~33 minutes of game time) drives the *post-battle
+reward path*: monsters level up (12→13, 10→14), experience accrues
+([2240, 3197]), battle winnings pay out (money 500→733), and one party member
+faints. ~88,700 RNG calls, versus 109 at 20000 steps.
+
+At that depth the state hash *stopped matching* across same-seed runs, while
+every gameplay-visible outcome stayed identical:
+
+| label | seed | RNG calls | state_sha    | HP       | levels   | exp          | money |
+|-------+------+-----------+--------------+----------+----------+--------------+-------|
+| E2    | 1234 |     88671 | =fbe3580c…= | [0, 82]  | [13, 14] | [2240, 3197] |   733 |
+| E3    | 1234 |     88671 | =ba3a955d…= | [0, 82]  | [13, 14] | [2240, 3197] |   733 |
+| EH9   | 1234 |     88671 | =47b4244e…= | [0, 82]  | [13, 14] | [2240, 3197] |   733 |
+| E7    |    7 |     92296 | =624d3809…= | [41, 69] | [16, 10] | [4787, 1000] |   765 |
+
+Rather than guess, two same-seed runs were re-run with the digest checkpointed
+every 10000 steps and full state dumped at the end.
+
+** The whole divergence is one field
+
+: 22c22
+: <   "timestamp": "1787694198.869361"
+: ---
+: >   "timestamp": "1787694387.998919"
+
+*Two lines of diff across the entire state.* The values differ by ~189 seconds —
+exactly the wall-clock gap between two sequential runs. The source is
+=tuxemon/battle.py:33=:
+
+: self.timestamp: float = time.time()
+
+Every completed battle is persisted into =npc_state.battles= carrying a
+wall-clock reading. At 20000 steps no battle had *finished*, so =battles= was
+empty and the hash matched; at 120000 steps battles complete and the leak
+appears.
+
+The checkpoint series shows the digest is *constant from step 10000 through
+110000* inside each run, and already divergent at the first checkpoint. This was
+never a slow drift — it is one field stamped once, early.
+
+** Verdict
+
+*The simulation is deterministic at 120000 steps across ~88700 RNG calls.* Three
+same-seed runs agreed on every gameplay outcome and on the RNG call count, and
+differed only in a persisted clock reading. This is the third wall-clock leak
+found (after =day_of_year= / =hour=), and it is the second time an unpinned
+clock silently corrupted a comparison — which is the argument for treating a
+missing clock pin as a *refusal* rather than a warning.
+
 * Finding 3: wall-clock leaks into game state (real, NOT fixed here)
 
 =time_handler.py= writes real date and time into game variables. Observed in a
@@ -218,15 +269,19 @@ Stated plainly, because the headline number is narrower than it looks.
 
 - ~=Combat was never entered=~ — *closed*, see
   [[*Gate 2 — determinism through an actual battle]]. Combat is deterministic.
-- *No battle was ever fought to completion.* All combat runs ended with
-  =CombatState= still on the stack. Victory, defeat, capture, level-up,
-  evolution and the post-battle reward path are all unmeasured.
+- ~=No battle was ever fought to completion=~ — *partly closed*. Level-up,
+  experience, battle winnings and a party faint are all now exercised and
+  reproduce exactly (see [[*Gate 3 — depth: 120000 steps, and the last leak]]).
+  Still unmeasured: capture, evolution, and a clean exit from =CombatState=
+  back to the world — no run left combat.
 - *The digest covers a partial surface*: player NPC state (30 fields, including
   monsters, items, money, game_variables), =world_state= (only
   =factions_manager= and =menu_flags=), map, tile_pos, facing, state stack. It
   does *not* cover weather state, non-player NPC state, or combat internals.
-- *Long horizons untested.* Longest run was 4000 steps (~67 s of game time).
-  Nothing here says a multi-hour speedrun stays in sync.
+- *Long horizons partly tested.* Longest run is now 120000 steps (~33 min of
+  game time). A multi-hour speedrun is still unproven, and note that the
+  measured surface stopped changing after step 10000, so those later steps
+  tested far less than their count suggests.
 - *One machine, one OS, one Python* (3.12.13, macOS arm64). Cross-platform
   reproducibility is unknown.
 
@@ -237,8 +292,11 @@ available* — the evidence supports it. Concretely:
 
 1. Pass a seed to =WorldWeatherManager= and route =uuid4()= through a seeded
    factory. Both are small and upstream-shaped.
-2. Add an injectable clock before anything else records a trace, or every trace
-   silently expires at midnight.
+2. Add an injectable clock before anything else records a trace. This is now
+   the single highest-value fix: it closes =day_of_year= / =hour=,
+   =Battle.timestamp=, and the session playtime fields in one move, and it is
+   the *only* thing standing between the current state and byte-identical
+   replay.
 3. Make the trace step-indexed and give it a real initial state (the save system
    already serializes one — reuse =SaveData= rather than inventing a format).
 4. ~=Re-run this probe through a real battle=~ — *done*. Combat is
