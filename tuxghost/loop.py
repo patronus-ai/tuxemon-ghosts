@@ -44,7 +44,12 @@ def install_schedule(client: Any, schedule: InputSchedule) -> None:
 
     def process_events() -> Iterator[Any]:
         for button, value in schedule.get(state["step"], []):
-            event = PlayerInput(button, value, 1 if value else 0)
+            # `timestamp` defaults to `time.time()` upstream (a falsy
+            # check would have been overridden by 0.0; the constructor
+            # uses `is not None`, so 0.0 sticks). Inputs are ground truth
+            # and step-indexed -- no wall clock may leak into them, or a
+            # trace stops being a pure function of (schedule, step).
+            event = PlayerInput(button, value, 1 if value else 0, timestamp=0.0)
             event.triggered = bool(value)
             yield event
         state["step"] += 1
