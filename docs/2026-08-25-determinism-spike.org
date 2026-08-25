@@ -12,7 +12,9 @@ The answer decides whether the eval platform can ~verify~ by equality (the
 
 *Answer: yes, byte-identical replay is achievable, and it is cheap.* Two small
 defects block it today; a third (wall-clock leakage) is real but unaddressed by
-this probe. Everything measured is scoped in [[*What was NOT measured]].
+this probe. *Combat determinism has since been verified* — see
+[[*Gate 2 — determinism through an actual battle]]. Everything measured is scoped
+in [[*What was NOT measured]].
 
 Upstream is at =59a3416= and *was not modified*. Every fix below was applied by
 external monkeypatching from =spike/=, so the numbers describe stock Tuxemon.
@@ -104,6 +106,83 @@ every time, seeded or not. Only the values varied. Tuxemon's control flow does
 not branch on wall clock in the paths exercised, which is why seeding alone is
 sufficient rather than needing an execution-order rewrite.
 
+* Gate 2 — determinism through an actual battle
+
+The first pass of this spike could not enter combat, so combat determinism was
+reported as unverified. It has now been measured, and it holds.
+
+** Getting into a battle headless takes three non-obvious steps
+
+1. *Unwind the intro.* The opening sequence on =start_tuxemon.tmx= leaves a
+   blocking =InputMenu= (player-name text entry) that A-mashing cannot dismiss.
+   While it is up the world never becomes interactive.
+2. *Set an environment.* =RandomBattleAction._start_battle= returns early when
+   =environment_manager.get_active_environment()= is =None=. It reports this via
+   =logger.error=, so with logging unconfigured *the battle refuses in total
+   silence*. =set_environment grass= fixes it.
+3. *Invoke with =skip=True=.* See the deadlock below.
+
+** =EventAction.run()= is a wall-clock spin loop (determinism hazard)
+
+Calling =execute_action("random_battle", ...)= normally *hangs headless
+forever*. =eventaction.py:178= is:
+
+: while not self.done and not self.cancelled:
+:     now = time.perf_counter()
+:     dt = now - last_time
+:     self.update(session, dt)
+
+It never advances the client, so =CombatState= cannot progress and the action
+can never finish. Its own docstring admits it "may cause the game to hang if an
+action is waiting on game changes."
+
+Two consequences for S1, and the second is the important one:
+
+- Probes must pass =skip=True= (runs =start()=, no spin).
+- *Every non-instant event action is driven by wall-clock =dt= from
+  =time.perf_counter()=, outside the fixed-timestep loop.* The fixed 1/60 tick
+  in =HeadlessClient.main()= does not govern action updates at all. Any action
+  whose behaviour depends on =dt= is machine-speed dependent. This did not
+  surface as divergence in the runs below, but it is a live hazard and S1 should
+  route action updates through the same step clock.
+
+** Result: combat is deterministic
+
+2000 steps, battle in progress, real damage dealt:
+
+| label | seed | PYTHONHASHSEED | rng in battle | state_sha          | party HP |
+|-------+------+----------------+---------------+--------------------+----------|
+| K1    | 1234 |              0 |            49 | =271508d5b6ffcca9= | [90, 75] |
+| K2    | 1234 |              0 |            49 | =271508d5b6ffcca9= | [90, 75] |
+| K3    | 1234 |              0 |            49 | =271508d5b6ffcca9= | [90, 75] |
+| KH5   | 1234 |              5 |            49 | =271508d5b6ffcca9= | [90, 75] |
+| K7    |    7 |              0 |            53 | =b0d9c5ca2b07c6b3= | [75, 69] |
+| K99   |   99 |              0 |            43 | =dbf4627cae949316= | [31, 70] |
+
+Note the *RNG call counts differ across seeds* (49 / 53 / 43). Unlike the
+walking route, combat control flow genuinely branches on RNG — which is exactly
+why this was the gap worth closing. The digest discriminates strongly: three
+different damage outcomes.
+
+Extending to 20000 steps (~5.5 minutes of game time, 109 combat RNG calls):
+
+| label | seed | state_sha          | party HP |
+|-------+------+--------------------+----------|
+| L1    | 1234 | =d0afa92bc336c237= | [23, 75] |
+| L2    | 1234 | =d0afa92bc336c237= | [23, 75] |
+
+Byte-identical.
+
+** One probe artifact, not a game defect
+
+The 20000-step run at seed 7 crashed with
+~ValueError: Missing state SinkState~. The probe's intro bypass pops *every*
+state above =WorldState=, including =SinkState=, which a later action expects.
+Seed 7 takes a different combat path and reaches that action. This is a defect
+in the crude bypass, not evidence of nondeterminism — but it does mean *the real
+executor needs a principled way to start from a defined world*, not a stack
+unwind. Loading a save is the obvious answer.
+
 * Finding 3: wall-clock leaks into game state (real, NOT fixed here)
 
 =time_handler.py= writes real date and time into game variables. Observed in a
@@ -137,11 +216,11 @@ rather than reusing the upstream playback path.
 
 Stated plainly, because the headline number is narrower than it looks.
 
-- *Combat was never entered.* The forced =random_battle= generated an opponent
-  party (30 RNG calls) but the stack never contained a =CombatState= — the
-  battle did not start. *Determinism through an actual battle is unverified*,
-  and battles are where most of the 107 =random.= sites live. This is the top
-  follow-up.
+- ~=Combat was never entered=~ — *closed*, see
+  [[*Gate 2 — determinism through an actual battle]]. Combat is deterministic.
+- *No battle was ever fought to completion.* All combat runs ended with
+  =CombatState= still on the stack. Victory, defeat, capture, level-up,
+  evolution and the post-battle reward path are all unmeasured.
 - *The digest covers a partial surface*: player NPC state (30 fields, including
   monsters, items, money, game_variables), =world_state= (only
   =factions_manager= and =menu_flags=), map, tile_pos, facing, state stack. It
@@ -162,9 +241,13 @@ available* — the evidence supports it. Concretely:
    silently expires at midnight.
 3. Make the trace step-indexed and give it a real initial state (the save system
    already serializes one — reuse =SaveData= rather than inventing a format).
-4. *Before committing to the format*, re-run this probe through a real battle.
-   If combat proves nondeterministic, the format needs a divergence-tolerant
-   comparison mode and that is a format decision, not a later patch.
+4. ~=Re-run this probe through a real battle=~ — *done*. Combat is
+   deterministic; verify-by-equality survives contact with the stochastic part
+   of the game. The format does not need a divergence-tolerant comparison mode
+   on combat's account.
+5. Route event-action updates through the step clock rather than
+   =time.perf_counter()=, and give the executor a save-based start rather than a
+   state-stack unwind.
 
 * Reproducing
 
@@ -177,4 +260,10 @@ PYTHONHASHSEED=0 ../.venv/bin/python ../spike/probe_battle.py \
 
 =probe_determinism.py= is the base harness (headless bootstrap, step-indexed
 input schedule, state digest); =probe_rng.py= counts and dumps RNG calls;
-=probe_battle.py= adds the weather/uuid seeding and party generation.
+=probe_battle.py= adds the weather/uuid seeding and party generation;
+=probe_combat.py= drives a real =CombatState=:
+
+#+begin_src bash
+PYTHONHASHSEED=0 ../.venv/bin/python ../spike/probe_combat.py \
+    --seed 1234 --label K1 --battle-steps 20000 --trace
+#+end_src
