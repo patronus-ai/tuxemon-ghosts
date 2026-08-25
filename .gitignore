@@ -1,0 +1,6 @@
+tuxemon/
+.venv/
+clone.log
+*.pyc
+__pycache__/
+spike/_p.py
