@@ -4,9 +4,13 @@ Refuse/warn matrix (see the module docstring on `tuxghost.trace`):
   * `format_version` mismatch -- refuse, not downgradable.
   * `header.seed` / `header.clock_epoch` missing -- refuse, not
     downgradable by `allow_mismatch`.
+  * `header.initial_state_digest` mismatch -- refuse, not downgradable by
+    `allow_mismatch`.
   * `header.mod_version` / `header.step_rate` mismatch -- refuse, but
     `allow_mismatch` downgrades it to a taint.
   * `header.upstream_commit` mismatch -- warn, never refuse.
+  * `header.patch_series_id` mismatch -- warn, never refuse.
+  * `header.platform` mismatch -- warn, never refuse.
 """
 
 from __future__ import annotations
@@ -17,7 +21,21 @@ from typing import Any
 
 import pytest
 
-from tuxghost.trace import FORMAT_VERSION, Refused, read, write
+from tuxghost.trace import (
+    FORMAT_VERSION,
+    THIS_PLATFORM,
+    Refused,
+    digest_of_initial_state,
+    patch_series_id,
+    read,
+    write,
+)
+
+#: `_minimal`'s default `initial_state` is `{}`; its default
+#: `initial_state_digest` must be the REAL digest of that value, not a
+#: placeholder, or every test that doesn't touch initial_state would
+#: spuriously refuse now that `read()` verifies it.
+_EMPTY_STATE_DIGEST = digest_of_initial_state({})
 
 
 def _minimal(tmp_path: Path, **overrides: Any) -> Path:
@@ -25,13 +43,17 @@ def _minimal(tmp_path: Path, **overrides: Any) -> Path:
         "format_version": FORMAT_VERSION,
         "header": {
             "upstream_commit": "59a34164f442ddecbaee4c436e3f1a5ba9474e29",
-            "patch_series_id": "sha256:abc",
+            # Real, current values -- not placeholders -- so that tests
+            # which don't target patch_series_id/platform don't spuriously
+            # warn now that `read()` compares both against this build.
+            "patch_series_id": patch_series_id(),
+            "platform": THIS_PLATFORM,
             "mod_id": "tuxemon",
             "mod_version": "0.4.35",
             "seed": 1234,
             "step_rate": 60,
             "clock_epoch": 1787694000,
-            "initial_state_digest": "sha256:def",
+            "initial_state_digest": _EMPTY_STATE_DIGEST,
             "step_count": 10,
             "final_digest": "sha256:000",
         },
@@ -187,3 +209,124 @@ def test_round_trips(tmp_path: Path) -> None:
     out = tmp_path / "out.tuxghost"
     write(trace, out)
     assert read(out).header == trace.header
+
+
+# --- initial_state_digest: REFUSE, not downgradable (task 11) --------------
+#
+# Task 10 could not implement this row: it needs a real `initial_state` and
+# a real digest of it, which only the recorder (task 11) produces. Flagged
+# explicitly by task 10's reviewer so it would not fall through the gap.
+
+
+def test_initial_state_digest_mismatch_refuses(tmp_path: Path) -> None:
+    """The world changed underneath the trace (hand-edited or corrupted
+    initial_state) -- not a version quibble, so this refuses."""
+    path = _minimal(tmp_path, initial_state={"player": {"tile_pos": [1, 1]}})
+    with pytest.raises(Refused, match="initial_state_digest"):
+        read(path)
+
+
+def test_allow_mismatch_does_not_downgrade_initial_state_digest(
+    tmp_path: Path,
+) -> None:
+    """Same rule as seed/clock_epoch: `allow_mismatch` silences version
+    quibbles, not the recorded state having changed underneath the trace.
+    Must STAY refused with the flag set."""
+    path = _minimal(tmp_path, initial_state={"player": {"tile_pos": [1, 1]}})
+    with pytest.raises(Refused, match="initial_state_digest"):
+        read(path, allow_mismatch=True)
+
+
+def test_matching_initial_state_digest_does_not_refuse(
+    tmp_path: Path,
+) -> None:
+    """Positive control: a correctly-digested initial_state must read fine,
+    otherwise the two refusal tests above could pass even if `read` refused
+    unconditionally."""
+    state = {"player": {"tile_pos": [1, 1]}}
+    path = _minimal(
+        tmp_path,
+        initial_state=state,
+        header={
+            "upstream_commit": "59a34164f442ddecbaee4c436e3f1a5ba9474e29",
+            "patch_series_id": patch_series_id(),
+            "platform": THIS_PLATFORM,
+            "mod_id": "tuxemon",
+            "mod_version": "0.4.35",
+            "seed": 1234,
+            "step_rate": 60,
+            "clock_epoch": 1787694000,
+            "initial_state_digest": digest_of_initial_state(state),
+            "step_count": 10,
+            "final_digest": "sha256:000",
+        },
+    )
+    trace = read(path)
+    assert trace.initial_state == state
+
+
+# --- patch_series_id / platform: WARN, never refuse (task 11) --------------
+#
+# Same gap as above: task 10's brief said "Consumes: nothing", so it could
+# not compute "this build's" patch_series_id or platform to compare
+# against. Both rows must be OBSERVABLE by a test (pytest.warns / recwarn),
+# not merely non-fatal -- an earlier draft of this plan shipped refusals
+# with the warn half silently accepting.
+
+
+def test_differing_patch_series_id_warns_rather_than_refuses(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    path = _minimal(tmp_path)
+    data = json.loads(path.read_text())
+    data["header"]["patch_series_id"] = "sha256:" + "0" * 64
+    path.write_text(json.dumps(data))
+
+    trace = read(path)
+    assert trace.header.patch_series_id == "sha256:" + "0" * 64
+    assert any("patch_series_id" in str(w.message) for w in recwarn)
+
+
+def test_matching_patch_series_id_does_not_warn(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    """Positive control for the warn test above."""
+    read(_minimal(tmp_path))
+    assert not any("patch_series_id" in str(w.message) for w in recwarn)
+
+
+def test_differing_platform_warns_rather_than_refuses(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    path = _minimal(tmp_path)
+    data = json.loads(path.read_text())
+    data["header"]["platform"] = "some-other-platform"
+    path.write_text(json.dumps(data))
+
+    trace = read(path)
+    assert trace.header.platform == "some-other-platform"
+    assert any("platform" in str(w.message) for w in recwarn)
+
+
+def test_matching_platform_does_not_warn(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    """Positive control for the warn test above."""
+    read(_minimal(tmp_path))
+    assert not any("platform" in str(w.message) for w in recwarn)
+
+
+def test_patch_series_id_and_platform_mismatches_do_not_taint(
+    tmp_path: Path,
+) -> None:
+    """Warn-only rows must not join the downgradable set: a mismatch here
+    must never add "trace_mismatch" to taints, since nothing was
+    downgraded -- there was never a refusal to downgrade."""
+    path = _minimal(tmp_path)
+    data = json.loads(path.read_text())
+    data["header"]["patch_series_id"] = "sha256:" + "0" * 64
+    data["header"]["platform"] = "some-other-platform"
+    path.write_text(json.dumps(data))
+
+    trace = read(path, allow_mismatch=True)
+    assert trace.provenance.taints == []

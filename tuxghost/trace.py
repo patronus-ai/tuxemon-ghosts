@@ -10,17 +10,32 @@ Refuse/warn matrix (see `read`):
     downgradable by `allow_mismatch`: an unpinned clock or seed produces a
     silently wrong comparison, not a version quibble (see the docstring on
     `TraceHeader.clock_epoch`).
+  * `header.initial_state_digest` mismatch (recomputed from `initial_state`
+    itself) -- always refuse. Not downgradable by `allow_mismatch`, for the
+    same reason as seed/clock_epoch: this is the recorded state having
+    changed underneath the trace (hand-edited or corrupted), not a version
+    quibble.
   * `header.mod_version` / `header.step_rate` mismatch -- refuse unless
     `allow_mismatch` is set, in which case the trace is read and
     `"trace_mismatch"` is appended to `Provenance.taints`.
   * `header.upstream_commit` mismatch -- never refuses. Always emits a
     `UserWarning` naming both commits and reads the trace regardless of
     `allow_mismatch`.
+  * `header.patch_series_id` mismatch -- never refuses. Always emits a
+    `UserWarning` naming both ids and reads the trace regardless of
+    `allow_mismatch`.
+  * `header.platform` mismatch -- never refuses. Always emits a
+    `UserWarning` naming both platforms and reads the trace regardless of
+    `allow_mismatch`. Cross-platform replay is unmeasured (one machine, one
+    OS, one Python were ever exercised) so this is informational, not a
+    correctness claim either way.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import platform
 import warnings
 from pathlib import Path
 from typing import Any, Literal
@@ -34,9 +49,39 @@ FORMAT_VERSION = 1
 THIS_UPSTREAM_COMMIT = "59a34164f442ddecbaee4c436e3f1a5ba9474e29"
 THIS_MOD_VERSION = "0.4.35"
 THIS_STEP_RATE = 60
+#: OS/arch/Python this reader is running on (`platform.platform()`).
+#: Informational only -- see the module docstring's `platform` row.
+THIS_PLATFORM = platform.platform()
+
+#: The directory holding the applied patch series (0001..0006 as of this
+#: writing). `patch_series_id()` digests it so a trace records which
+#: engine build it was produced against.
+PATCHES_DIR = Path(__file__).resolve().parent.parent / "patches"
 
 #: Refused outright: reading on would produce a silently wrong comparison.
 _REFUSE_IF_MISSING = ("seed", "clock_epoch")
+
+
+def patch_series_id() -> str:
+    """Digest of the currently applied patch series (the files in
+    `patches/`), so a trace records which engine build it was produced
+    against. Lives here, not in `tuxghost.record`, so the recorder (which
+    writes it) and `read()` (which compares against it) can never drift
+    apart by computing it two different ways."""
+    digest = hashlib.sha256()
+    for patch in sorted(PATCHES_DIR.glob("*.patch")):
+        digest.update(patch.name.encode())
+        digest.update(patch.read_bytes())
+    return "sha256:" + digest.hexdigest()
+
+
+def digest_of_initial_state(initial_state: dict[str, Any]) -> str:
+    """Digest over a trace's `initial_state`, written by the recorder when a
+    trace is sealed and reverified by `read()` on every load. This proves
+    the trace being read is the same bytes the recorder produced -- not
+    downgradable by `allow_mismatch` (see the module docstring)."""
+    blob = json.dumps(initial_state, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(blob.encode()).hexdigest()
 
 
 class Refused(Exception):
@@ -46,6 +91,11 @@ class Refused(Exception):
 class TraceHeader(BaseModel):
     upstream_commit: str
     patch_series_id: str
+    #: The OS/arch/Python build the trace was recorded on
+    #: (`platform.platform()`). Mirrors `upstream_commit`: informational
+    #: only, `read()` warns on a mismatch and never refuses. Never affects
+    #: execution.
+    platform: str
     mod_id: str
     mod_version: str
     seed: int
@@ -108,6 +158,22 @@ def read(path: Path, allow_mismatch: bool = False) -> Trace:
                 f"silence the world changing underneath the trace."
             )
 
+    # Not downgradable, same reasoning as seed/clock_epoch above: this is
+    # the recorded state having changed underneath the trace (hand-edited
+    # or corrupted), not a version quibble allow_mismatch is meant to paper
+    # over.
+    initial_state = raw.get("initial_state", {})
+    recorded_digest = header.get("initial_state_digest")
+    actual_digest = digest_of_initial_state(initial_state)
+    if recorded_digest != actual_digest:
+        raise Refused(
+            f"header.initial_state_digest is {recorded_digest!r}, but "
+            f"initial_state recomputes to {actual_digest!r}. allow_mismatch "
+            f"does not downgrade this: silencing a version quibble must not "
+            f"also silence the recorded state having changed underneath the "
+            f"trace."
+        )
+
     # Refusals that allow_mismatch may downgrade -- a version quibble, not a
     # changed world.
     downgradable: dict[str, tuple[Any, Any]] = {
@@ -130,6 +196,21 @@ def read(path: Path, allow_mismatch: bool = False) -> Trace:
         warnings.warn(
             f"upstream_commit {header.get('upstream_commit')!r} differs from "
             f"this build {THIS_UPSTREAM_COMMIT!r}",
+            stacklevel=2,
+        )
+
+    current_patch_series_id = patch_series_id()
+    if header.get("patch_series_id") != current_patch_series_id:
+        warnings.warn(
+            f"patch_series_id {header.get('patch_series_id')!r} differs "
+            f"from this build {current_patch_series_id!r}",
+            stacklevel=2,
+        )
+
+    if header.get("platform") != THIS_PLATFORM:
+        warnings.warn(
+            f"platform {header.get('platform')!r} differs from this build "
+            f"{THIS_PLATFORM!r}",
             stacklevel=2,
         )
 
