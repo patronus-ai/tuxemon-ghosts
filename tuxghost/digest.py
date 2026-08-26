@@ -84,8 +84,49 @@ def _canonical(obj: Any, path: str = "") -> Any:
 
 
 def state_of(session: Any) -> dict[str, Any]:
-    """Snapshot the comparable game state via the game's own serialisation."""
+    """Snapshot the comparable game state via the game's own serialisation.
+
+    Covers `npc_state` (the player) and `world_state`, plus
+    `persistent_npc_state` -- every OTHER npc the save system considers
+    persistent (`NPCManager.get_persistent_npc_states`, the same call
+    `save_system.save.get_save_data` makes to populate
+    `SaveData.persistent_state`). Task 12 found this tree entirely absent
+    from an earlier version of this function: NPC position/AI divergence
+    among non-player characters was invisible to `verify`, discovered by
+    moving a persistent NPC via `entity.Entity.set_position` and observing
+    the pre-widening digest not move (`tests/test_digest.py
+    ::test_widened_digest_discriminates_persistent_npc_state`, which pins
+    the old, blind behaviour as a regression test against reintroducing
+    it). Not left as a documented limit: the fix is a direct parallel of
+    the existing `npc_state`/`world_state` pattern (call the game's own
+    `get_state`, canonicalize, hash) rather than new introspection, and
+    the fix DOES discriminate -- see that test.
+
+    `state_stack` remains a KNOWN, DOCUMENTED gap, deliberately not
+    widened here: it records only state NAMES
+    (`session.client.state_manager.active_states`), so a `CombatState`
+    with a different turn count or a different opponent's HP is invisible
+    to `verify` except indirectly, through the player's own party's HP
+    (which IS covered, via `npc_state.monsters`). `CombatState`
+    (`tuxemon/states/combat_state.py`, ~1300 lines) holds its live turn/
+    battle bookkeeping on plain Python attributes alongside sprites,
+    animations and other non-JSON-serializable objects with no existing
+    `get_state()`-style serializer of its own (unlike NPC/World, which
+    upstream already round-trips through `SaveData`) -- there is no
+    established, low-risk seam to hook the way `persistent_npc_state`
+    above hooks one. Widening it would mean hand-picking and serializing
+    specific `CombatState` internals, which is real engine-shaped work
+    outside a pure-Python task, and an unvetted subset chosen under time
+    pressure risks exactly the "worthless probe" failure mode this project
+    has already hit once (`tests/test_digest.py`'s
+    `test_digest_discriminates_between_seeds` docstring): a widened digest
+    that looks more thorough but has not been proven to discriminate is
+    worse than a narrow one that has. See `tuxghost.execute`'s module
+    docstring for what a `verify() == 0` result does and does not certify
+    as a consequence.
+    """
     player = session.player
+    persistent_npcs = session.client.npc_manager.get_persistent_npc_states(session)
     state: dict[str, Any] = {
         "map": session.client.get_map_name(),
         "tile_pos": list(player.tile_pos),
@@ -98,6 +139,10 @@ def state_of(session: Any) -> dict[str, Any]:
         "world_state": _canonical(
             json.loads(session.world.get_state(session).model_dump_json()),
             path="world_state",
+        ),
+        "persistent_npc_state": _canonical(
+            [json.loads(npc.model_dump_json()) for npc in persistent_npcs],
+            path="persistent_npc_state",
         ),
     }
     return state

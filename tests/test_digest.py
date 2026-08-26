@@ -205,3 +205,62 @@ def test_state_of_is_not_blind_to_the_state_stack() -> None:
     _client, session = build_client(seed=1234)
     state = state_of(session)
     assert state["state_stack"], "state_stack must be present and non-empty"
+
+
+def _spawn_persistent_npc(session: Any) -> Any:
+    """Create an NPC via the real `create_npc` event action, then mark it
+    persistent by hand: no NPC in this mod's data ships `persistence:
+    true` (checked directly against `mods/tuxemon/db/npc/*.yaml`), so
+    there is no existing in-mod route that reaches
+    `NPCManager.get_persistent_npc_states` at all. Flipping the flag after
+    creation exercises the real `NPCManager`/`NPCState` serialization path
+    task 12 wired into `state_of` -- it does not fabricate that path."""
+    session.client.event_engine.execute_action("create_npc", ("bob", 5, 5, None))
+    npc = session.client.npc_manager.get_npc("bob")
+    assert npc is not None
+    npc.persistence = True
+    return npc
+
+
+def test_widened_digest_discriminates_persistent_npc_state() -> None:
+    """Task 12's gap-closure: before this task, `state_of` never read
+    `NPCManager.get_persistent_npc_states` at all, so moving a persistent
+    (non-player) NPC was invisible to `digest_of` -- exactly the coverage
+    hole the task brief flagged. Move the same freshly-spawned NPC and
+    require the digest to change; a `state_of` that regresses back to
+    ignoring `persistent_npc_state` would make this vacuous, so also pin
+    the field's raw presence and content directly rather than only via the
+    end-to-end hash."""
+    _client, session = build_client(seed=1234)
+    npc = _spawn_persistent_npc(session)
+
+    before_state = state_of(session)
+    before_digest = digest_of(session)
+    assert before_state["persistent_npc_state"], (
+        "persistent_npc_state must be present and non-empty once a "
+        "persistent NPC exists"
+    )
+
+    npc.set_position((9, 9))
+    after_state = state_of(session)
+    after_digest = digest_of(session)
+
+    assert before_state["persistent_npc_state"] != after_state["persistent_npc_state"]
+    assert before_digest != after_digest
+
+
+def test_persistent_npc_digest_is_stable_for_one_seed() -> None:
+    """Companion stability control for the discrimination test above --
+    per the project's process rule, a cross-run *difference* assertion
+    alone cannot prove `persistent_npc_state` measures something real
+    rather than something incidentally noisy (e.g. dict/set iteration
+    order in `NPCManager`); only a same-seed *equality* check on the same
+    route can."""
+
+    def run_with_persistent_npc() -> str:
+        _client, session = build_client(seed=1234)
+        npc = _spawn_persistent_npc(session)
+        npc.set_position((9, 9))
+        return digest_of(session)
+
+    assert run_with_persistent_npc() == run_with_persistent_npc()
