@@ -144,13 +144,21 @@ def _resolve_paths(args: argparse.Namespace) -> None:
 
 def _read_trace_or_refuse(path: Path, allow_mismatch: bool) -> Trace | None:
     """Read a trace, mapping every way that can fail -- a missing or
-    unreadable file, malformed JSON, or `tuxghost.trace.read`'s own
-    refusal matrix -- to a single outcome: print `refused: ...` to stderr
-    and return `None`. Callers return 2 immediately when this returns
-    `None`. `OSError` (covering `FileNotFoundError`, `PermissionError`,
-    `IsADirectoryError`, ...) is caught explicitly here so a missing trace
-    file maps to exit 2, never the uncaught-exception exit 1 Python would
-    otherwise produce -- see the module docstring."""
+    unreadable file, malformed JSON, a structurally malformed trace, or
+    `tuxghost.trace.read`'s own refusal matrix -- to a single outcome:
+    print `refused: ...` to stderr and return `None`. Callers return 2
+    immediately when this returns `None`. `OSError` (covering
+    `FileNotFoundError`, `PermissionError`, `IsADirectoryError`, ...) is
+    caught explicitly here so a missing trace file maps to exit 2, never
+    the uncaught-exception exit 1 Python would otherwise produce -- see
+    the module docstring. `pydantic.ValidationError` is caught for the
+    same reason: `tuxghost.trace.read`'s final `Trace.model_validate`
+    raises it for any structurally malformed trace that slips past the
+    refuse/warn matrix's own explicit checks (e.g. a missing
+    `provenance` block); left uncaught it would propagate past this
+    function entirely and exit 1, colliding "unrunnable trace file" with
+    "diverged" -- exactly the ambiguity `_record` below already avoids by
+    catching it there."""
     try:
         return read(path, allow_mismatch=allow_mismatch)
     except Refused as exc:
@@ -162,9 +170,22 @@ def _read_trace_or_refuse(path: Path, allow_mismatch: bool) -> Trace | None:
     except json.JSONDecodeError as exc:
         print(f"refused: {path} is not valid JSON: {exc}", file=sys.stderr)
         return None
+    except ValidationError as exc:
+        print(f"refused: {path} does not validate as a trace: {exc}", file=sys.stderr)
+        return None
 
 
 def _execute(path: Path, allow_mismatch: bool, checkpoint: int) -> int:
+    """Replay `path` and print its digest(s). With `--checkpoint N` (N >
+    0), also prints one `checkpoint <step>: <digest>` line per interval
+    BEFORE the final digest -- `execute` has no comparison target of its
+    own (see the module docstring: it can only ever return 0 or 2), so
+    there is nothing here to bisect against yet, but the digests are
+    exactly what a later `tuxghost compare`/`bisect_traces` run against a
+    second execution needs to locate a divergence without re-running from
+    scratch. Printing nothing for a flag the help text promises would let
+    `--checkpoint` silently rot -- see `tests/test_cli.py
+    ::test_checkpoint_flag_prints_intermediate_digests`."""
     from tuxghost.execute import execute
 
     trace = _read_trace_or_refuse(path, allow_mismatch)
@@ -175,6 +196,8 @@ def _execute(path: Path, allow_mismatch: bool, checkpoint: int) -> int:
     except Refused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
+    for step, digest in result.checkpoints:
+        print(f"checkpoint {step}: {digest}")
     print(result.final_digest)
     return 0
 

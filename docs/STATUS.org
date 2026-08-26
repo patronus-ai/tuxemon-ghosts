@@ -77,11 +77,12 @@ weight, not because they were missed.
 
 * Test state
 
-=make check= green: 119 passed / 3 skipped (fast), plus 3 passed behind
+=make check= green: 128 passed / 3 skipped (fast), plus 3 passed behind
 the =slow= marker (opt-in via =TUXGHOST_RUN_SLOW=1=). The 3 skipped are
 the slow-marked tests themselves, correctly deselected without that
-env var. Re-confirmed on the freshly re-patched tree in this task, same
-counts, same digests.
+env var. (Count updated in the final fix wave: nine new tests pin the
+three must-fix defects below plus the =--checkpoint= flag; the slow
+count is unchanged.)
 
 * Measured determinism results, with real digests
 
@@ -113,6 +114,20 @@ counts, same digests.
 
 * What is still unmeasured
 
+- *The spec's =world_state= widening commitment did not ship.* The
+  spec's Known Limitations section states plainly: "~world_state~
+  coverage is thin — serialization yields only ~factions_manager~ and
+  ~menu_flags~. Widening it is in scope for S1." That widening did not
+  happen — =tuxemon/save_system/save_state.py='s =WorldSave= still has
+  exactly those two fields, confirmed by reading the class directly. What
+  DID get widened this project (task 12) is a different subtree,
+  =persistent_npc_state=, not =world_state= — see the next bullet for why
+  that widening measures nothing on any trace this project can currently
+  record. So, honestly: the =world_state= half of =state_of()='s digested
+  surface is exactly as thin today as it was at the end of the spike: two
+  fields, no wider. Anyone relying on =verify() == 0= to certify
+  =world_state= coverage beyond faction standings and menu-unlock flags
+  is relying on something this project never built.
 - *Capture and evolution as their own scenarios.* The completed-battle
   measurement above exercises level-ups and winnings as a side effect of
   one battle route; nothing separately isolates capture or evolution as
@@ -142,6 +157,25 @@ counts, same digests.
   =cleanup()= called on them. This matches upstream's existing behavior
   for the analogous case, and =EventAction.cancel()= has zero callers
   anywhere in the vendored tree, so it is latent, not live.
+- *The shipped gate never reproduces the spec's own cross-=PYTHONHASHSEED=
+  evidence.* The determinism spike (=docs/2026-08-25-determinism-spike.org=)
+  demonstrated byte-identical digests "across two ~PYTHONHASHSEED~ values",
+  which mattered because Python randomizes string/dict hashing per process
+  by default — a digest that happened to depend on that would fail
+  intermittently, not deterministically. But both Makefile test targets
+  (=make test=, =make slow=) run =PYTHONHASHSEED=0=, unconditionally, so
+  every =make check= run this project's gate performs pins the SAME hash
+  seed every time; the spike's second-seed evidence is not re-exercised by
+  anything CI or a contributor runs today. This is mitigated, not
+  unfounded: =tuxghost/digest.py='s =_canonical= sorts every dict's keys
+  before hashing and =json.dumps(..., sort_keys=True)= is used throughout
+  =tuxghost=, so nothing in the digest pipeline should be reading raw
+  dict/set iteration order in the first place — but that claim currently
+  rests on code inspection, not on the suite actually varying the seed and
+  observing the same digest twice. No second-hashseed run has been added
+  to the Makefile as part of this fix wave; documenting the gap here is
+  the honest alternative to quietly re-asserting evidence the shipped gate
+  does not produce.
 - *The test suite depends on mutable state OUTSIDE this repo*:
   =~/.tuxemon/cache/l18n/*.mo= (corrupted once by two concurrent test
   runs racing on the same file — do not run two full suites at once; see

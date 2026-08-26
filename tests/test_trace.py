@@ -38,25 +38,32 @@ from tuxghost.trace import (
 _EMPTY_STATE_DIGEST = digest_of_initial_state({})
 
 
+def _minimal_header() -> dict[str, Any]:
+    """The header `_minimal` below embeds -- pulled out so tests that need
+    to override a single header field (e.g. `seed`) don't have to repeat
+    the other ten."""
+    return {
+        "upstream_commit": "59a34164f442ddecbaee4c436e3f1a5ba9474e29",
+        # Real, current values -- not placeholders -- so that tests
+        # which don't target patch_series_id/platform don't spuriously
+        # warn now that `read()` compares both against this build.
+        "patch_series_id": patch_series_id(),
+        "platform": THIS_PLATFORM,
+        "mod_id": "tuxemon",
+        "mod_version": "0.4.35",
+        "seed": 1234,
+        "step_rate": 60,
+        "clock_epoch": 1787694000,
+        "initial_state_digest": _EMPTY_STATE_DIGEST,
+        "step_count": 10,
+        "final_digest": "sha256:000",
+    }
+
+
 def _minimal(tmp_path: Path, **overrides: Any) -> Path:
     data: dict[str, Any] = {
         "format_version": FORMAT_VERSION,
-        "header": {
-            "upstream_commit": "59a34164f442ddecbaee4c436e3f1a5ba9474e29",
-            # Real, current values -- not placeholders -- so that tests
-            # which don't target patch_series_id/platform don't spuriously
-            # warn now that `read()` compares both against this build.
-            "patch_series_id": patch_series_id(),
-            "platform": THIS_PLATFORM,
-            "mod_id": "tuxemon",
-            "mod_version": "0.4.35",
-            "seed": 1234,
-            "step_rate": 60,
-            "clock_epoch": 1787694000,
-            "initial_state_digest": _EMPTY_STATE_DIGEST,
-            "step_count": 10,
-            "final_digest": "sha256:000",
-        },
+        "header": _minimal_header(),
         "initial_state": {},
         "inputs": [[5, 64, 1.0]],
         "provenance": {"recorder": "offline-agent"},
@@ -137,6 +144,64 @@ def test_allow_mismatch_does_not_downgrade_missing_seed(tmp_path: Path) -> None:
     path.write_text(json.dumps(data))
     with pytest.raises(Refused, match="seed"):
         read(path, allow_mismatch=True)
+
+
+def test_refuses_a_non_integer_seed(tmp_path: Path) -> None:
+    """The spec's refuse/warn matrix reads 'seed missing OR non-integer'
+    -- the missing half was covered above, but a present, wrong-typed
+    seed used to fall through `_REFUSE_IF_MISSING`'s `is None` check
+    straight into `Trace.model_validate`, which raises
+    `pydantic.ValidationError` (not `Refused`) and would exit 1
+    ("diverged") rather than 2 ("refused"). Must raise `Refused`, named
+    specifically as `seed`, before validation ever runs."""
+    path = _minimal(tmp_path, header={**_minimal_header(), "seed": "not-an-int"})
+    with pytest.raises(Refused, match="seed"):
+        read(path)
+
+
+def test_allow_mismatch_does_not_downgrade_a_non_integer_seed(tmp_path: Path) -> None:
+    path = _minimal(tmp_path, header={**_minimal_header(), "seed": "not-an-int"})
+    with pytest.raises(Refused, match="seed"):
+        read(path, allow_mismatch=True)
+
+
+def test_refuses_a_boolean_seed(tmp_path: Path) -> None:
+    """`bool` is a Python `int` subclass, so a naive `isinstance(v, int)`
+    check would accept a JSON `true`/`false` as a seed. It is not an
+    integer; must still refuse."""
+    path = _minimal(tmp_path, header={**_minimal_header(), "seed": True})
+    with pytest.raises(Refused, match="seed"):
+        read(path)
+
+
+def test_a_real_integer_seed_does_not_refuse(tmp_path: Path) -> None:
+    """Positive control for the three tests above: a correctly-typed seed
+    must read fine, otherwise they could pass even if `read` refused
+    every seed unconditionally."""
+    trace = read(_minimal(tmp_path))
+    assert trace.header.seed == 1234
+
+
+def test_refuses_a_non_dict_json_root(tmp_path: Path) -> None:
+    """A trace file whose JSON root is not an object (e.g. `[]`) used to
+    crash with `AttributeError: 'list' object has no attribute 'get'` on
+    `raw.get("format_version")` -- an uncaught exception, which exits 1
+    ("diverged") rather than 2 ("refused"). A malformed trace file must
+    never read as a divergence."""
+    path = tmp_path / "list_root.tuxghost"
+    path.write_text("[]")
+    with pytest.raises(Refused):
+        read(path)
+
+
+def test_refuses_a_non_dict_header(tmp_path: Path) -> None:
+    """Same class of bug as the non-dict root above, one level down: a
+    `header` that isn't itself a JSON object would crash the exact same
+    way on `header.get(field)`."""
+    path = tmp_path / "list_header.tuxghost"
+    path.write_text(json.dumps({"format_version": FORMAT_VERSION, "header": []}))
+    with pytest.raises(Refused):
+        read(path)
 
 
 def test_mod_version_mismatch_refuses_but_allow_mismatch_taints(

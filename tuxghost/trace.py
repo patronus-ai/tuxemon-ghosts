@@ -10,6 +10,15 @@ Refuse/warn matrix (see `read`):
     downgradable by `allow_mismatch`: an unpinned clock or seed produces a
     silently wrong comparison, not a version quibble (see the docstring on
     `TraceHeader.clock_epoch`).
+  * `header.seed` present but not an `int` -- always refuse, same
+    reasoning as missing. This is the only header field the spec's matrix
+    marks "missing or non-integer"; nothing else in the matrix carries
+    that second clause.
+  * A non-dict JSON root, or a `header` that is not itself a JSON object
+    -- always refuse. A malformed trace file must never be allowed to
+    reach `Trace.model_validate` and raise `pydantic.ValidationError`,
+    which is not `Refused` and would read as "diverged" (exit 1) rather
+    than "unrunnable" (exit 2) -- see `tuxghost.cli._read_trace_or_refuse`.
   * `header.initial_state_digest` mismatch (recomputed from `initial_state`
     itself) -- always refuse. Not downgradable by `allow_mismatch`, for the
     same reason as seed/clock_epoch: this is the recorded state having
@@ -60,6 +69,16 @@ PATCHES_DIR = Path(__file__).resolve().parent.parent / "patches"
 
 #: Refused outright: reading on would produce a silently wrong comparison.
 _REFUSE_IF_MISSING = ("seed", "clock_epoch")
+
+#: Refused outright when present but not an `int` -- the spec's matrix
+#: (see the module docstring) spells this out only for `seed` ("missing
+#: or non-integer"); `clock_epoch` and the rest are plain "missing". A
+#: non-integer here would otherwise reach `Trace.model_validate` and raise
+#: `pydantic.ValidationError`, which is NOT `Refused` and would exit 1
+#: (diverged) rather than 2 (refused) -- see `tuxghost.cli
+#: ._read_trace_or_refuse`. `bool` is deliberately excluded even though
+#: Python's `int` subclasses it: a JSON `true`/`false` is not an integer.
+_REFUSE_IF_NOT_INT = ("seed",)
 
 
 def patch_series_id() -> str:
@@ -145,7 +164,13 @@ class Trace(BaseModel):
 
 
 def read(path: Path, allow_mismatch: bool = False) -> Trace:
-    raw: dict[str, Any] = json.loads(Path(path).read_text())
+    parsed: Any = json.loads(Path(path).read_text())
+    if not isinstance(parsed, dict):
+        raise Refused(
+            f"trace root must be a JSON object, got {type(parsed).__name__}; "
+            "a malformed trace file is a refusal, not a divergence"
+        )
+    raw: dict[str, Any] = parsed
 
     version = raw.get("format_version")
     if version != FORMAT_VERSION:
@@ -154,13 +179,28 @@ def read(path: Path, allow_mismatch: bool = False) -> Trace:
             "rather than guessing at an unknown layout"
         )
 
-    header: dict[str, Any] = raw.get("header", {})
+    header_raw: Any = raw.get("header", {})
+    if not isinstance(header_raw, dict):
+        raise Refused(
+            f"header must be a JSON object, got {type(header_raw).__name__}; "
+            "a malformed trace file is a refusal, not a divergence"
+        )
+    header: dict[str, Any] = header_raw
     for field in _REFUSE_IF_MISSING:
         if header.get(field) is None:
             raise Refused(
                 f"header.{field} is required. allow_mismatch does not "
                 f"downgrade this: silencing a version quibble must not also "
                 f"silence the world changing underneath the trace."
+            )
+    for field in _REFUSE_IF_NOT_INT:
+        value = header.get(field)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise Refused(
+                f"header.{field} must be an integer, got {value!r}. "
+                f"allow_mismatch does not downgrade this: silencing a "
+                f"version quibble must not also silence the world changing "
+                f"underneath the trace."
             )
 
     # Not downgradable, same reasoning as seed/clock_epoch above: this is

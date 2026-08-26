@@ -109,6 +109,66 @@ def test_execute_prints_the_final_digest_and_returns_zero(
     assert out, "execute must print the digest it reached"
 
 
+def test_checkpoint_flag_prints_intermediate_digests(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--checkpoint N` documents "digest every N steps instead of only at
+    the end", but until this test existed nothing pinned that
+    `tuxghost.execute.execute`'s own `result.checkpoints` (already
+    populated and tested at the library layer, see
+    `tests/test_execute.py
+    ::test_execute_populates_checkpoints_at_the_given_interval`) ever
+    reached the CLI's stdout -- `_execute` discarded it and printed only
+    `final_digest`. Ten steps at `--checkpoint 3` must yield checkpoints
+    at 3, 6, 9, each printed before the final digest line, and the final
+    digest must still be the last line for scripts that only read that
+    one."""
+    path = _record_trace(tmp_path, step_count=10)
+    assert main(["execute", str(path), "--checkpoint", "3"]) == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 4, lines
+    assert lines[0].startswith("checkpoint 3: ")
+    assert lines[1].startswith("checkpoint 6: ")
+    assert lines[2].startswith("checkpoint 9: ")
+    # The final digest, unprefixed, is still the LAST line -- unchanged
+    # contract for anything that only reads that one (see
+    # `test_execute_prints_the_final_digest_and_returns_zero`).
+    assert not lines[3].startswith("checkpoint")
+    assert lines[3]
+
+
+def test_checkpoint_defaults_to_no_intermediate_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Negative control: without `--checkpoint`, `execute` must print
+    exactly one line (the final digest) -- otherwise the positive test
+    above could pass even if checkpoints were printed unconditionally."""
+    path = _record_trace(tmp_path, step_count=10)
+    assert main(["execute", str(path)]) == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1, lines
+
+
+def test_execute_refuses_a_trace_missing_provenance(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`tuxghost.trace.Trace.model_validate` raises
+    `pydantic.ValidationError` for a structurally malformed trace, e.g.
+    one missing its required `provenance` block. Before this fix,
+    `_read_trace_or_refuse` did not catch that exception type, so it
+    propagated out of `main()` entirely -- an uncaught exception exits 1
+    ("diverged"), colliding with the unrelated meaning `verify`/`execute`
+    give that code. A malformed trace file must be REFUSED (exit 2), the
+    same as a missing file or bad JSON."""
+    path = _record_trace(tmp_path)
+    data = json.loads(path.read_text())
+    del data["provenance"]
+    path.write_text(json.dumps(data))
+
+    assert main(["execute", str(path)]) == 2
+    assert "refused" in capsys.readouterr().err.lower()
+
+
 def test_verify_returns_zero_for_a_self_consistent_trace(tmp_path: Path) -> None:
     path = _record_trace(tmp_path)
     assert main(["verify", str(path)]) == 0

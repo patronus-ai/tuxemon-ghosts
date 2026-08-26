@@ -168,12 +168,28 @@ def test_exemptions_are_all_reachable_in_the_digested_tree() -> None:
     matched exactly, it also cannot accidentally swallow an unrelated
     future field. Walk the real (pre-filter) `npc_state`/`world_state`
     trees for a representative session and require every registered path
-    to actually occur in them."""
+    to actually occur in them.
+
+    `state_of()` digests a THIRD subtree too, task 12's
+    `persistent_npc_state` -- this test originally walked only the first
+    two, so a legitimate `persistent_npc_state.*` exemption would have
+    been rejected as unreachable even though `state_of()` genuinely
+    reaches that path. `persistent_npc_state` is `[]` on any session with
+    no persistent NPC (see `tuxghost.digest.state_of`'s own docstring),
+    so `_spawn_persistent_npc` is used here purely to get a non-empty
+    tree to walk -- the same fixture
+    `test_widened_digest_discriminates_persistent_npc_state` above uses
+    to prove the field discriminates at all; it fabricates no path that
+    `state_of()` would not otherwise reach once a persistent NPC exists."""
     _client, session = build_client(seed=1234)
     session.client.event_engine.execute_action("add_monster", ("rockitten", 12))
+    _spawn_persistent_npc(session)
     player = session.player
     npc_raw = json.loads(player.get_state(session).model_dump_json())
     world_raw = json.loads(session.world.get_state(session).model_dump_json())
+    persistent_npcs = session.client.npc_manager.get_persistent_npc_states(session)
+    persistent_raw = [json.loads(npc.model_dump_json()) for npc in persistent_npcs]
+    assert persistent_raw, "need a non-empty persistent_npc_state tree to walk"
 
     paths: set[str] = set()
 
@@ -189,6 +205,7 @@ def test_exemptions_are_all_reachable_in_the_digested_tree() -> None:
 
     collect(npc_raw, "npc_state")
     collect(world_raw, "world_state")
+    collect(persistent_raw, "persistent_npc_state")
 
     for field in EXEMPTIONS:
         assert field in paths, (

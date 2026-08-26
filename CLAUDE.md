@@ -93,6 +93,10 @@ open, not a quiet fix — and even then, `tests/test_digest.py`'s
 `test_exemptions_are_all_reachable_in_the_digested_tree` mean an entry
 must name a real reason and land on a path the digest can actually
 reach; a dead or unreasoned entry is caught, not silently accepted.
+`state_of()` digests THREE subtrees — `npc_state`, `world_state`, and
+`persistent_npc_state` — and the reachability test walks all three, so
+an entry under any of them, including `persistent_npc_state.*`, is a
+legitimate, checkable path.
 
 ## The non-negotiable: a regression test must be demonstrated to fail against the bug it pins
 
