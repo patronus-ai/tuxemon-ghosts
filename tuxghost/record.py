@@ -23,6 +23,7 @@ never constructs a `Recorder` at all.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from tuxghost.boot import snapshot_save
@@ -65,12 +66,21 @@ class Recorder:
         clock_epoch: int,
         recorder: Literal["cu-agent", "offline-agent", "human"],
         model: str | None = None,
+        taints: Sequence[str] = (),
     ) -> None:
+        """`taints` is for a recording whose decisions did not come from the
+        thing `recorder`/`model` name -- specifically a `ReplayPolicy`
+        run, whose actions are replayed from a captured transcript rather
+        than taken live by the model. `tuxghost.cli`'s `compare` already
+        surfaces taints as findings, so recording it here costs no new
+        reader.
+        """
         self._session = session
         self._seed = seed
         self._clock_epoch = clock_epoch
         self._recorder = recorder
         self._model = model
+        self._taints = list(taints)
         self._inputs: list[tuple[int, int, float]] = []
 
         # Captured now, via the game's own save serialisation, rather than
@@ -85,7 +95,9 @@ class Recorder:
         """Record an input scheduled for `step`."""
         self._inputs.append((step, button, value))
 
-    def finish(self, step_count: int) -> Trace:
+    def finish(
+        self, step_count: int, claimed_outcome: str | None = None
+    ) -> Trace:
         """Seal the trace, recording the state the run actually reached.
 
         `final_digest` is read from the LIVE session, not recomputed by
@@ -112,5 +124,10 @@ class Recorder:
             ),
             initial_state=self._initial,
             inputs=sorted(self._inputs),
-            provenance=Provenance(recorder=self._recorder, model=self._model),
+            provenance=Provenance(
+                recorder=self._recorder,
+                model=self._model,
+                taints=list(self._taints),
+                claimed_outcome=claimed_outcome,
+            ),
         )
