@@ -6,8 +6,9 @@
   * 2 -- refused: a precondition failed (`tuxghost.trace.read`'s refusal
     matrix -- unknown format, missing seed/clock_epoch, a tampered
     `initial_state`), or the trace is unrunnable here (its `initial_state`
-    does not validate as a `SaveData`, or lacks what `boot_from_save`
-    needs to restore a session -- see `execute`).
+    does not validate as a `SaveData`, lacks what `boot_from_save` needs
+    to restore a session, or names a `current_map` that resolves to no
+    real map asset -- see `execute`).
 
 No CLI lives in this module. Fix round 1 (task 12 review) found a real
 exit-code collision in an earlier `python -m tuxghost.execute` entry point
@@ -110,23 +111,28 @@ def execute(
     docstring, which names this exact parameter as "the executor's path".
 
     Raises `Refused` if `trace.initial_state` does not validate as a
-    `SaveData`, or lacks what `boot_from_save` needs to restore a session
-    (currently: `npc_state.current_map`) -- both are preconditions that
-    can only be checked once execution actually starts, unlike
-    `tuxghost.trace.read`'s refusal matrix, which is checked on load.
+    `SaveData`, lacks what `boot_from_save` needs to restore a session
+    (currently: `npc_state.current_map`), or names a `current_map` that
+    `tuxghost.boot.resolve_map_asset` cannot resolve to a real map asset
+    -- all three are preconditions that can only be checked once
+    execution actually starts, unlike `tuxghost.trace.read`'s refusal
+    matrix, which is checked on load.
 
-    The second check is done directly here (mirroring `boot_from_save`'s
-    own `assert npc_state is not None and npc_state.current_map is not
-    None`), rather than by calling `boot_from_save` inside a `try:
-    ... except AssertionError`. Fix round 1 flagged that catching bare
-    `AssertionError` around `boot_from_save` would ALSO catch a genuine
-    internal engine assertion failure -- unrelated to whether this
-    particular trace is well-formed -- and silently report it as exit code
-    2 ("this trace is unrunnable"), conflating an engine bug with a bad
-    trace. Checking the precondition ourselves, before ever calling
-    `boot_from_save`, means the only `AssertionError`s that function could
-    still raise are real internal invariants, which are left to propagate
-    uncaught.
+    The second and third checks are done directly here (the second
+    mirrors `boot_from_save`'s own `assert npc_state is not None and
+    npc_state.current_map is not None`; the third mirrors the `ValueError`
+    `boot_from_save` would otherwise raise from an unresolvable
+    `current_map`), rather than by calling `boot_from_save` inside a
+    `try: ... except (AssertionError, ValueError)`. Fix round 1 flagged
+    that catching bare `AssertionError` around `boot_from_save` would ALSO
+    catch a genuine internal engine assertion failure -- unrelated to
+    whether this particular trace is well-formed -- and silently report it
+    as exit code 2 ("this trace is unrunnable"), conflating an engine bug
+    with a bad trace; the same reasoning applies to `ValueError`, which
+    plenty of genuine engine code can also raise. Checking every
+    precondition ourselves, before ever calling `boot_from_save`, means
+    the only exceptions that function could still raise are real internal
+    invariants, which are left to propagate uncaught.
     """
     from tuxemon.save_system.save_state import SaveData
 

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 
@@ -352,12 +354,101 @@ def test_assert_fps_matches_step_rate_rejects_non_positive_fps() -> None:
 
 
 def test_resolve_map_asset_accepts_a_name_with_or_without_the_extension() -> None:
-    """`spyder_*` maps script teleports as `teleport player,spyder_route1`
-    (no extension) while `eclipse_*` maps use `...bank1.tmx`, so a real
-    save's `current_map` is legitimately either form."""
-    from tuxghost.boot import headless_context, resolve_map_asset
+    """Mirrors `tuxemon/map/loader.py`'s own `load_map_data`, which does
+    `Path(path).stem` then `fetch_asset("maps", f"{name}.tmx")` -- the
+    engine itself boots a bare name exactly as readily as one with the
+    extension already on it, so a precondition check stricter than the
+    loader it guards would refuse saves the engine can actually run. Not
+    motivated by any real map content: every teleport target under
+    `tuxemon/mods/tuxemon/maps/` already carries `.tmx` (an earlier
+    version of this docstring claimed otherwise, from a grep bug -- see
+    task 1's fix-round-1 report).
 
-    headless_context()  # fetch_asset needs the mod db loaded
-    assert resolve_map_asset("start_tuxemon.tmx") is not None
-    assert resolve_map_asset("start_tuxemon") is not None
+    No `headless_context()` call needed here: `resolve_map_asset` now
+    populates the mod asset roots itself (see its own docstring and
+    `test_resolve_map_asset_works_as_the_first_thing_in_a_fresh_process`
+    below), so calling it would only pay pygame's init cost for nothing.
+
+    Assertions are deliberately more than `is not None`/`is None`: an
+    `is not None` check alone would pass even if `resolve_map_asset`
+    returned two DIFFERENT paths for the two forms, or a path to the
+    wrong asset entirely."""
+    from tuxghost.boot import resolve_map_asset
+
+    with_ext = resolve_map_asset("start_tuxemon.tmx")
+    without_ext = resolve_map_asset("start_tuxemon")
+    assert with_ext is not None
+    assert with_ext == without_ext
+    assert Path(with_ext).name == "start_tuxemon.tmx"
     assert resolve_map_asset("no_such_map_xyz") is None
+
+
+def test_resolve_map_asset_rejects_a_candidate_that_resolves_to_a_directory() -> None:
+    """`fetch_asset` only tests `Path.exists()`
+    (`tuxemon/constants/asset_loader.py`), not `is_file()`, so `""`, `"."`,
+    and `"../db"` (which walks back onto a real sibling directory of
+    `maps/`) all resolve to an existing DIRECTORY rather than raising
+    `OSError`. Unguarded, `resolve_map_asset` would return that directory
+    path as if it were a valid map asset, `execute`'s refusal check would
+    pass a malformed trace through, and it would crash later, inside
+    `push_state`, as an uncaught exception instead of the exit-2 refusal
+    this function exists to produce."""
+    from tuxghost.boot import resolve_map_asset
+
+    assert resolve_map_asset("") is None
+    assert resolve_map_asset(".") is None
+    assert resolve_map_asset("../db") is None
+
+
+def test_resolve_map_asset_works_as_the_first_thing_in_a_fresh_process() -> None:
+    """Pins the fix for a real cold-process bug found in task 1 review:
+    `fetch_asset` only searches `_MOD_ASSET_ROOTS`
+    (`tuxemon/constants/asset_loader.py`), populated as a module-level
+    side effect of importing `tuxemon.locale.locale`
+    (`fetch_mod_asset_roots(CONFIG)`), itself only ever reached through a
+    full boot. `execute`'s precondition check calls `resolve_map_asset`
+    BEFORE ever calling `boot_from_save`, so a process where nothing has
+    booted yet would see an always-empty root list and `resolve_map_asset`
+    would wrongly refuse every map, valid ones included.
+
+    Every other test in this suite runs inside the SAME pytest process,
+    where some earlier test has almost always already booted something
+    and left `_MOD_ASSET_ROOTS` populated for the rest of the session --
+    which is exactly how this bug went unnoticed in round 1 (even this
+    test file's own `test_resolve_map_asset_accepts_a_name_with_or_
+    without_the_extension` used to call `headless_context()` first,
+    masking the cold path). The only way to actually exercise the cold
+    path is a genuinely fresh interpreter, hence `subprocess.run` here
+    rather than a plain in-process call."""
+    import subprocess
+    import sys
+
+    tuxemon_dir = Path(__file__).resolve().parent.parent / "tuxemon"
+    repo_root = tuxemon_dir.parent
+    script = f"""
+import os
+os.environ["SDL_VIDEODRIVER"] = "dummy"
+os.environ["SDL_AUDIODRIVER"] = "dummy"
+import sys
+sys.path.insert(0, {str(repo_root)!r})
+sys.path.insert(0, {str(tuxemon_dir)!r})
+os.chdir({str(tuxemon_dir)!r})
+
+from tuxghost.boot import resolve_map_asset
+
+result = resolve_map_asset("start_tuxemon.tmx")
+assert result is not None, f"expected a resolved map asset, got {{result!r}}"
+print("RESOLVE_MAP_ASSET_COLD_OK")
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"cold-process resolve_map_asset failed:\n"
+        f"stdout={proc.stdout!r}\nstderr={proc.stderr!r}"
+    )
+    assert "RESOLVE_MAP_ASSET_COLD_OK" in proc.stdout

@@ -74,15 +74,34 @@ def _assert_fps_matches_step_rate(client: Any) -> None:
 def resolve_map_asset(current_map: str) -> str | None:
     """Resolve a save's `npc_state.current_map` to a real map asset path.
 
-    Accepts the name with or without the `.tmx` extension, because BOTH
-    forms occur in real saves: `tuxemon/mods/tuxemon/maps/*.tmx` script
-    teleports as `teleport player,spyder_route1` (extension-less, and
-    `Teleporter.teleport_character` stores exactly the string it was
-    given via `place_npc_on_map` -> `NPC.set_current_map`), while the
-    `eclipse_*` yaml maps script `transition_teleport
-    player,eclipse_crystal_bank1.tmx,...` WITH one. Returns None when
-    neither form exists, so callers can refuse (exit 2) rather than let
-    `fetch_asset`'s bare OSError escape as exit 1 ("diverged").
+    Tries `current_map` as given, then with `.tmx` appended, and accepts
+    whichever candidate resolves to an existing `.tmx` FILE. This is not
+    motivated by any in-repo map content -- measured directly, all 252
+    distinct teleport targets under `tuxemon/mods/tuxemon/maps/` already
+    carry `.tmx` (an earlier version of this docstring claimed otherwise,
+    based on a grep whose character class silently excluded `.` and
+    truncated every name at the dot -- see task 1's fix-round-1 report).
+    It mirrors the engine's OWN loader instead:
+    `tuxemon/map/loader.py`'s `load_map_data` does `Path(path).stem` and
+    then `fetch_asset("maps", f"{name}.tmx")`, i.e. the engine itself
+    boots a bare name exactly as readily as one with the extension
+    already on it. A precondition check stricter than the loader it
+    guards would refuse saves the engine can actually run.
+
+    A candidate only counts as resolved if it is an existing regular
+    FILE with a `.tmx` suffix -- `fetch_asset` itself only tests
+    `Path.exists()` (`tuxemon/constants/asset_loader.py`), so without this
+    a candidate that happens to name an existing directory (e.g. `""`,
+    `"."`, or `"../db"`, which walks back onto a real sibling directory)
+    would resolve to that directory and this function would wrongly
+    return non-`None` for a malformed `current_map` -- letting it past
+    `execute`'s refusal check and crash later, inside `push_state`, as an
+    uncaught exception instead of the exit-2 refusal this function exists
+    to produce.
+
+    Returns `None` when no candidate resolves, so callers can refuse
+    (exit 2) rather than let `fetch_asset`'s bare `OSError` escape as
+    exit 1 ("diverged").
 
     Callable BEFORE a headless boot, not just after: `execute`'s own
     precondition check (`tuxghost.execute`) calls this ahead of
@@ -94,9 +113,13 @@ def resolve_map_asset(current_map: str) -> str | None:
     through a full boot. Called first in a process, before anything has
     booted, `fetch_asset` would see an always-empty root list and this
     function would wrongly return `None` for every map, valid ones
-    included. `fetch_mod_asset_roots` is idempotent (a `_HAS_POPULATED`
-    guard), so calling it here is a no-op on every call after the first
-    real boot -- this only matters the one time nothing has booted yet.
+    included -- see `tests/test_boot.py
+    ::test_resolve_map_asset_works_as_the_first_thing_in_a_fresh_process`,
+    which pins this by running it as literally the first statement in a
+    fresh interpreter. `fetch_mod_asset_roots` is idempotent (a
+    `_HAS_POPULATED` guard), so calling it here is a no-op on every call
+    after the first real boot -- this only matters the one time nothing
+    has booted yet.
     """
     from tuxemon.constants.asset_loader import fetch_asset, fetch_mod_asset_roots
     from tuxemon.user_config import CONFIG
@@ -105,9 +128,12 @@ def resolve_map_asset(current_map: str) -> str | None:
 
     for candidate in (current_map, f"{current_map}.tmx"):
         try:
-            return str(fetch_asset("maps", candidate))
+            resolved = fetch_asset("maps", candidate)
         except OSError:
             continue
+        resolved_path = Path(resolved)
+        if resolved_path.is_file() and resolved_path.suffix == ".tmx":
+            return str(resolved)
     return None
 
 
@@ -248,6 +274,15 @@ def boot_from_save(
     passing the trace header's `clock_epoch` through gets the same
     reproducibility guarantee a `Recorder`-driven recording gets, without
     the executor needing to know why.
+
+    Raises `ValueError` if `save_data.npc_state.current_map` resolves to
+    no map asset (see `resolve_map_asset`). In this repo, that branch is
+    unreachable via `tuxghost.execute.execute`, which already calls
+    `resolve_map_asset` as a precondition and returns exit-2 `Refused`
+    before ever reaching this function -- the branch here exists for
+    callers OUTSIDE that path (anything that calls `boot_from_save`
+    directly on unchecked `save_data`), so such a caller still fails
+    loudly instead of booting onto a silently wrong map.
     """
     import random
 
@@ -299,25 +334,40 @@ def boot_from_save(
     NPC.create_player(local_session, slug=npc_state.player_slug or PLAYER_NPC)
     map_asset = resolve_map_asset(npc_state.current_map)
     if map_asset is None:
+        # Unreachable from any in-repo caller: `tuxghost.execute.execute`
+        # already calls `resolve_map_asset` as a precondition BEFORE ever
+        # calling `boot_from_save`, and returns exit-2 `Refused` instead of
+        # reaching here. This branch exists for callers outside this
+        # repo's own `execute`/`verify` path -- anything that calls
+        # `boot_from_save` directly on an unchecked `save_data` -- so it
+        # still fails loudly (a real exception, not a silent bad boot)
+        # rather than letting `push_state` crash later with a less
+        # informative error.
         raise ValueError(
             f"save's npc_state.current_map={npc_state.current_map!r} "
             "resolves to no map asset, with or without a .tmx extension; "
             "callers that need a return code instead of an exception "
             "should call resolve_map_asset() first (see tuxghost.execute)"
         )
-    # `Entity.load_state` (below, via `local_session.load_state`) restores
-    # `current_map` onto the live NPC VERBATIM from whatever string was in
-    # `save_data.npc_state.current_map` -- see
-    # `tuxemon/entity/entity.py`'s `set_current_map(save_data.current_map)`.
-    # Left alone, two saves that both resolve to the exact same map asset
-    # (one recorded via a `spyder_*`-style extension-less teleport, one via
-    # an `eclipse_*`-style `...bank1.tmx` teleport) would restore to two
-    # DIFFERENT `current_map` strings -- diverging `npc_state.current_map`
-    # in `tuxghost.digest.state_of()` for a reason that has nothing to do
-    # with the actual game state. Canonicalize to the resolved asset's
-    # basename (matching what `session.client.get_map_name()` itself
-    # reports) so both forms restore identically.
-    npc_state.current_map = Path(map_asset).name
+    # `map_asset` (the resolved absolute path) is used ONLY as the
+    # `map_name` pushed to `WorldState` below -- `npc_state.current_map`
+    # itself is left exactly as recorded. `Entity.load_state` (via
+    # `local_session.load_state` below) restores `current_map` onto the
+    # live NPC VERBATIM from `save_data.npc_state.current_map`
+    # (`tuxemon/entity/entity.py`'s `set_current_map(save_data.current_map)`),
+    # and that value is itself digested by `tuxghost.digest.state_of()`
+    # (`EXEMPTIONS` is `{}`; nothing filters it). Canonicalizing it here
+    # (an earlier version of this function did) would make replay diverge
+    # from what a real recording actually held: a session recorded after
+    # booting from a bare, extension-less `current_map` digests that exact
+    # bare string into `header.final_digest`, so replay MUST restore that
+    # same bare string to reach the same digest -- rewriting it to a
+    # canonical basename would make a faithful replay of such a trace
+    # report `verify() == 1` ("diverged") instead of `0`, and would
+    # symmetrically make `compare`/`bisect_traces` report agreement
+    # between two saves whose recorded `current_map` genuinely differs.
+    # Both are exactly the wrong direction for this project. See task 1's
+    # fix-round-1 report for the measurement.
     client.push_state("WorldState", session=local_session, map_name=map_asset)
     local_session.load_state(save_data)
     return client, local_session

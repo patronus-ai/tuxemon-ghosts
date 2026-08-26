@@ -440,22 +440,41 @@ def test_bisect_traces_rejects_a_non_positive_checkpoint_interval() -> None:
 
 
 def test_execute_boots_a_save_whose_current_map_omits_the_extension() -> None:
-    """Pins the S1 defect: an extension-less `current_map` -- what every
-    `spyder_*` map's own teleport script produces -- raised an uncaught
-    OSError out of `fetch_asset`, so `verify()` raised instead of
+    """Pins the S1 defect: an extension-less `current_map` raised an
+    uncaught OSError out of `fetch_asset`, so `verify()` raised instead of
     returning 2 and the CLI would have exited 1 ("diverged") for what is
-    a refusal at worst and a bootable save at best."""
+    a refusal at worst and a bootable save at best. Not motivated by any
+    real map content: every teleport target under
+    `tuxemon/mods/tuxemon/maps/` already carries `.tmx` (an earlier
+    version of this docstring claimed a `spyder_*` map's own script
+    produced a bare name -- that was a grep bug, not a fact about this
+    repo's maps; see task 1's fix-round-1 report).
+    `tuxghost.boot.resolve_map_asset` accepting both forms mirrors the
+    engine's own loader (`tuxemon/map/loader.py`'s `load_map_data`),
+    which boots either form just as readily.
+
+    Asserts both forms boot WITHOUT raising and land on the SAME map --
+    NOT that they reach the same `final_digest`. `boot_from_save`
+    deliberately does not rewrite `npc_state.current_map` to a canonical
+    form: `Entity.load_state` restores it verbatim, that field IS
+    digested (`tuxghost.digest.state_of`, `EXEMPTIONS == {}`), and
+    canonicalizing it would make a faithful replay of a trace recorded
+    with a bare `current_map` diverge from the digest that recording
+    actually produced -- the opposite of what this task exists to fix
+    (task 1 fix-round-1 review, Important #1)."""
     from tuxghost.execute import execute
     from tuxghost.trace import read
 
     trace = read(GOLDEN)
     trace.header.step_count = 30
-    with_ext = execute(trace).final_digest
+    with_ext = execute(trace)
 
     trace_no_ext = read(GOLDEN)
     trace_no_ext.header.step_count = 30
     trace_no_ext.initial_state["npc_state"]["current_map"] = "start_tuxemon"
-    assert execute(trace_no_ext).final_digest == with_ext
+    without_ext = execute(trace_no_ext)
+
+    assert with_ext.final_state["map"] == without_ext.final_state["map"]
 
 
 def test_verify_refuses_a_trace_whose_map_cannot_be_resolved() -> None:
