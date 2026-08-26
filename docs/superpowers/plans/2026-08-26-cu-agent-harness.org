@@ -1,0 +1,2706 @@
+#+TITLE: S2 — CU-agent harness implementation plan
+#+DATE: 2026-08-26
+
+* For agentic workers
+
+*REQUIRED SUB-SKILL*: use =superpowers:subagent-driven-development=
+(recommended) or =superpowers:executing-plans= to implement this plan
+task-by-task. Steps use checkbox (=- [ ]=) syntax for tracking.
+
+*Goal*: an agent sees a rendered frame of the running game, returns button
+actions with durations, and the run is funnelled through S1's existing
+=Recorder= into a =.tuxghost= trace that =verify= replays to the digest it
+recorded.
+
+*Architecture*: a harness only — no seventh patch. A real =MapRenderer= is
+installed through the *public* =BaseClient.set_renderer= seam and
+upstream's =StateDrawer= composites the active-state stack onto a Surface
+we own. Agent input reaches the engine through the *same*
+=install_schedule= dict S1 already uses, mutated as the agent decides, so
+an agent run and its replay differ only in who filled the dict.
+
+*Tech stack*: Python 3.12, pygame-ce 2.5.7 (SDL 2.32.10), pydantic v2,
+pytest, mypy --strict, ruff. =anthropic= SDK as an *optional* extra,
+imported lazily.
+
+*Spec*: =docs/superpowers/specs/2026-08-26-cu-agent-harness-design.org= —
+read it alongside this plan. The plan argues from the spec; where they
+disagree, re-read the spec and fix the plan.
+
+*Note on file format*: this plan is =.org= because =CLAUDE.md= requires
+every doc in this repo to be org-mode. The =writing-plans= skill's =.md=
+default is overridden by that project rule.
+
+* Global constraints
+
+Every task's requirements implicitly include all of these.
+
+- *Never edit =tuxemon/= directly.* It is git-ignored; =patches/*.patch=
+  is the sole durable record. *S2 adds no patch* — if you find yourself
+  needing one, stop and re-read the spec's architecture section, because
+  the design says the public seams suffice and that claim was probed.
+- *Every invocation that touches the client needs both dummy SDL drivers*:
+  =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy=. =tuxghost.boot
+  .headless_context= sets them before importing pygame, but a bare script
+  that imports pygame first must set them itself.
+- *Run tests from the repo root.* =tests/conftest.py= puts =tuxemon/= on
+  =sys.path= and =os.chdir=s into it.
+- *Never run two full test suites concurrently* — the suite shares
+  =~/.tuxemon/cache/l18n/*.mo=, which a race corrupted once.
+- *Python is =./.venv/bin/python=* (=PY= in the Makefile). There is no
+  bare =python= on this machine.
+- *Every regression test must be DEMONSTRATED to fail against the defect
+  it pins*: mutate the code to reintroduce the bug, run the test, capture
+  the real failure output, restore the code, run again, capture the pass,
+  and confirm with =git status=/=git diff= that the file was genuinely
+  restored. Real output goes in the task report — not a description of
+  what it would show. Six tests in this project already passed vacuously,
+  and the S1 *plan itself* produced six defects that each yielded a green
+  suite while the feature quietly did not work.
+- *=tuxghost/digest.py='s =EXEMPTIONS= must stay =={}=.* Never add an
+  entry to make a test pass.
+- *Gates*: =make check-fast= while iterating; =make check= (adds the
+  =slow= tier) before calling anything done. =mypy --strict= and =ruff=
+  clean, =make lint-patched= clean. No =# type: ignore= or =Any= without
+  a written justification.
+- *No network in the gate.* =ScriptedPolicy= and =ReplayPolicy= only.
+- *Docs are =.org=.* =CLAUDE.md= is the single exception in this repo.
+- *Frames never enter a trace.* They go to the run directory.
+
+* File structure
+
+| File | Responsibility |
+|------+----------------|
+| =tuxghost/boot.py= (modify) | tolerant map-asset resolution; optional injected display context |
+| =tuxghost/execute.py= (modify) | refuse an unresolvable map instead of raising =OSError= |
+| =tuxghost/record.py= (modify) | additive =taints= / =claimed_outcome= pass-through |
+| =tuxghost/observe.py= (create) | renderer install, frame render, crop + upscale, PNG bytes, colour sampling |
+| =tuxghost/agent/types.py= (create) | =Action=, =Observation=, =Policy=, caps, validation |
+| =tuxghost/agent/runner.py= (create) | the agent loop over one mutable schedule |
+| =tuxghost/agent/scripted.py= (create) | =ScriptedPolicy= |
+| =tuxghost/agent/replay.py= (create) | =ReplayPolicy= over a JSONL transcript |
+| =tuxghost/agent/claude.py= (create) | =ClaudePolicy=: lazy =anthropic=, sliding window + notes |
+| =tuxghost/cli.py= (modify) | =agent= subcommand |
+| =tests/fixtures/make_paper_town_save.py= (create) | committed generator for the start fixture |
+| =tests/fixtures/paper_town.save= (create) | the fixture itself |
+
+---
+
+* Task 1: Refuse an unresolvable map instead of raising =OSError=
+
+This is an *S1 defect found while planning S2*, and it blocks Task 3's
+fixture. Measured on this tree: a save whose =npc_state.current_map= has
+no =.tmx= extension makes =boot_from_save= raise an uncaught
+=OSError: [Fetch] Asset not found: maps/start_tuxemon=, so =verify()=
+*raises* instead of returning 2, and =tuxghost/cli.py= would exit *1
+("diverged")* instead of 2 ("refused") — precisely the conflation the CLI
+module docstring says must never be reintroduced. The trigger is
+realistic: =tuxemon/mods/tuxemon/maps/spyder_paper_town.tmx= and its
+neighbours script teleports as =teleport player,spyder_route1= with *no
+extension*, while the eclipse maps use =...bank1.tmx= *with* one — so an
+in-game save's =current_map= may legitimately be either form.
+
+*Files:*
+- Modify: =tuxghost/boot.py= (=boot_from_save=, around the =fetch_asset("maps", ...)= call)
+- Modify: =tuxghost/execute.py= (=execute='s precondition block)
+- Test: =tests/test_boot.py= (append), =tests/test_execute.py= (append)
+
+*Interfaces:*
+- Produces: =tuxghost.boot.resolve_map_asset(current_map: str) -> str | None=
+  — the asset path for =current_map= as given or with =".tmx"= appended,
+  or =None= when neither exists. Used by =boot_from_save= and by
+  =execute=/=cli= as a *precondition check before booting*.
+
+- [ ] *Step 1: Write the two failing tests*
+
+In =tests/test_boot.py=:
+
+#+begin_src python
+def test_resolve_map_asset_accepts_a_name_with_or_without_the_extension() -> None:
+    """`spyder_*` maps script teleports as `teleport player,spyder_route1`
+    (no extension) while `eclipse_*` maps use `...bank1.tmx`, so a real
+    save's `current_map` is legitimately either form."""
+    from tuxghost.boot import headless_context, resolve_map_asset
+
+    headless_context()  # fetch_asset needs the mod db loaded
+    assert resolve_map_asset("start_tuxemon.tmx") is not None
+    assert resolve_map_asset("start_tuxemon") is not None
+    assert resolve_map_asset("no_such_map_xyz") is None
+#+end_src
+
+In =tests/test_execute.py=:
+
+#+begin_src python
+def test_execute_boots_a_save_whose_current_map_omits_the_extension() -> None:
+    """Pins the S1 defect: an extension-less `current_map` -- what every
+    `spyder_*` map's own teleport script produces -- raised an uncaught
+    OSError out of `fetch_asset`, so `verify()` raised instead of
+    returning 2 and the CLI would have exited 1 ("diverged") for what is
+    a refusal at worst and a bootable save at best."""
+    from tuxghost.execute import execute
+    from tuxghost.trace import read
+
+    trace = read(GOLDEN)
+    trace.header.step_count = 30
+    with_ext = execute(trace).final_digest
+
+    trace_no_ext = read(GOLDEN)
+    trace_no_ext.header.step_count = 30
+    trace_no_ext.initial_state["npc_state"]["current_map"] = "start_tuxemon"
+    assert execute(trace_no_ext).final_digest == with_ext
+
+
+def test_verify_refuses_a_trace_whose_map_cannot_be_resolved() -> None:
+    """A genuinely missing map is exit 2 (refused), never an exception and
+    never exit 1 (diverged) -- see tuxghost/cli.py's module docstring."""
+    from tuxghost.execute import verify
+    from tuxghost.trace import read
+
+    trace = read(GOLDEN)
+    trace.header.step_count = 30
+    trace.initial_state["npc_state"]["current_map"] = "no_such_map_xyz"
+    assert verify(trace) == 2
+#+end_src
+
+=GOLDEN= already exists in =tests/test_golden.py=; define it the same way
+in =tests/test_execute.py= if that file does not already have it:
+=GOLDEN = Path(__file__).parent / "golden" / "walk_1234.tuxghost"=.
+
+- [ ] *Step 2: Run them and confirm they fail*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q \
+  tests/test_boot.py::test_resolve_map_asset_accepts_a_name_with_or_without_the_extension \
+  tests/test_execute.py::test_execute_boots_a_save_whose_current_map_omits_the_extension \
+  tests/test_execute.py::test_verify_refuses_a_trace_whose_map_cannot_be_resolved -v
+#+end_src
+
+Expected: the first fails with =ImportError= /
+=cannot import name 'resolve_map_asset'=; the second and third fail with
+=OSError: [Fetch] Asset not found: maps/...= raised *out of the test*, not
+an assertion failure. Record that exact output — an uncaught =OSError=
+where the contract promises a return code is the defect.
+
+- [ ] *Step 3: Implement =resolve_map_asset= and use it in =boot_from_save=*
+
+In =tuxghost/boot.py=:
+
+#+begin_src python
+def resolve_map_asset(current_map: str) -> str | None:
+    """Resolve a save's `npc_state.current_map` to a real map asset path.
+
+    Accepts the name with or without the `.tmx` extension, because BOTH
+    forms occur in real saves: `tuxemon/mods/tuxemon/maps/*.tmx` script
+    teleports as `teleport player,spyder_route1` (extension-less, and
+    `Teleporter.teleport_character` stores exactly the string it was
+    given via `place_npc_on_map` -> `NPC.set_current_map`), while the
+    `eclipse_*` yaml maps script `transition_teleport
+    player,eclipse_crystal_bank1.tmx,...` WITH one. Returns None when
+    neither form exists, so callers can refuse (exit 2) rather than let
+    `fetch_asset`'s bare OSError escape as exit 1 ("diverged").
+    """
+    from tuxemon.constants.asset_loader import fetch_asset
+
+    for candidate in (current_map, f"{current_map}.tmx"):
+        try:
+            return str(fetch_asset("maps", candidate))
+        except OSError:
+            continue
+    return None
+#+end_src
+
+Then in =boot_from_save=, replace
+
+#+begin_src python
+    client.push_state(
+        "WorldState",
+        session=local_session,
+        map_name=fetch_asset("maps", npc_state.current_map),
+    )
+#+end_src
+
+with
+
+#+begin_src python
+    map_asset = resolve_map_asset(npc_state.current_map)
+    if map_asset is None:
+        raise ValueError(
+            f"save's npc_state.current_map={npc_state.current_map!r} "
+            "resolves to no map asset, with or without a .tmx extension; "
+            "callers that need a return code instead of an exception "
+            "should call resolve_map_asset() first (see tuxghost.execute)"
+        )
+    client.push_state("WorldState", session=local_session, map_name=map_asset)
+#+end_src
+
+Drop the now-unused =fetch_asset= import from =boot_from_save= if nothing
+else in that function uses it.
+
+- [ ] *Step 4: Add the precondition check to =execute=*
+
+In =tuxghost/execute.py=, extend the existing precondition block. Keep the
+existing project discipline: *check before calling*, never wrap
+=boot_from_save= in a broad =except= — that would also swallow genuine
+engine invariant failures and misreport them as "this trace is
+unrunnable".
+
+#+begin_src python
+    if save_data.npc_state is None or save_data.npc_state.current_map is None:
+        raise Refused(
+            "trace is unrunnable here: initial_state.npc_state.current_map "
+            "is required to restore a session (see tuxghost.boot"
+            ".boot_from_save)"
+        )
+
+    if resolve_map_asset(save_data.npc_state.current_map) is None:
+        raise Refused(
+            "trace is unrunnable here: initial_state.npc_state.current_map="
+            f"{save_data.npc_state.current_map!r} resolves to no map asset "
+            "(tried it as given and with a .tmx extension). This is a "
+            "refusal, not a divergence."
+        )
+#+end_src
+
+Import =resolve_map_asset= alongside the existing =boot_from_save= import.
+
+- [ ] *Step 5: Run the tests and the full fast gate*
+
+#+begin_src bash
+make check-fast
+#+end_src
+
+Expected: the three new tests pass, every pre-existing test still passes.
+
+- [ ] *Step 6: Demonstrate the tests fail against the bug*
+
+Revert =boot_from_save= to =fetch_asset("maps", npc_state.current_map)=
+and remove the =execute= check; run the three tests; capture the real
+failure output; restore; run again; capture the pass; =git diff= to prove
+the tree is restored. Put all of it in the report.
+
+- [ ] *Step 7: Commit*
+
+#+begin_src bash
+git add tuxghost/boot.py tuxghost/execute.py tests/test_boot.py tests/test_execute.py
+git commit -m "fix: an unresolvable map is a refusal (exit 2), not an uncaught OSError
+
+Found while planning S2. A save whose npc_state.current_map lacks the
+.tmx extension -- what every spyder_* map's own teleport script produces
+-- made boot_from_save raise OSError out of fetch_asset, so verify()
+raised instead of returning 2 and the CLI would have exited 1
+('diverged') for a refusal. resolve_map_asset() accepts either form,
+because real saves contain both."
+#+end_src
+
+---
+
+* Task 2: =tuxghost/observe.py= — the frame renderer
+
+*Files:*
+- Create: =tuxghost/observe.py=
+- Test: =tests/test_observe.py=
+
+*Interfaces:*
+- Consumes: nothing from Task 1 at runtime (but Task 3's fixture needs Task 1).
+- Produces:
+  - =tuxghost.observe.BACKGROUND: tuple[int, int, int]= = =(0, 0, 0)=
+  - =tuxghost.observe.distinct_colors(surface: Any, stride: int = 7) -> set[tuple[int, int, int]]=
+  - =tuxghost.observe.FrameRenderer(client: Any, upscale: int = 4)= with
+    =.surface() -> Any=, =.png() -> bytes=, =.last_frame_was_blank: bool=
+
+Verified facts this task rests on (all probed on this tree):
+=WorldState.draw= with the stock =NullRenderer= yields *1* distinct
+sampled colour (pure black); with a =MapRenderer= installed through
+=client.set_renderer= it yields *48* on the same state.
+=surface.set_colorkey((0,0,0))= + =get_bounding_rect()= returns the drawn
+region exactly; =pygame.transform.scale_by(sub, 4)= preserves corner
+colour (nearest-neighbour); =pygame.image.save(surface, BytesIO(), "PNG")=
+works and is byte-stable across two encodes of the same surface.
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""The renderer install is the whole difference between a blank frame and
+a usable one: probed, `NullRenderer` draws 1 distinct colour where a real
+`MapRenderer` draws 48 on the same state. A test that merely asserts a
+frame is "not empty" would pass against a black rectangle, which is the
+vacuous shape this file exists to avoid."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from tuxemon.save_system.save_state import SaveData
+
+from tuxghost.boot import boot_from_save
+from tuxghost.determinism import pin_clock
+from tuxghost.digest import digest_of
+from tuxghost.loop import InputSchedule, install_schedule, run_steps
+from tuxghost.observe import BACKGROUND, FrameRenderer, distinct_colors
+
+FIXTURE = Path(__file__).parent / "fixtures" / "paper_town.save"
+EPOCH = 1787659200  # daytime, matches tests/test_digest.py's DIGEST_EPOCH
+
+
+def _boot_fixture() -> tuple[Any, Any]:
+    import json
+
+    pin_clock(EPOCH)
+    save = SaveData.model_validate(json.loads(FIXTURE.read_text()))
+    return boot_from_save(save, seed=1234, clock_epoch=EPOCH)
+
+
+def test_null_renderer_draws_nothing_and_map_renderer_draws_the_world() -> None:
+    import pygame as pg
+
+    from tuxemon.state.draw import StateDrawer
+
+    client, _session = _boot_fixture()
+    schedule: InputSchedule = {}
+    install_schedule(client, schedule)
+    run_steps(client, 10)
+
+    # Baseline: the stock headless renderer, drawn the same way.
+    bare = pg.Surface(client.context.resolution)
+    bare.fill(BACKGROUND)
+    StateDrawer(bare, client.state_manager, client.config).draw()
+    assert len(distinct_colors(bare)) == 1, "NullRenderer should draw nothing"
+
+    # FrameRenderer installs a real MapRenderer through the public seam.
+    frames = FrameRenderer(client)
+    assert len(distinct_colors(frames.surface())) > 1
+
+
+def test_frame_png_is_cropped_upscaled_and_stable() -> None:
+    client, _session = _boot_fixture()
+    install_schedule(client, {})
+    run_steps(client, 10)
+    frames = FrameRenderer(client, upscale=4)
+
+    png = frames.png()
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    assert not frames.last_frame_was_blank
+    # Cropped, so far smaller than a full 1280x720 frame's worth of pixels.
+    assert len(png) < 400_000
+    # Two encodes of an unchanged frame are byte-identical.
+    assert frames.png() == png
+
+
+def test_rendering_does_not_change_the_digest() -> None:
+    """The structural hazard: recording draws, replay does not. If drawing
+    perturbs digested state, every agent-recorded trace would fail to
+    replay."""
+    client, session = _boot_fixture()
+    install_schedule(client, {})
+    run_steps(client, 10)
+
+    before = digest_of(session)
+    frames = FrameRenderer(client)
+    for _ in range(5):
+        frames.png()
+    assert digest_of(session) == before
+
+
+def test_installed_renderer_survives_a_map_change() -> None:
+    """Unmeasured before this test: no probe crossed a map boundary with a
+    real renderer installed. `reset_renderer()` is a no-op on `BaseClient`
+    and `MapRenderer` holds managers rather than a map, so it SHOULD
+    survive -- this is what turns that inference into knowledge."""
+    client, _session = _boot_fixture()
+    schedule: InputSchedule = {}
+    install_schedule(client, schedule)
+    run_steps(client, 10)
+    frames = FrameRenderer(client)
+    before_map = client.get_map_name()
+
+    client.event_engine.execute_action(
+        "teleport", ("npc_red", "spyder_paper_scoop", 5, 5)
+    )
+    run_steps(client, 90)
+    assert client.get_map_name() != before_map
+    assert len(distinct_colors(frames.surface())) > 1
+#+end_src
+
+- [ ] *Step 2: Run them and confirm they fail*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_observe.py -v
+#+end_src
+
+Expected: =ModuleNotFoundError: No module named 'tuxghost.observe'=.
+(=tests/fixtures/paper_town.save= does not exist yet either — Task 3
+creates it. If you are executing tasks strictly in order, do Task 3 first
+and come back; the tasks are written so Task 2's implementation does not
+depend on Task 3's artifact, only its tests do.)
+
+- [ ] *Step 3: Implement =tuxghost/observe.py=*
+
+#+begin_src python
+"""Renders what the agent sees.
+
+No engine patch: a real `MapRenderer` is installed through the PUBLIC
+`BaseClient.set_renderer` seam, and upstream's `StateDrawer` composites
+`state_manager.active_states` bottom-to-top with the same occlusion rule
+the real game uses -- so a frame rendered here is the frame a human would
+see, including the case where an opaque full-screen state (a cutscene
+`ImageState`, a menu) legitimately hides the world.
+
+Why not upstream's `Renderer`: it adds an fps window caption, a debug
+overlay, and `save_frame`-to-disk, none of which this harness wants (the
+first is wall-clock flavoured). `StateDrawer` is the part that matters.
+
+Where animation time comes from: `WorldState.update(dt)` already calls
+`client.map_renderer.update(dt)` every step, so once a real renderer is
+installed the engine's own per-step update advances its animations at
+this harness's fixed dt. Observation frequency cannot leak into animation
+state -- drawing here never calls `update`.
+"""
+
+from __future__ import annotations
+
+from io import BytesIO
+from typing import Any
+
+#: The colour a frame is cleared to before drawing. Doubles as the
+#: "nothing was drawn here" key for cropping, via `set_colorkey`.
+BACKGROUND = (0, 0, 0)
+
+#: Pixel step used when sampling a surface's colours. 7 is coprime with
+#: the tile size (16) and every power of two in the resolution, so the
+#: sample does not land on a single repeating column of a tiled floor.
+SAMPLE_STRIDE = 7
+
+
+def distinct_colors(
+    surface: Any, stride: int = SAMPLE_STRIDE
+) -> set[tuple[int, int, int]]:
+    """Sampled distinct RGB values. A blank frame yields exactly one.
+
+    Sampled rather than exhaustive because `numpy` is not a dependency of
+    this project (`pygame.surfarray` is unavailable), and 1280x720
+    `get_at` calls per assertion is slow enough to matter in a suite that
+    already drives real game loops.
+    """
+    width, height = surface.get_size()
+    return {
+        tuple(surface.get_at((x, y))[:3])
+        for x in range(0, width, stride)
+        for y in range(0, height, stride)
+    }
+
+
+class FrameRenderer:
+    """Installs a real map renderer, then renders frames on demand.
+
+    Constructing this MUTATES the client: it swaps `NullRenderer` for a
+    real `MapRenderer`. That is the point -- probed, `NullRenderer` draws
+    exactly 1 distinct colour (pure black) where `MapRenderer` draws 48 on
+    the same state -- but it means a caller cannot treat this as a
+    read-only observer. Drawing itself is side-effect-free with respect to
+    the digest (`tests/test_observe.py` pins that).
+    """
+
+    def __init__(self, client: Any, upscale: int = 4) -> None:
+        import pygame as pg
+        from tuxemon.map.view import DebugRenderer, MapRenderer
+        from tuxemon.state.draw import StateDrawer
+
+        if upscale < 1:
+            raise ValueError(f"upscale must be >= 1, got {upscale!r}")
+
+        self._client = client
+        self._upscale = upscale
+        self._surface = pg.Surface(client.context.resolution)
+        self._drawer = StateDrawer(
+            self._surface, client.state_manager, client.config
+        )
+        self.last_frame_was_blank = False
+
+        client.set_renderer(
+            MapRenderer(
+                client.camera_manager,
+                client.npc_manager,
+                DebugRenderer(
+                    client.map_manager, client.npc_manager, client.context
+                ),
+                client.context,
+            )
+        )
+
+    def surface(self) -> Any:
+        """Draw the current active-state stack and return the full frame."""
+        self._surface.fill(BACKGROUND)
+        self._drawer.draw()
+        return self._surface
+
+    def png(self) -> bytes:
+        """The current frame as PNG bytes: cropped to the drawn region and
+        integer-upscaled.
+
+        Cropped because the headless display context is built at
+        `scale=1` (`tuxemon/prepare.py`'s `headless_init`), so a small map
+        renders as an island in a large `BACKGROUND` field -- sending a
+        model a mostly-black 1280x720 image wastes tokens. Upscaled with
+        nearest-neighbour (`scale_by`, verified to preserve corner colour)
+        because resampling pixel art into mush is worse than not scaling.
+
+        A blank frame (nothing drawn at all -- legitimate between map
+        loads) is encoded whole rather than cropped to nothing, and flagged
+        on `last_frame_was_blank` so a caller can log it instead of
+        silently treating black as a picture.
+        """
+        import pygame as pg
+
+        full = self.surface()
+        full.set_colorkey(BACKGROUND)
+        rect = full.get_bounding_rect()
+        full.set_colorkey(None)
+
+        self.last_frame_was_blank = rect.width == 0 or rect.height == 0
+        if self.last_frame_was_blank:
+            out = full
+        else:
+            cropped = full.subsurface(rect).copy()
+            out = (
+                pg.transform.scale_by(cropped, self._upscale)
+                if self._upscale > 1
+                else cropped
+            )
+
+        buf = BytesIO()
+        pg.image.save(out, buf, "PNG")
+        return buf.getvalue()
+#+end_src
+
+- [ ] *Step 4: Run the tests and the fast gate*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_observe.py -v && make check-fast
+#+end_src
+
+Expected: all four pass. If =test_installed_renderer_survives_a_map_change=
+fails, that is a *real finding*, not a test bug: report it and stop —
+the design's "the install survives" inference was wrong and the spec
+needs revising.
+
+- [ ] *Step 5: Demonstrate the tests fail against their defects*
+
+Two mutations, both required in the report:
+1. Make the =client.set_renderer(...)= call in =FrameRenderer.__init__= a
+   no-op. Expected:
+   =test_null_renderer_draws_nothing_and_map_renderer_draws_the_world=
+   fails on =assert len(distinct_colors(frames.surface())) > 1= (it will
+   be exactly 1).
+2. Give observation a side effect: add
+   =self._client.update(1.0 / 60)= to =FrameRenderer.surface()=. Expected:
+   =test_rendering_does_not_change_the_digest= fails with two different
+   digests. This is the mutation that proves gate 1 is not vacuous.
+
+Restore after each; =git diff= to confirm.
+
+- [ ] *Step 6: Commit*
+
+#+begin_src bash
+git add tuxghost/observe.py tests/test_observe.py
+git commit -m "feat: render the agent's view through public engine seams only
+
+MapRenderer installed via BaseClient.set_renderer + upstream StateDrawer;
+no seventh patch. Pins the measured discrimination (NullRenderer draws 1
+distinct colour, MapRenderer 48) rather than a vacuous 'frame not empty',
+and pins that drawing leaves the digest byte-identical."
+#+end_src
+
+---
+
+* Task 3: The start fixture
+
+An agent must start somewhere playable. Probed: =boot_from_save= pushes a
+*fresh* =WorldState= and =SaveData= carries no state stack, so restoring
+any save yields a bare =['WorldState']= — no intro states. But the golden
+trace's save has =current_map = "start_tuxemon.tmx"=, the staging map
+whose own script re-runs campaign select (its frame samples to the same 78
+colours as the =ChoiceState=). And a cold boot cannot be scripted past the
+intro by mashing =A=: probed over 6000 steps it wedges on =InputMenu=, the
+name-entry keyboard, by step 1140 and the stack never changes again.
+
+So the fixture is built by *teleporting* — the engine's own event action —
+and snapshotting. Probed working: =execute_action("teleport", ("npc_red",
+"spyder_paper_town", 10, 10))= put the player on
+=spyder_paper_town.tmx= at tile (10, 10) with a party. Note that the
+resulting save's =current_map= is extension-less, which is exactly why
+Task 1 comes first.
+
+*Files:*
+- Create: =tests/fixtures/make_paper_town_save.py= (committed generator)
+- Create: =tests/fixtures/paper_town.save= (the artifact)
+- Test: =tests/test_agent_fixture.py=
+
+*Interfaces:*
+- Consumes: =tuxghost.boot.resolve_map_asset= (Task 1) — indirectly, via =boot_from_save=.
+- Produces: =tests/fixtures/paper_town.save=, a =SaveData= JSON with
+  =current_map= =spyder_paper_town=, a non-empty party, restorable to a
+  bare =WorldState=. Consumed by Tasks 2, 5, 6, 7, 8.
+
+- [ ] *Step 1: Write the generator*
+
+=tests/fixtures/make_paper_town_save.py=. Named =make_*= so pytest does
+not collect it.
+
+#+begin_src python
+"""Generates tests/fixtures/paper_town.save -- the agent harness's start
+state. Run from the repo root:
+
+    SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+      ./.venv/bin/python tests/fixtures/make_paper_town_save.py
+
+Why teleport rather than play the intro: probed, mashing A from a cold
+boot does not reach a bare WorldState within 6000 steps -- it wedges on
+`InputMenu`, the name-entry keyboard, by step 1140 and the state stack
+stops changing. Teleport is the engine's own event action, and
+`boot_from_save` restores no state stack (SaveData has none), so the
+resulting save boots to a bare WorldState in a real town.
+
+The output is COMMITTED. This script exists so the artifact is
+reproducible and reviewable, not because the gate re-runs it.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT / "tuxemon"))
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT / "tuxemon")
+
+from tuxghost.boot import build_client, snapshot_save  # noqa: E402
+from tuxghost.determinism import pin_clock  # noqa: E402
+from tuxghost.loop import install_schedule, run_steps  # noqa: E402
+
+EPOCH = 1787659200  # 2026-08-25T12:00:00 UTC -- daytime, as elsewhere
+SEED = 1234
+MAP = "spyder_paper_town"
+TILE = (10, 10)
+OUT = ROOT / "tests" / "fixtures" / "paper_town.save"
+
+
+def main() -> None:
+    pin_clock(EPOCH)
+    client, session = build_client(seed=SEED, clock_epoch=EPOCH)
+    install_schedule(client, {})
+    run_steps(client, 60)  # let the launcher map settle
+
+    action = client.event_engine.execute_action
+    action("add_monster", ("rockitten", 5))
+    action("add_monster", ("budaye", 5))
+    action("add_item", ("potion",))
+    action("teleport", ("npc_red", MAP, TILE[0], TILE[1]))
+    run_steps(client, 90)  # teleports are queued and resolve over frames
+
+    save = snapshot_save(session)
+    assert save.npc_state is not None
+    print(f"current_map={save.npc_state.current_map!r}")
+    OUT.write_text(save.model_dump_json())
+    print(f"wrote {OUT}")
+
+
+main()
+#+end_src
+
+- [ ] *Step 2: Generate the fixture and eyeball it*
+
+#+begin_src bash
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  ./.venv/bin/python tests/fixtures/make_paper_town_save.py
+./.venv/bin/python -c "
+import json; d=json.load(open('tests/fixtures/paper_town.save'))
+n=d['npc_state']; print(n['current_map'], n.get('tile_pos'), [m['slug'] for m in n['monsters']])"
+#+end_src
+
+Expected: =current_map='spyder_paper_town'= (extension-less — Task 1 is
+what makes it bootable) and a two-monster party.
+
+- [ ] *Step 3: Write the fixture's test, including WALKABILITY*
+
+The fixture is only useful if the agent can actually move from its spawn
+tile. This is *unverified* as of writing: the teleport probe could not
+test walking, because the intro's own dialog states were still on top
+consuming input at that moment. This test is the verification.
+
+=tests/test_agent_fixture.py=:
+
+#+begin_src python
+"""The start fixture must boot to a bare, PLAYABLE overworld.
+
+"Playable" is the load-bearing word: a save that restores to a WorldState
+the player cannot move in would pass every "does it boot" assertion while
+making the agent harness useless, and the walk assertion below is the only
+thing that would notice.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from tuxemon.platform.const import buttons
+from tuxemon.save_system.save_state import SaveData
+from tuxemon.states.world_state import WorldState
+
+from tuxghost.boot import boot_from_save
+from tuxghost.determinism import pin_clock
+from tuxghost.loop import InputSchedule, install_schedule, run_steps
+
+FIXTURE = Path(__file__).parent / "fixtures" / "paper_town.save"
+EPOCH = 1787659200
+
+
+def _boot() -> tuple[Any, Any]:
+    pin_clock(EPOCH)
+    save = SaveData.model_validate(json.loads(FIXTURE.read_text()))
+    return boot_from_save(save, seed=1234, clock_epoch=EPOCH)
+
+
+def test_fixture_boots_to_a_bare_world_state_in_the_town() -> None:
+    client, _session = _boot()
+    assert list(client.active_state_names) == ["WorldState"]
+    assert client.get_map_name() == "spyder_paper_town.tmx"
+
+
+def test_fixture_has_a_party() -> None:
+    client, _session = _boot()
+    world = client.get_state_by_name(WorldState)
+    assert [m.slug for m in world.player.monsters] == ["rockitten", "budaye"]
+
+
+def test_player_can_walk_from_the_fixture_spawn() -> None:
+    client, _session = _boot()
+    world = client.get_state_by_name(WorldState)
+    schedule: InputSchedule = {}
+    install_schedule(client, schedule)
+    start = world.player.tile_pos
+
+    moved = None
+    for button in (buttons.DOWN, buttons.UP, buttons.LEFT, buttons.RIGHT):
+        schedule.clear()
+        base = 5
+        schedule[base] = [(button, 1.0)]
+        schedule[base + 60] = [(button, 0.0)]
+        run_steps(client, 120)
+        if world.player.tile_pos != start:
+            moved = button
+            break
+    assert moved is not None, (
+        f"player could not leave tile {start} in any direction; the "
+        "fixture spawn is boxed in -- regenerate it at a different tile"
+    )
+#+end_src
+
+- [ ] *Step 4: Run it*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_agent_fixture.py -v
+#+end_src
+
+If =test_player_can_walk_from_the_fixture_spawn= fails, the spawn tile is
+blocked: edit =TILE= in the generator (try (12, 12), (8, 14), (14, 8)),
+regenerate, re-run, and *record in the report which tile worked and which
+did not*. Do not weaken the assertion.
+
+- [ ] *Step 5: Measure the walk cost, for the action defaults*
+
+The spec forbids inheriting the Game Boy's 10/120 frame numbers. Measure
+this project's real numbers with a throwaway script (scratchpad, not
+committed): from the fixture, hold the walking direction found above and
+record how many steps elapse per tile boundary crossed, over at least 5
+tiles. Write the result into =tuxghost/agent/types.py='s constants in
+Task 4 and quote the raw measurement in the task report.
+
+- [ ] *Step 6: Commit*
+
+#+begin_src bash
+git add tests/fixtures/make_paper_town_save.py tests/fixtures/paper_town.save \
+        tests/test_agent_fixture.py
+git commit -m "test: committed start fixture, boots to a bare playable overworld
+
+Built by teleport + snapshot, not by playing the intro: probed, mashing A
+from a cold boot wedges on the InputMenu name-entry keyboard by step 1140
+and never reaches a bare WorldState. The walkability assertion is the
+load-bearing one -- a save that restores to a world the player cannot move
+in would pass every 'does it boot' check while making the harness
+useless."
+#+end_src
+
+---
+
+* Task 4: =tuxghost/agent/types.py= — actions, observations, validation
+
+*Files:*
+- Create: =tuxghost/agent/__init__.py= (empty)
+- Create: =tuxghost/agent/types.py=
+- Test: =tests/test_agent_types.py=
+
+*Interfaces:*
+- Produces:
+  - =Action(button: int, hold: int, settle: int)= — frozen dataclass
+  - =Observation(step: int, frame_png: bytes, frame_is_blank: bool, state_stack: tuple[str, ...], map_name: str, tile_pos: tuple[int, int])= — frozen dataclass
+  - =Policy= protocol with =decide(self, obs: Observation) -> Sequence[Action]=
+  - =HOLD_CAP: int=, =SETTLE_CAP: int=, =WALK_ONE_TILE: int= (measured in Task 3 Step 5)
+  - =validate_actions(actions: Sequence[Action]) -> tuple[Action, ...]=
+  - =STOP: tuple[Action, ...]= = =()= — the documented "stop the run" answer
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""A policy is untrusted input -- a model can and will emit nonsense. Every
+rejection here is a boundary check, per this project's standing preference
+for validation over convenience."""
+
+from __future__ import annotations
+
+import pytest
+from tuxemon.platform.const import buttons
+
+from tuxghost.agent.types import (
+    HOLD_CAP,
+    SETTLE_CAP,
+    Action,
+    validate_actions,
+)
+
+
+def test_valid_actions_pass_through_unchanged() -> None:
+    actions = (Action(buttons.DOWN, hold=12, settle=6),)
+    assert validate_actions(actions) == actions
+
+
+def test_empty_means_stop_and_is_not_an_error() -> None:
+    assert validate_actions(()) == ()
+
+
+@pytest.mark.parametrize(
+    "action, message",
+    [
+        (Action(buttons.A, hold=0, settle=1), "hold"),
+        (Action(buttons.A, hold=-1, settle=1), "hold"),
+        (Action(buttons.A, hold=HOLD_CAP + 1, settle=1), "hold"),
+        (Action(buttons.A, hold=1, settle=-1), "settle"),
+        (Action(buttons.A, hold=1, settle=SETTLE_CAP + 1), "settle"),
+        (Action(999_999, hold=1, settle=1), "button"),
+    ],
+)
+def test_invalid_actions_are_rejected_at_the_boundary(
+    action: Action, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        validate_actions((action,))
+
+
+def test_a_non_action_in_the_sequence_is_rejected() -> None:
+    """A model's JSON decodes to dicts, so `validate_actions` must reject a
+    dict that merely LOOKS like an Action rather than duck-typing it."""
+    with pytest.raises(TypeError, match="Action"):
+        # type: ignore is deliberate: passing the wrong type IS the test,
+        # and mypy is correct to object at the call site.
+        validate_actions(({"button": 64, "hold": 1, "settle": 1},))  # type: ignore[arg-type]
+#+end_src
+
+- [ ] *Step 2: Run and confirm it fails*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_agent_types.py -v
+#+end_src
+
+Expected: =ModuleNotFoundError: No module named 'tuxghost.agent'=.
+
+- [ ] *Step 3: Implement*
+
+=tuxghost/agent/types.py= (replace =WALK_ONE_TILE = 0= with Task 3 Step
+5's measured value, and quote the measurement in the docstring):
+
+#+begin_src python
+"""The agent's vocabulary: what it sees, what it may answer.
+
+An action is a DURATION, not an instant. At 60 steps/s one step of UP does
+not move the player a tile, a dialog needs A pressed AND released, and a
+combat menu needs several presses -- so `(button, hold, settle)` is the
+smallest unit that does anything. The harness owns durations and cadence
+becomes a property of the policy: a fixed-window RL policy (S3) is simply
+a policy that always returns the same numbers, needing no harness change.
+
+Prior art, for why this shape and not a per-frame button mask:
+`ClaudePlaysPokemonStarter`'s `press_buttons` holds 10 frames then settles
+120; `PokemonRedExperiments` presses at tick 0 and releases at tick 8 of a
+fixed window. Those frame counts are Game Boy-specific and deliberately
+NOT inherited -- `WALK_ONE_TILE` below is measured on this game.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
+
+from tuxemon.platform.const import buttons as _buttons
+
+#: Steps a held direction takes to cross one tile. MEASURED on the
+#: `paper_town` fixture (see the task-3 report for the raw numbers), not
+#: inherited from any Game Boy harness.
+WALK_ONE_TILE = 0  # <- replace with the measured value
+
+#: A single decision may not hold a button, or wait, for longer than 10
+#: seconds of game time. A cap is not a style preference: an LLM that
+#: emits `hold: 1000000` would otherwise run the game for four and a half
+#: hours of game time inside one `run_steps` call, unobservable and
+#: uninterruptible.
+HOLD_CAP = 600
+SETTLE_CAP = 600
+
+#: Every virtual button the platform layer defines. Built from the module
+#: rather than hardcoded so a new upstream button does not silently become
+#: "invalid input" here.
+VALID_BUTTONS = frozenset(
+    value
+    for name, value in vars(_buttons).items()
+    if not name.startswith("_") and isinstance(value, int)
+)
+
+
+@dataclass(frozen=True)
+class Action:
+    """Press `button`, hold it `hold` steps, release, then run `settle`
+    more steps before the next observation."""
+
+    button: int
+    hold: int
+    settle: int
+
+
+@dataclass(frozen=True)
+class Observation:
+    """What the policy is given. `frame_png` is the observation; everything
+    else is metadata for logs and tests.
+
+    A policy that decides from `state_stack` rather than the frame is a
+    state-machine agent wearing a computer-use agent's clothes -- the
+    metadata is here so a failing test can say WHERE the agent was, and so
+    a run directory is auditable after the fact.
+    """
+
+    step: int
+    frame_png: bytes
+    frame_is_blank: bool
+    state_stack: tuple[str, ...]
+    map_name: str
+    tile_pos: tuple[int, int]
+
+
+@runtime_checkable
+class Policy(Protocol):
+    def decide(self, obs: Observation) -> Sequence[Action]:
+        """Return the actions to take now. An EMPTY sequence means STOP --
+        it is a valid answer, not an error (see `STOP`)."""
+        ...
+
+
+#: The documented way for a policy to end a run.
+STOP: tuple[Action, ...] = ()
+
+
+def validate_actions(actions: Sequence[Action]) -> tuple[Action, ...]:
+    """Check a policy's answer before any of it reaches the engine.
+
+    A policy is untrusted input: `ClaudePolicy` parses a language model's
+    JSON, and a malformed action that slipped through would corrupt a
+    trace (an out-of-range `hold` silently rescales it) rather than fail
+    loudly.
+    """
+    checked = []
+    for index, action in enumerate(actions):
+        if not isinstance(action, Action):
+            raise TypeError(
+                f"actions[{index}] must be an Action, got "
+                f"{type(action).__name__}"
+            )
+        if action.button not in VALID_BUTTONS:
+            raise ValueError(
+                f"actions[{index}].button={action.button!r} is not a known "
+                "virtual button (tuxemon.platform.const.buttons)"
+            )
+        if not 1 <= action.hold <= HOLD_CAP:
+            raise ValueError(
+                f"actions[{index}].hold={action.hold!r} must be between 1 "
+                f"and HOLD_CAP={HOLD_CAP}"
+            )
+        if not 0 <= action.settle <= SETTLE_CAP:
+            raise ValueError(
+                f"actions[{index}].settle={action.settle!r} must be between "
+                f"0 and SETTLE_CAP={SETTLE_CAP}"
+            )
+        checked.append(action)
+    return tuple(checked)
+#+end_src
+
+- [ ] *Step 4: Run tests and the fast gate*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_agent_types.py -v && make check-fast
+#+end_src
+
+- [ ] *Step 5: Demonstrate the tests fail against the defect*
+
+Remove the =hold= range check from =validate_actions=; run the tests;
+capture the failure (=DID NOT RAISE ValueError=); restore; re-run; confirm
+via =git diff=.
+
+- [ ] *Step 6: Commit*
+
+#+begin_src bash
+git add tuxghost/agent/__init__.py tuxghost/agent/types.py tests/test_agent_types.py
+git commit -m "feat: agent action/observation vocabulary with boundary validation
+
+An action is a duration (button, hold, settle), so cadence is a property
+of the policy rather than the harness -- S3's fixed-window RL policy needs
+no harness change. WALK_ONE_TILE is measured on this game, not inherited
+from a Game Boy harness."
+#+end_src
+
+---
+
+* Task 5: =tuxghost/agent/runner.py= — the loop
+
+The heart of S2, and the three determinism gates live here.
+
+*Files:*
+- Create: =tuxghost/agent/runner.py=
+- Modify: =tuxghost/record.py= (additive: =taints=, =claimed_outcome=)
+- Test: =tests/test_agent_runner.py=
+
+*Interfaces:*
+- Consumes: =tuxghost.observe.FrameRenderer=; =tuxghost.agent.types.{Action, Observation, Policy, validate_actions}=; =tuxghost.boot.boot_from_save=; =tuxghost.loop.{InputSchedule, install_schedule, run_steps}=; =tuxghost.record.Recorder=.
+- Produces:
+  - =Decision(step: int, actions: tuple[Action, ...], notes: str | None, raw: str | None)= — frozen dataclass
+  - =RunResult(trace: Trace, schedule: InputSchedule, decisions: list[Decision], steps: int)= — dataclass
+  - =run_agent(*, policy: Policy, seed: int, clock_epoch: int, step_budget: int, save_data: Any | None = None, cold_boot: bool = False, recorder_kind: RecorderKind = "cu-agent", model: str | None = None, observe: bool = True, upscale: int = 4, taints: Sequence[str] = (), claimed_outcome: str | None = None) -> RunResult=
+    — exactly one of =save_data= / =cold_boot= must be given
+  - =RecorderKind = Literal["cu-agent", "offline-agent", "human"]= — re-exported
+    so callers (and =tuxghost/cli.py=) type this without importing from
+    =tuxghost.trace='s internals
+
+- [ ] *Step 1: Extend =Recorder= additively*
+
+=tuxghost/record.py=: add =taints: Sequence[str] = ()= to =__init__=
+(stored as =self._taints=), and =claimed_outcome: str | None = None= to
+=finish()=. Pass both into the =Provenance(...)= call:
+=taints=list(self._taints)=, =claimed_outcome=claimed_outcome=. Both
+default to today's behaviour, so every existing caller is unaffected.
+
+Docstring addition for =taints=, explaining why:
+
+#+begin_src python
+        `taints` is for a recording whose decisions did not come from the
+        thing `recorder`/`model` name -- specifically a `ReplayPolicy`
+        run, whose actions are replayed from a captured transcript rather
+        than taken live by the model. `tuxghost.cli`'s `compare` already
+        surfaces taints as findings, so recording it here costs no new
+        reader.
+#+end_src
+
+- [ ] *Step 2: Write the failing tests*
+
+#+begin_src python
+"""The agent loop, and the three gates that keep an agent-recorded trace
+replayable.
+
+Gate 1 (rendering is inert): recording draws, replay does not. If drawing
+perturbed digested state, every agent trace would fail to replay.
+Gate 2 (the trace verifies): end to end, through the S1 executor.
+Gate 3 (schedule == trace): the dict the runner filled live must equal the
+one `execute` rebuilds from the written trace -- the invariant that lets
+S2 ship no new format or execution code at all.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from tuxemon.platform.const import buttons
+from tuxemon.save_system.save_state import SaveData
+
+from tuxghost.agent.runner import run_agent
+from tuxghost.agent.scripted import ScriptedPolicy
+from tuxghost.agent.types import Action
+from tuxghost.execute import _schedule_of, verify
+
+FIXTURE = Path(__file__).parent / "fixtures" / "paper_town.save"
+EPOCH = 1787659200
+
+
+def _save() -> Any:
+    return SaveData.model_validate(json.loads(FIXTURE.read_text()))
+
+
+def _walk_policy() -> ScriptedPolicy:
+    """Three decisions: walk down, walk right, press A. Then stop."""
+    return ScriptedPolicy(
+        [
+            (Action(buttons.DOWN, hold=30, settle=10),),
+            (Action(buttons.RIGHT, hold=30, settle=10),),
+            (Action(buttons.A, hold=4, settle=20),),
+        ]
+    )
+
+
+def test_recorded_trace_verifies() -> None:
+    result = run_agent(
+        policy=_walk_policy(),
+        save_data=_save(),
+        seed=1234,
+        clock_epoch=EPOCH,
+        step_budget=400,
+    )
+    assert verify(result.trace) == 0
+
+
+def test_runner_schedule_equals_the_traces_schedule() -> None:
+    result = run_agent(
+        policy=_walk_policy(),
+        save_data=_save(),
+        seed=1234,
+        clock_epoch=EPOCH,
+        step_budget=400,
+    )
+    assert result.schedule == _schedule_of(result.trace)
+    assert result.schedule, "a walking policy must have scheduled input"
+
+
+def test_rendering_does_not_change_the_recorded_digest() -> None:
+    """Gate 1, end to end: the same scripted run with and without an
+    observation pass must reach the same final digest."""
+    seen = run_agent(
+        policy=_walk_policy(), save_data=_save(), seed=1234,
+        clock_epoch=EPOCH, step_budget=400, observe=True,
+    )
+    blind = run_agent(
+        policy=_walk_policy(), save_data=_save(), seed=1234,
+        clock_epoch=EPOCH, step_budget=400, observe=False,
+    )
+    assert seen.trace.header.final_digest == blind.trace.header.final_digest
+
+
+def test_observations_carry_a_real_frame_when_observing() -> None:
+    """Companion control against a vacuous gate 1: if `observe=True`
+    produced no pixels, the test above would pass for the wrong reason."""
+    result = run_agent(
+        policy=_walk_policy(), save_data=_save(), seed=1234,
+        clock_epoch=EPOCH, step_budget=400, observe=True,
+    )
+    first = result.decisions[0]
+    assert first.frame_bytes > 1000, "expected a real PNG, not an empty frame"
+
+
+def test_step_budget_is_never_exceeded() -> None:
+    """A policy that always asks for more must be stopped by the budget,
+    and the trace's step_count must match what actually ran."""
+    forever = ScriptedPolicy(
+        [(Action(buttons.DOWN, hold=30, settle=10),)] * 100, repeat_last=True
+    )
+    result = run_agent(
+        policy=forever, save_data=_save(), seed=1234,
+        clock_epoch=EPOCH, step_budget=200,
+    )
+    assert result.steps <= 200
+    assert result.trace.header.step_count == result.steps
+
+
+def test_cold_boot_run_records_a_verifiable_trace() -> None:
+    """Cold boot is a supported start, not a decorative flag: its trace has
+    to replay like any other. `initial_state` is snapshotted at boot, so
+    this also covers the case where the run begins on the launcher map with
+    the intro's own states still to come."""
+    result = run_agent(
+        policy=_walk_policy(), cold_boot=True, seed=1234,
+        clock_epoch=EPOCH, step_budget=400,
+    )
+    assert verify(result.trace) == 0
+
+
+def test_run_agent_refuses_both_or_neither_start() -> None:
+    """A run has to start from exactly one place."""
+    with pytest.raises(ValueError, match="exactly one"):
+        run_agent(
+            policy=_walk_policy(), seed=1234, clock_epoch=EPOCH,
+            step_budget=100,
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        run_agent(
+            policy=_walk_policy(), save_data=_save(), cold_boot=True,
+            seed=1234, clock_epoch=EPOCH, step_budget=100,
+        )
+
+
+def test_a_policy_returning_junk_is_refused() -> None:
+    class Junk:
+        def decide(self, obs: Any) -> Any:
+            return [Action(buttons.A, hold=0, settle=0)]
+
+    with pytest.raises(ValueError, match="hold"):
+        run_agent(
+            policy=Junk(), save_data=_save(), seed=1234,
+            clock_epoch=EPOCH, step_budget=100,
+        )
+#+end_src
+
+Note =first.frame_bytes=: =Decision= records the *size* of the frame, not
+the frame itself, so a run's decision log stays small. Add
+=frame_bytes: int= to =Decision=.
+
+- [ ] *Step 3: Run and confirm it fails*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_agent_runner.py -v
+#+end_src
+
+Expected: =ModuleNotFoundError: No module named 'tuxghost.agent.runner'=.
+(=ScriptedPolicy= arrives in Task 6; implement the minimal version there
+first if you are executing strictly in order, or write both in this task
+and split the commits.)
+
+- [ ] *Step 4: Implement =tuxghost/agent/runner.py=*
+
+#+begin_src python
+"""Drives a policy against a live session and records the result.
+
+ONE mutable schedule. `tuxghost.loop.install_schedule`'s closure reads
+`schedule.get(state["step"])` off the DICT OBJECT on every call, so this
+loop installs one empty dict at boot and inserts entries at future step
+indices as the agent decides. The step counter inside that closure stays
+monotonic, and an agent run and its replay differ only in WHO FILLED THE
+DICT: here it is filled live, in `tuxghost.execute` it is filled from the
+trace up front, and both then call the same `run_steps`.
+
+Two rejected alternatives, both of which would create a second path by
+which input reaches the engine -- the thing `tuxghost/loop.py`'s docstring
+exists to prevent:
+
+  * Re-installing a schedule per chunk. `install_schedule` builds a fresh
+    closure with `state = {"step": 0}`, so a re-install silently rebases
+    every later input to step 0.
+  * `run_steps`' per-step `hook`. It exists for checkpoint digests
+    (`tuxghost.execute`), and feeding input through it would put two
+    mechanisms in the same loop.
+
+Every edge written into the schedule is also handed to `Recorder.observe`,
+so the trace IS the schedule -- pinned by
+`tests/test_agent_runner.py::test_runner_schedule_equals_the_traces_schedule`.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from tuxghost.agent.types import Action, Observation, Policy, validate_actions
+from tuxghost.boot import boot_from_save, build_client
+from tuxghost.loop import InputSchedule, install_schedule, run_steps
+from tuxghost.record import Recorder
+from tuxghost.trace import Trace
+
+PRESSED = 1.0
+RELEASED = 0.0
+
+#: Mirrors `tuxghost.trace.Provenance.recorder`. Spelled out here so the
+#: runner and the CLI can type this argument without a `type: ignore` at
+#: the `Recorder(...)` call -- an ignore there would be a silent licence
+#: to pass any string at all into a field the format constrains.
+RecorderKind = Literal["cu-agent", "offline-agent", "human"]
+
+
+@dataclass(frozen=True)
+class Decision:
+    """One turn of the loop, for the run directory. Records the frame's
+    SIZE, not its bytes: a decision log is meant to stay readable and
+    small, and the frame itself is written to `frames/` separately."""
+
+    step: int
+    actions: tuple[Action, ...]
+    frame_bytes: int
+    frame_is_blank: bool
+    state_stack: tuple[str, ...]
+    map_name: str
+    tile_pos: tuple[int, int]
+    notes: str | None = None
+    raw: str | None = None
+
+
+@dataclass
+class RunResult:
+    #: `None` only while the run is in flight; `run_agent` never returns a
+    #: `RunResult` whose trace is unset. Typed `| None` rather than
+    #: initialised with a dummy Trace so mypy --strict needs no ignore and
+    #: no fake object exists to leak into a caller.
+    trace: Trace | None
+    schedule: InputSchedule
+    decisions: list[Decision] = field(default_factory=list)
+    steps: int = 0
+    frames: list[bytes] = field(default_factory=list)
+
+
+def _observation(
+    client: Any, step: int, frames: Any
+) -> tuple[Observation, bytes]:
+    from tuxemon.states.world_state import WorldState
+
+    png = b"" if frames is None else frames.png()
+    blank = False if frames is None else frames.last_frame_was_blank
+    try:
+        world = client.get_state_by_name(WorldState)
+        tile = (int(world.player.tile_pos[0]), int(world.player.tile_pos[1]))
+    except ValueError:
+        # `StateManager.get_state_by_name` raises ValueError("Missing state
+        # ...") when nothing on the stack matches -- verified in
+        # `tuxemon/state/manager.py`. A client with no WorldState is a
+        # legitimate moment (between map loads), and an observation must
+        # still be produced or the run would die on a frame the agent
+        # could perfectly well have acted on. Caught narrowly, by the exact
+        # exception type, so a genuine engine failure still propagates.
+        tile = (-1, -1)
+    return (
+        Observation(
+            step=step,
+            frame_png=png,
+            frame_is_blank=blank,
+            state_stack=tuple(client.active_state_names),
+            map_name=client.get_map_name(),
+            tile_pos=tile,
+        ),
+        png,
+    )
+
+
+def run_agent(
+    *,
+    policy: Policy,
+    seed: int,
+    clock_epoch: int,
+    step_budget: int,
+    save_data: Any | None = None,
+    cold_boot: bool = False,
+    recorder_kind: RecorderKind = "cu-agent",
+    model: str | None = None,
+    observe: bool = True,
+    upscale: int = 4,
+    taints: Sequence[str] = (),
+    claimed_outcome: str | None = None,
+) -> RunResult:
+    """Run `policy` from `save_data` for at most `step_budget` steps.
+
+    `observe=False` skips the render pass entirely and hands the policy
+    empty frames. That is not a convenience: it is how
+    `tests/test_agent_runner.py` proves the render pass is inert, by
+    running the same scripted policy both ways and comparing digests.
+    """
+    if step_budget < 1:
+        raise ValueError(f"step_budget must be >= 1, got {step_budget!r}")
+    if (save_data is None) == (not cold_boot):
+        raise ValueError(
+            "pass exactly one of save_data= or cold_boot=True; a run has to "
+            "start from somewhere, and starting from both is not a thing"
+        )
+
+    if cold_boot:
+        # The title screen. Honest computer-use territory -- the intro's
+        # name-entry keyboard is exactly the hard case -- and the only
+        # route that renders the menu states at all. Probed: mashing A
+        # here does NOT get through, so a policy that wants this must
+        # actually read the frames.
+        client, session = build_client(seed=seed, clock_epoch=clock_epoch)
+    else:
+        client, session = boot_from_save(
+            save_data, seed=seed, clock_epoch=clock_epoch
+        )
+
+    frames = None
+    if observe:
+        from tuxghost.observe import FrameRenderer
+
+        frames = FrameRenderer(client, upscale=upscale)
+
+    schedule: InputSchedule = {}
+    install_schedule(client, schedule)
+    recorder = Recorder(
+        session,
+        seed=seed,
+        clock_epoch=clock_epoch,
+        recorder=recorder_kind,
+        model=model,
+        taints=taints,
+    )
+
+    result = RunResult(trace=None, schedule=schedule)
+    step = 0
+
+    while step < step_budget:
+        obs, png = _observation(client, step, frames)
+        actions = validate_actions(policy.decide(obs))
+        if not actions:
+            break
+
+        cost = sum(a.hold + a.settle for a in actions)
+        if step + cost > step_budget:
+            # Refuse to truncate an action mid-hold: a half-delivered
+            # press would put a button down in the trace and never lift
+            # it, and the released edge is what makes a trace replay.
+            break
+
+        for action in actions:
+            schedule[step] = [(action.button, PRESSED)]
+            recorder.observe(step, action.button, PRESSED)
+            release = step + action.hold
+            schedule[release] = [(action.button, RELEASED)]
+            recorder.observe(release, action.button, RELEASED)
+            run_steps(client, action.hold + action.settle)
+            step += action.hold + action.settle
+
+        result.decisions.append(
+            Decision(
+                step=obs.step,
+                actions=actions,
+                frame_bytes=len(png),
+                frame_is_blank=obs.frame_is_blank,
+                state_stack=obs.state_stack,
+                map_name=obs.map_name,
+                tile_pos=obs.tile_pos,
+                notes=getattr(policy, "last_notes", None),
+                raw=getattr(policy, "last_raw", None),
+            )
+        )
+        if png:
+            result.frames.append(png)
+
+    result.steps = step
+    result.trace = recorder.finish(
+        step_count=step,
+        claimed_outcome=claimed_outcome
+        or getattr(policy, "claimed_outcome", None),
+    )
+    return result
+#+end_src
+
+- [ ] *Step 5: Run tests and the fast gate*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_agent_runner.py -v && make check-fast
+#+end_src
+
+- [ ] *Step 6: Demonstrate each gate fails against its defect*
+
+All three mutations, with real output, in the report:
+1. *Gate 3*: delete the =recorder.observe(release, ...)= line. Expected:
+   =test_runner_schedule_equals_the_traces_schedule= fails (the trace is
+   missing every release edge) and =test_recorded_trace_verifies= fails or
+   diverges.
+2. *Gate 1*: add =self._client.update(1.0 / 60)= to
+   =FrameRenderer.surface()=. Expected:
+   =test_rendering_does_not_change_the_recorded_digest= fails with two
+   different digests.
+3. *Budget*: change the =step + cost > step_budget= guard to
+   =step > step_budget=. Expected: =test_step_budget_is_never_exceeded=
+   fails with =result.steps > 200=.
+
+- [ ] *Step 7: Commit*
+
+#+begin_src bash
+git add tuxghost/agent/runner.py tuxghost/record.py tests/test_agent_runner.py
+git commit -m "feat: the agent loop, over one mutable schedule
+
+install_schedule's closure reads the dict on every call, so the runner
+installs one empty dict and appends as the agent decides -- an agent run
+and its replay differ only in who filled it, which is why S2 ships no new
+format or execution code. Recorder gains additive taints/claimed_outcome."
+#+end_src
+
+---
+
+* Task 6: =ScriptedPolicy= and =ReplayPolicy=
+
+*Files:*
+- Create: =tuxghost/agent/scripted.py=, =tuxghost/agent/replay.py=
+- Test: =tests/test_agent_policies.py=
+
+*Interfaces:*
+- Produces:
+  - =ScriptedPolicy(decisions: Sequence[Sequence[Action]], repeat_last: bool = False)=
+  - =ReplayPolicy(transcript: Path)= reading JSONL records
+    ={"actions": [{"button": int, "hold": int, "settle": int}], "notes": str | None, "raw": str | None}=
+    with =.last_notes=, =.last_raw=, =.claimed_outcome=
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from tuxemon.platform.const import buttons
+
+from tuxghost.agent.replay import ReplayPolicy
+from tuxghost.agent.scripted import ScriptedPolicy
+from tuxghost.agent.types import Action, Observation
+
+OBS = Observation(
+    step=0, frame_png=b"", frame_is_blank=True,
+    state_stack=("WorldState",), map_name="m.tmx", tile_pos=(1, 1),
+)
+
+
+def test_scripted_policy_yields_decisions_in_order_then_stops() -> None:
+    policy = ScriptedPolicy(
+        [(Action(buttons.UP, 2, 2),), (Action(buttons.A, 3, 3),)]
+    )
+    assert policy.decide(OBS) == (Action(buttons.UP, 2, 2),)
+    assert policy.decide(OBS) == (Action(buttons.A, 3, 3),)
+    assert policy.decide(OBS) == ()  # exhausted means stop
+
+
+def test_scripted_policy_can_repeat_its_last_decision() -> None:
+    policy = ScriptedPolicy([(Action(buttons.UP, 2, 2),)], repeat_last=True)
+    assert policy.decide(OBS) == policy.decide(OBS) != ()
+
+
+def test_replay_policy_replays_a_transcript(tmp_path: Path) -> None:
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {
+                    "actions": [{"button": buttons.DOWN, "hold": 12, "settle": 6}],
+                    "notes": "heading south",
+                    "raw": '{"actions": [...]}',
+                },
+                {"actions": [], "notes": "done", "raw": "", "claimed_outcome": "left town"},
+            ]
+        )
+    )
+    policy = ReplayPolicy(transcript)
+    assert policy.decide(OBS) == (Action(buttons.DOWN, 12, 6),)
+    assert policy.last_notes == "heading south"
+    assert policy.decide(OBS) == ()
+    assert policy.claimed_outcome == "left town"
+
+
+def test_replay_policy_refuses_a_malformed_record(tmp_path: Path) -> None:
+    transcript = tmp_path / "bad.jsonl"
+    transcript.write_text(json.dumps({"actions": [{"button": 64}]}))
+    policy = ReplayPolicy(transcript)
+    with pytest.raises(ValueError, match="hold"):
+        policy.decide(OBS)
+
+
+def test_replay_policy_does_not_loop_when_exhausted(tmp_path: Path) -> None:
+    """A transcript that silently restarted would make a replayed run
+    diverge from the run it claims to reproduce."""
+    transcript = tmp_path / "one.jsonl"
+    transcript.write_text(
+        json.dumps({"actions": [{"button": buttons.A, "hold": 2, "settle": 2}]})
+    )
+    policy = ReplayPolicy(transcript)
+    assert policy.decide(OBS) != ()
+    assert policy.decide(OBS) == ()
+    assert policy.decide(OBS) == ()
+#+end_src
+
+- [ ] *Step 2: Run and confirm failure*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_agent_policies.py -v
+#+end_src
+
+Expected: =ModuleNotFoundError=.
+
+- [ ] *Step 3: Implement both policies*
+
+=tuxghost/agent/scripted.py=:
+
+#+begin_src python
+"""A policy that answers from a fixed list. Drives every harness test in
+the gate: it needs no network, no model, and no pixels, so a test can
+isolate the harness from the agent entirely."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from tuxghost.agent.types import STOP, Action, Observation
+
+
+class ScriptedPolicy:
+    def __init__(
+        self,
+        decisions: Sequence[Sequence[Action]],
+        repeat_last: bool = False,
+    ) -> None:
+        self._decisions = [tuple(d) for d in decisions]
+        self._repeat_last = repeat_last
+        self._index = 0
+        self.last_notes: str | None = None
+        self.last_raw: str | None = None
+        self.claimed_outcome: str | None = None
+
+    def decide(self, obs: Observation) -> Sequence[Action]:
+        if self._index < len(self._decisions):
+            decision = self._decisions[self._index]
+            self._index += 1
+            return decision
+        if self._repeat_last and self._decisions:
+            return self._decisions[-1]
+        return STOP
+#+end_src
+
+=tuxghost/agent/replay.py=:
+
+#+begin_src python
+"""Replays a captured model transcript.
+
+This is what gives `ClaudePolicy`'s response PARSING real gate coverage
+without a network call: the records are raw model answers captured from a
+live run, so a parsing regression fails here rather than in production.
+It deliberately does NOT loop when exhausted -- a transcript that silently
+restarted would make a replayed run diverge from the run it claims to
+reproduce, which is the one thing a replay must not do.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+from tuxghost.agent.types import STOP, Action, Observation, validate_actions
+
+
+def actions_from_json(raw: Any) -> tuple[Action, ...]:
+    """Build actions from a decoded JSON list, refusing anything partial.
+
+    Shared with `ClaudePolicy`: both parse the same shape, and a model's
+    output and a transcript of that output must be validated identically
+    or the replay would accept what the live path rejected.
+    """
+    if not isinstance(raw, list):
+        raise ValueError(f"actions must be a JSON list, got {type(raw).__name__}")
+    built = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"actions[{index}] must be an object")
+        for key in ("button", "hold", "settle"):
+            if key not in item:
+                raise ValueError(f"actions[{index}] is missing {key!r}")
+        built.append(
+            Action(
+                button=int(item["button"]),
+                hold=int(item["hold"]),
+                settle=int(item["settle"]),
+            )
+        )
+    return validate_actions(built)
+
+
+class ReplayPolicy:
+    def __init__(self, transcript: Path) -> None:
+        self._records = [
+            json.loads(line)
+            for line in Path(transcript).read_text().splitlines()
+            if line.strip()
+        ]
+        self._index = 0
+        self.last_notes: str | None = None
+        self.last_raw: str | None = None
+        self.claimed_outcome: str | None = None
+
+    def decide(self, obs: Observation) -> Sequence[Action]:
+        if self._index >= len(self._records):
+            return STOP
+        record = self._records[self._index]
+        self._index += 1
+        self.last_notes = record.get("notes")
+        self.last_raw = record.get("raw")
+        if record.get("claimed_outcome"):
+            self.claimed_outcome = record["claimed_outcome"]
+        return actions_from_json(record.get("actions", []))
+#+end_src
+
+- [ ] *Step 4: Run tests and the fast gate*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_agent_policies.py -v && make check-fast
+#+end_src
+
+- [ ] *Step 5: Demonstrate the no-loop test fails against the defect*
+
+Make =ReplayPolicy.decide= wrap with
+=self._index % len(self._records)=; run
+=test_replay_policy_does_not_loop_when_exhausted=; capture the failure;
+restore; re-run; =git diff=.
+
+- [ ] *Step 6: Commit*
+
+#+begin_src bash
+git add tuxghost/agent/scripted.py tuxghost/agent/replay.py tests/test_agent_policies.py
+git commit -m "feat: scripted and replay policies
+
+ReplayPolicy shares its action parsing with ClaudePolicy so a transcript
+is validated exactly as a live answer is, and refuses to loop when
+exhausted -- a silently restarting transcript would diverge from the run
+it claims to reproduce."
+#+end_src
+
+---
+
+* Task 7: =ClaudePolicy=
+
+*Files:*
+- Create: =tuxghost/agent/claude.py=
+- Modify: =pyproject.toml= (optional extra + a mypy override)
+- Test: =tests/test_agent_claude.py=
+
+*Interfaces:*
+- Consumes: =tuxghost.agent.replay.actions_from_json=.
+- Produces: =ClaudePolicy(model: str = "claude-sonnet-5", goal: str = "", window: int = 4, client: Any | None = None)=
+  with =.decide()=, =.last_notes=, =.last_raw=, =.claimed_outcome=, and
+  =.build_messages(obs) -> list[dict[str, Any]]=,
+  =.parse_response(text: str) -> tuple[tuple[Action, ...], str | None, str | None]=.
+
+The two pure functions (=build_messages=, =parse_response=) are separated
+precisely so the gate can test them with no network and no SDK installed.
+
+- [ ] *Step 1: Add the optional dependency*
+
+=pyproject.toml=:
+
+#+begin_src toml
+[project.optional-dependencies]
+dev = ["pytest", "mypy", "ruff"]
+agent = ["anthropic>=0.40"]
+
+# The `anthropic` SDK is an OPTIONAL extra (`pip install -e .[agent]`):
+# `ScriptedPolicy`/`ReplayPolicy` -- everything `make check` runs -- never
+# import it, and requiring a network SDK to run the gate would be a
+# needless coupling. `tuxghost/agent/claude.py` imports it lazily inside
+# `decide()`, so mypy needs to be told the stubs may be absent rather than
+# failing the strict gate on a dependency the gate does not install.
+[[tool.mypy.overrides]]
+module = "anthropic.*"
+ignore_missing_imports = true
+#+end_src
+
+- [ ] *Step 2: Write the failing tests*
+
+#+begin_src python
+"""ClaudePolicy's prompt building and response parsing, with no network.
+
+These two functions are the parts most likely to rot silently, so they are
+pure and tested directly; `ReplayPolicy` covers them again end to end
+against a captured transcript.
+"""
+
+from __future__ import annotations
+
+import pytest
+from tuxemon.platform.const import buttons
+
+from tuxghost.agent.claude import ClaudePolicy
+from tuxghost.agent.types import Action, Observation
+
+OBS = Observation(
+    step=42,
+    frame_png=b"\x89PNG\r\n\x1a\nfake",
+    frame_is_blank=False,
+    state_stack=("WorldState",),
+    map_name="spyder_paper_town.tmx",
+    tile_pos=(10, 10),
+)
+
+
+def test_messages_carry_the_frame_as_an_image_block() -> None:
+    policy = ClaudePolicy(goal="leave town")
+    messages = policy.build_messages(OBS)
+    blocks = messages[-1]["content"]
+    kinds = [b["type"] for b in blocks]
+    assert "image" in kinds, "the frame IS the observation; it must be sent"
+    assert any("leave town" in b.get("text", "") for b in blocks)
+
+
+def test_messages_do_not_leak_the_state_stack_to_the_model() -> None:
+    """The frame is the observation. A policy handed `state_stack` in its
+    prompt would be a state-machine agent wearing a CU agent's clothes."""
+    policy = ClaudePolicy()
+    text = str(policy.build_messages(OBS))
+    assert "WorldState" not in text
+
+
+def test_parse_response_reads_actions_notes_and_outcome() -> None:
+    policy = ClaudePolicy()
+    actions, notes, outcome = policy.parse_response(
+        'thinking...\n```json\n{"actions": '
+        f'[{{"button": {buttons.DOWN}, "hold": 12, "settle": 6}}], '
+        '"notes": "south past the sign", "claimed_outcome": null}\n```'
+    )
+    assert actions == (Action(buttons.DOWN, 12, 6),)
+    assert notes == "south past the sign"
+    assert outcome is None
+
+
+def test_parse_response_refuses_a_response_with_no_json_block() -> None:
+    policy = ClaudePolicy()
+    with pytest.raises(ValueError, match="json"):
+        policy.parse_response("I will walk south.")
+
+
+def test_parse_response_refuses_an_out_of_range_hold() -> None:
+    policy = ClaudePolicy()
+    with pytest.raises(ValueError, match="hold"):
+        policy.parse_response(
+            '```json\n{"actions": [{"button": 64, "hold": 999999, '
+            '"settle": 0}]}\n```'
+        )
+
+
+def test_window_bounds_the_message_history() -> None:
+    policy = ClaudePolicy(window=2)
+    for _ in range(6):
+        policy.build_messages(OBS)
+        policy.record_turn(
+            (Action(buttons.A, 2, 2),), notes="n", raw="```json\n{}\n```"
+        )
+    # window=2 turns, each contributing at most one user + one assistant
+    # message, plus the current observation.
+    assert len(policy.build_messages(OBS)) <= 2 * 2 + 1
+#+end_src
+
+- [ ] *Step 3: Run and confirm failure*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_agent_claude.py -v
+#+end_src
+
+Expected: =ModuleNotFoundError: No module named 'tuxghost.agent.claude'=.
+
+- [ ] *Step 4: Implement =tuxghost/agent/claude.py=*
+
+#+begin_src python
+"""The computer-use policy: a frame in, actions out.
+
+`anthropic` is an OPTIONAL extra and is imported lazily inside
+`_ensure_client`, never at module import -- `make check` installs no
+network SDK and must still be able to import this module to test the two
+pure functions below.
+
+`build_messages` and `parse_response` are deliberately pure and separately
+tested: they are the parts most likely to rot silently as prompts and
+response shapes change, and `ReplayPolicy` re-covers `parse_response` end
+to end against a captured transcript. Context is a sliding window of the
+last `window` turns plus a notes block carried forward verbatim -- no
+summarisation call, whose output would silently steer the run and be a
+second prompt to maintain.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import re
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from tuxghost.agent.replay import actions_from_json
+from tuxghost.agent.types import (
+    HOLD_CAP,
+    SETTLE_CAP,
+    STOP,
+    Action,
+    Observation,
+)
+
+DEFAULT_MODEL = "claude-sonnet-5"
+MAX_TOKENS = 1024
+
+#: Buttons worth telling the model about. The full set in
+#: `tuxemon.platform.const.buttons` includes mouse/finger events and
+#: shoulder buttons this game does not use in the overworld; naming them
+#: all would spend tokens inviting actions that do nothing.
+SYSTEM = """You are playing Tuxemon, a tile-based creature-collecting RPG.
+You see one rendered frame of the game at a time and reply with button
+presses. The game does not advance while you think.
+
+Buttons: UP=1, DOWN=2, LEFT=4, RIGHT=8, A=64, B=128, START=32.
+A confirms and talks; B cancels and backs out.
+
+The game runs at 60 steps per second. Every action holds a button for
+`hold` steps, releases it, then lets `settle` steps pass before you see
+the next frame. Holding a direction for too few steps does not move you a
+whole tile; a dialog needs A pressed and released. `hold` must be between
+1 and {hold_cap}; `settle` between 0 and {settle_cap}.
+
+Reply with exactly one fenced json block:
+
+```json
+{{"actions": [{{"button": 2, "hold": 30, "settle": 10}}],
+  "notes": "what you want your future self to remember",
+  "claimed_outcome": null}}
+```
+
+`notes` replaces your previous notes -- carry forward anything still
+useful, since you will not see older frames. Set `claimed_outcome` to a
+short sentence only when you believe you are done. An empty `actions` list
+ends the run.
+""".format(hold_cap=HOLD_CAP, settle_cap=SETTLE_CAP)
+
+_JSON_BLOCK = re.compile(r"```json\s*(\{.*?\})\s*```", re.S)
+
+
+@dataclass
+class _Turn:
+    frame_png: bytes
+    raw: str
+
+
+class ClaudePolicy:
+    def __init__(
+        self,
+        model: str = DEFAULT_MODEL,
+        goal: str = "",
+        window: int = 4,
+        client: Any | None = None,
+    ) -> None:
+        if window < 1:
+            raise ValueError(f"window must be >= 1, got {window!r}")
+        self.model = model
+        self.goal = goal
+        self.notes = ""
+        self.last_notes: str | None = None
+        self.last_raw: str | None = None
+        self.claimed_outcome: str | None = None
+        self._window = window
+        self._client = client
+        self._turns: list[_Turn] = []
+
+    # -- prompt construction (pure) ------------------------------------
+
+    def _image_block(self, png: bytes) -> dict[str, Any]:
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": base64.b64encode(png).decode(),
+            },
+        }
+
+    def _prompt_text(self, obs: Observation) -> str:
+        """The text half of the current turn.
+
+        Deliberately carries NO `state_stack` and no `map_name`: the frame
+        is the observation. A policy told which states are on the stack is
+        a state-machine agent wearing a computer-use agent's clothes, and
+        `tests/test_agent_claude.py` asserts that leak cannot happen.
+        """
+        parts = [f"Step {obs.step}."]
+        if self.goal:
+            parts.append(f"Goal: {self.goal}")
+        if self.notes:
+            parts.append(f"Your notes:\n{self.notes}")
+        if obs.frame_is_blank:
+            parts.append(
+                "The frame is blank -- the game is mid-transition. Waiting "
+                "is usually the right move."
+            )
+        parts.append("What do you do next?")
+        return "\n\n".join(parts)
+
+    def build_messages(self, obs: Observation) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        for turn in self._turns[-self._window :]:
+            content: list[dict[str, Any]] = (
+                [self._image_block(turn.frame_png)]
+                if turn.frame_png
+                else [{"type": "text", "text": "(frame not retained)"}]
+            )
+            messages.append({"role": "user", "content": content})
+            messages.append({"role": "assistant", "content": turn.raw})
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    self._image_block(obs.frame_png),
+                    {"type": "text", "text": self._prompt_text(obs)},
+                ],
+            }
+        )
+        return messages
+
+    # -- response parsing (pure) ---------------------------------------
+
+    def parse_response(
+        self, text: str
+    ) -> tuple[tuple[Action, ...], str | None, str | None]:
+        """Actions, notes, claimed outcome -- or `ValueError` naming what
+        was wrong.
+
+        Routes actions through `actions_from_json`, the SAME validation
+        `ReplayPolicy` uses, so a captured transcript can never be
+        accepted where the live answer that produced it would have been
+        rejected.
+        """
+        blocks = _JSON_BLOCK.findall(text)
+        if not blocks:
+            raise ValueError(
+                "response contains no fenced json block; expected one "
+                '```json { "actions": [...] } ``` block'
+            )
+        try:
+            payload = json.loads(blocks[-1])
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"the last fenced json block is not valid json: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"the json block must be an object, got "
+                f"{type(payload).__name__}"
+            )
+        actions = actions_from_json(payload.get("actions", []))
+        notes = payload.get("notes")
+        outcome = payload.get("claimed_outcome")
+        return actions, notes, outcome
+
+    # -- history -------------------------------------------------------
+
+    def record_turn(
+        self,
+        actions: Sequence[Action],
+        notes: str | None = None,
+        raw: str = "",
+        frame_png: bytes = b"",
+    ) -> None:
+        self._turns.append(_Turn(frame_png=frame_png, raw=raw))
+        del actions  # kept in the signature for callers/tests; history is
+        # the raw answer, which already contains them verbatim.
+
+    # -- the policy ----------------------------------------------------
+
+    def _ensure_client(self) -> Any:
+        if self._client is None:
+            import anthropic
+
+            self._client = anthropic.Anthropic()
+        return self._client
+
+    def decide(self, obs: Observation) -> Sequence[Action]:
+        response = self._ensure_client().messages.create(
+            model=self.model,
+            max_tokens=MAX_TOKENS,
+            system=SYSTEM,
+            messages=self.build_messages(obs),
+        )
+        raw = "".join(
+            block.text
+            for block in response.content
+            if getattr(block, "type", None) == "text"
+        )
+        actions, notes, outcome = self.parse_response(raw)
+        self.last_raw = raw
+        self.last_notes = notes
+        if notes:
+            self.notes = notes
+        if outcome:
+            self.claimed_outcome = outcome
+        self.record_turn(actions, notes=notes, raw=raw, frame_png=obs.frame_png)
+        return actions if actions else STOP
+#+end_src
+
+Note the =SYSTEM= prompt reads =HOLD_CAP=/=SETTLE_CAP= from
+=tuxghost.agent.types= rather than repeating the numbers: a cap the
+validator enforces but the prompt does not mention is a cap the model will
+keep tripping over, and two hardcoded copies would drift.
+
+- [ ] *Step 5: Run tests and the fast gate*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_agent_claude.py -v && make check-fast
+#+end_src
+
+- [ ] *Step 6: Capture a real transcript and commit it as a replay fixture*
+
+This is the only step that touches the network, and it is *manual*, not
+part of the gate:
+
+#+begin_src bash
+pip install -e '.[agent]'   # into ./.venv
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  ./.venv/bin/python -m tuxghost.cli agent --policy claude \
+    --seed 1234 --clock-epoch 1787659200 \
+    --from-save tests/fixtures/paper_town.save \
+    --steps 600 --goal "walk out of town" \
+    --out /tmp/agent_run.tuxghost --run-dir /tmp/agent_run
+#+end_src
+
+(Task 8 builds that CLI; if you reach here first, drive =run_agent=
+directly from a scratchpad script instead.) Then commit
+=/tmp/agent_run/decisions.jsonl= as
+=tests/fixtures/claude_transcript.jsonl= and add a test that a
+=ReplayPolicy= run over it produces a trace that =verify()==0=. Put the
+model id and the run's =claimed_outcome= in the report.
+
+- [ ] *Step 7: Demonstrate the parse tests fail against the defect*
+
+Make =parse_response= build =Action= objects directly instead of routing
+through =actions_from_json=; run
+=test_parse_response_refuses_an_out_of_range_hold=; capture the failure;
+restore; re-run; =git diff=.
+
+- [ ] *Step 8: Commit*
+
+#+begin_src bash
+git add tuxghost/agent/claude.py tests/test_agent_claude.py pyproject.toml \
+        tests/fixtures/claude_transcript.jsonl
+git commit -m "feat: ClaudePolicy -- pixels in, actions out
+
+anthropic is an optional extra imported lazily, so the gate never needs
+it. Prompt building and response parsing are pure functions tested
+directly, and share their action validation with ReplayPolicy so a
+transcript can never be accepted where a live answer would be rejected."
+#+end_src
+
+---
+
+* Task 8: The =agent= CLI subcommand
+
+*Files:*
+- Modify: =tuxghost/cli.py=
+- Test: =tests/test_cli.py= (append)
+
+*Interfaces:*
+- Consumes: =tuxghost.agent.runner.run_agent=, the three policies.
+- Produces: =tuxghost agent ...=; a written trace; a run directory with
+  =frames/NNNNN.png= and =decisions.jsonl=.
+
+- [ ] *Step 1: Write the failing tests*
+
+Append to =tests/test_cli.py= (follow the file's existing idioms for
+invoking =main= and capturing output):
+
+#+begin_src python
+def test_agent_writes_a_trace_and_a_run_directory(tmp_path: Path) -> None:
+    out = tmp_path / "run.tuxghost"
+    run_dir = tmp_path / "rundir"
+    code = main(
+        [
+            "agent", "--policy", "scripted",
+            "--actions", str(_write_actions(tmp_path)),
+            "--seed", "1234", "--clock-epoch", "1787659200",
+            "--from-save", str(FIXTURE), "--steps", "300",
+            "--out", str(out), "--run-dir", str(run_dir),
+        ]
+    )
+    assert code == 0
+    assert out.exists()
+    assert (run_dir / "decisions.jsonl").exists()
+    assert list((run_dir / "frames").glob("*.png"))
+
+
+def test_agent_refuses_an_unreadable_save(tmp_path: Path) -> None:
+    """Refusal is exit 2, never exit 1 -- exit 1 means 'diverged', and a
+    recording has nothing to diverge from. See this module's docstring."""
+    code = main(
+        [
+            "agent", "--policy", "scripted",
+            "--actions", str(_write_actions(tmp_path)),
+            "--seed", "1234", "--clock-epoch", "1787659200",
+            "--from-save", str(tmp_path / "nope.save"), "--steps", "60",
+            "--out", str(tmp_path / "o.tuxghost"),
+            "--run-dir", str(tmp_path / "d"),
+        ]
+    )
+    assert code == 2
+
+
+def test_agent_accepts_a_relative_out_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The vacuous-test lesson from CLAUDE.md: every path in the old CLI
+    test was an absolute tmp_path, so a real bug -- chdir into tuxemon/
+    BEFORE parsing args, breaking every relative path a user would type --
+    went undetected. This test types a relative path on purpose."""
+    monkeypatch.chdir(tmp_path)
+    code = main(
+        [
+            "agent", "--policy", "scripted",
+            "--actions", str(_write_actions(tmp_path)),
+            "--seed", "1234", "--clock-epoch", "1787659200",
+            "--from-save", str(FIXTURE), "--steps", "120",
+            "--out", "relative.tuxghost", "--run-dir", "reldir",
+        ]
+    )
+    assert code == 0
+    assert (tmp_path / "relative.tuxghost").exists()
+#+end_src
+
+Add the helper and constants the tests use:
+
+#+begin_src python
+FIXTURE = Path(__file__).parent / "fixtures" / "paper_town.save"
+
+
+def _write_actions(tmp_path: Path) -> Path:
+    """A scripted policy's decisions as JSONL -- the same shape
+    ReplayPolicy reads, so --policy scripted and --policy replay take the
+    same file."""
+    path = tmp_path / "actions.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps({"actions": [{"button": 2, "hold": 30, "settle": 10}]})
+            for _ in range(3)
+        )
+    )
+    return path
+#+end_src
+
+- [ ] *Step 2: Run and confirm failure*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_cli.py -k agent -v
+#+end_src
+
+Expected: =SystemExit: 2= from argparse — =invalid choice: 'agent'=.
+
+- [ ] *Step 3: Implement the subcommand*
+
+In =_build_parser=, mirroring the existing =p_rec= block:
+
+#+begin_src python
+    p_agent = sub.add_parser(
+        "agent",
+        help="Record a trace by driving a policy against a live session.",
+    )
+    p_agent.add_argument("--policy", choices=["scripted", "replay", "claude"], required=True)
+    p_agent.add_argument("--actions", type=Path, help="JSONL decisions for scripted/replay")
+    p_agent.add_argument("--from-save", type=Path, dest="from_save")
+    p_agent.add_argument("--cold-boot", action="store_true", dest="cold_boot")
+    p_agent.add_argument("--seed", type=int, required=True)
+    p_agent.add_argument("--clock-epoch", type=int, required=True, dest="clock_epoch")
+    p_agent.add_argument("--steps", type=int, required=True)
+    p_agent.add_argument("--goal", default="")
+    p_agent.add_argument("--model", default="claude-sonnet-5")
+    p_agent.add_argument("--upscale", type=int, default=4)
+    p_agent.add_argument("--out", type=Path, required=True)
+    p_agent.add_argument("--run-dir", type=Path, required=True, dest="run_dir")
+#+end_src
+
+Then the handler. It mirrors =_record='s existing refusal discipline
+line for line — same four save checks, same messages on stderr, same
+exit-2-not-1 contract — plus Task 1's =resolve_map_asset= check:
+
+#+begin_src python
+def _agent_save_or_refuse(args: argparse.Namespace) -> Any | None:
+    """Read, parse, validate and map-check `--from-save`, or print a
+    refusal and return None.
+
+    Every check mirrors `_record`'s, verbatim and in the same order, plus
+    Task 1's `resolve_map_asset`. Factored out so `_agent` reads as the
+    control flow it is rather than 60 lines of guard clauses.
+    """
+    from tuxemon.save_system.save_state import SaveData
+
+    from tuxghost.boot import resolve_map_asset
+
+    try:
+        raw = json.loads(args.from_save.read_text())
+    except OSError as exc:
+        print(f"refused: cannot read {args.from_save}: {exc}", file=sys.stderr)
+        return None
+    except json.JSONDecodeError as exc:
+        print(
+            f"refused: {args.from_save} is not valid JSON: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    try:
+        save_data = SaveData.model_validate(raw)
+    except ValidationError as exc:
+        print(
+            f"refused: {args.from_save} does not validate as a SaveData: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    if save_data.npc_state is None or save_data.npc_state.current_map is None:
+        print(
+            "refused: from-save is missing npc_state.current_map; cannot "
+            "restore a session (see tuxghost.boot.boot_from_save)",
+            file=sys.stderr,
+        )
+        return None
+
+    if resolve_map_asset(save_data.npc_state.current_map) is None:
+        print(
+            "refused: from-save's npc_state.current_map="
+            f"{save_data.npc_state.current_map!r} resolves to no map asset "
+            "(tried it as given and with a .tmx extension)",
+            file=sys.stderr,
+        )
+        return None
+
+    return save_data
+
+
+def _agent(args: argparse.Namespace) -> int:
+    """Record a trace by driving a policy against a live session.
+
+    Returns 0 or 2 only. Exit 1 means "diverged", and a recording has
+    nothing to diverge FROM -- see this module's docstring, which records
+    the earlier CLI defect that conflated the two.
+    """
+    import dataclasses
+
+    from tuxghost.agent.replay import ReplayPolicy, actions_from_json
+    from tuxghost.agent.runner import RecorderKind, run_agent
+    from tuxghost.agent.scripted import ScriptedPolicy
+    from tuxghost.determinism import seed_all
+    from tuxghost.trace import write
+
+    if bool(args.from_save) == bool(args.cold_boot):
+        print(
+            "refused: pass exactly one of --from-save or --cold-boot",
+            file=sys.stderr,
+        )
+        return 2
+    if args.policy in ("scripted", "replay") and args.actions is None:
+        print(
+            f"refused: --policy {args.policy} requires --actions "
+            "(a JSONL file of decisions)",
+            file=sys.stderr,
+        )
+        return 2
+
+    seed_all(args.seed)
+
+    save_data = None
+    if not args.cold_boot:
+        save_data = _agent_save_or_refuse(args)
+        if save_data is None:
+            return 2
+
+    # Policy, plus the provenance each one honestly implies (see the
+    # spec's Provenance section): a scripted list is a person's, a replayed
+    # transcript is the model's decisions taken from a recording rather
+    # than live, and only a live call is an untainted cu-agent trace.
+    kind: RecorderKind
+    taints: tuple[str, ...] = ()
+    model: str | None = None
+    policy: Any
+    if args.policy == "scripted":
+        try:
+            decisions = [
+                actions_from_json(json.loads(line).get("actions", []))
+                for line in args.actions.read_text().splitlines()
+                if line.strip()
+            ]
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            print(f"refused: bad --actions file: {exc}", file=sys.stderr)
+            return 2
+        policy = ScriptedPolicy(decisions)
+        kind = "human"
+    elif args.policy == "replay":
+        try:
+            policy = ReplayPolicy(args.actions)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"refused: bad --actions file: {exc}", file=sys.stderr)
+            return 2
+        kind = "cu-agent"
+        model = args.model
+        taints = (
+            "decisions replayed from a captured transcript, not taken live",
+        )
+    else:
+        from tuxghost.agent.claude import ClaudePolicy
+
+        try:
+            policy = ClaudePolicy(model=args.model, goal=args.goal)
+        except ImportError as exc:
+            print(
+                f"refused: --policy claude needs the anthropic SDK "
+                f"(pip install -e '.[agent]'): {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        kind = "cu-agent"
+        model = args.model
+
+    result = run_agent(
+        policy=policy,
+        save_data=save_data,
+        cold_boot=bool(args.cold_boot),
+        seed=args.seed,
+        clock_epoch=args.clock_epoch,
+        step_budget=args.steps,
+        recorder_kind=kind,
+        model=model,
+        upscale=args.upscale,
+        taints=taints,
+    )
+    assert result.trace is not None  # run_agent always seals a trace
+    write(result.trace, args.out)
+
+    frames_dir = args.run_dir / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    for index, png in enumerate(result.frames):
+        (frames_dir / f"{index:05d}.png").write_bytes(png)
+    with (args.run_dir / "decisions.jsonl").open("w") as handle:
+        for decision in result.decisions:
+            record = dataclasses.asdict(decision)
+            record["actions"] = [
+                dataclasses.asdict(a) for a in decision.actions
+            ]
+            handle.write(json.dumps(record) + "\n")
+
+    print(f"wrote {args.out} ({result.steps} steps) and {args.run_dir}")
+    return 0
+#+end_src
+
+Wire it into =main='s dispatch alongside the existing commands, and add
+=args.actions=, =args.from_save=, =args.out= and =args.run_dir= to the
+*existing* path-resolution block in =main= — do not add a second one. That
+block runs before =_bootstrap_vendored_tuxemon= chdirs, which is the whole
+reason relative paths work.
+
+=--cold-boot= is wired through to =run_agent(cold_boot=True)=, which boots
+=build_client= instead of restoring a save — the spec keeps cold boot in
+scope, and =tests/test_agent_runner.py=
+=::test_cold_boot_run_records_a_verifiable_trace= (Task 5) is what keeps it
+from rotting into a decorative flag. Add one CLI test for it too:
+
+#+begin_src python
+def test_agent_cold_boot_needs_no_save(tmp_path: Path) -> None:
+    code = main(
+        [
+            "agent", "--policy", "scripted",
+            "--actions", str(_write_actions(tmp_path)),
+            "--cold-boot",
+            "--seed", "1234", "--clock-epoch", "1787659200",
+            "--steps", "200",
+            "--out", str(tmp_path / "cold.tuxghost"),
+            "--run-dir", str(tmp_path / "colddir"),
+        ]
+    )
+    assert code == 0
+#+end_src
+
+- [ ] *Step 4: Run the tests and the fast gate*
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_cli.py -v && make check-fast
+#+end_src
+
+- [ ] *Step 5: Demonstrate the refusal test fails against the defect*
+
+Change the unreadable-save branch to =return 1=; run
+=test_agent_refuses_an_unreadable_save=; capture
+=assert 1 == 2=; restore; re-run; =git diff=.
+
+- [ ] *Step 6: Commit*
+
+#+begin_src bash
+git add tuxghost/cli.py tests/test_cli.py
+git commit -m "feat: tuxghost agent subcommand
+
+Exit 0 or 2 only -- a recording has nothing to diverge from, so 1 is never
+returned. Paths resolve before the vendored chdir, and the relative-path
+test types a relative path on purpose (the old CLI's absolute-tmp_path
+test missed exactly this bug)."
+#+end_src
+
+---
+
+* Task 9: Measure the display scale, then pin it
+
+The spec's one deliberately-open measurement. =headless_init= hardcodes
+=scale=1=/=DefaultScaling(1)= while the real game builds its context with
+=make_default_scaling(CONFIG, NATIVE_RESOLUTION)= — scale 4 at 1280x720.
+At =scale=1= the camera shows roughly 80x45 tiles where a human sees
+roughly 20x11.
+
+*Files:*
+- Modify: =tuxghost/boot.py= (optional injected context)
+- Modify: =tuxghost/observe.py= (=scaled_context=)
+- Create: =docs/2026-08-26-display-scale-measurement.org=
+- Test: =tests/test_display_scale.py=
+
+- [ ] *Step 1: Add an injectable context*
+
+=build_client= and =boot_from_save= currently call =headless_context()=
+themselves. Add =context: Any | None = None= to both; when given, use it
+instead of calling =headless_context()=. Document that this exists for
+the scale measurement and for agent runs that want human field-of-view,
+and that *record and replay must use the same one* — the trace header has
+no scale field.
+
+- [ ] *Step 2: Add =scaled_context()= to =tuxghost/observe.py=*
+
+Mirror =tuxemon/prepare.py='s =pygame_init= scaling, headless: set both
+dummy SDL drivers, =platform.init()=, =pg.init()=/=display.init()=/
+=font.init()=, =pg.display.set_mode(CONFIG.resolution)=, then build a
+=DisplayContext= with =make_default_scaling(CONFIG, NATIVE_RESOLUTION)=
+(=tile_size=scaling.scale_point(NATIVE_TILE_SIZE)=,
+=scale=scaling._scale=, =scaling=scaling=) over a =pg.Surface(CONFIG
+.resolution)=. Assign it to =tuxemon.prepare.DISPLAY_CONTEXT= as well as
+returning it: =NullRenderer.__init__= reads that module global directly.
+
+- [ ] *Step 3: MEASURE, before writing any assertion*
+
+Throwaway script in the scratchpad: boot the =paper_town= fixture twice at
+seed 1234 and the same epoch — once with the default context, once with
+=scaled_context()= — run an identical 300-step schedule, and print both
+=digest_of(session)= values and both rendered frames' sizes. Record the
+raw output.
+
+- [ ] *Step 4: Write the test that pins WHAT YOU MEASURED*
+
+Two possible worlds; write the one that is true, and say so in the test's
+docstring:
+
+- *Digest-neutral*: assert the two digests are equal, and make agent runs
+  default to =scaled_context()= for human field-of-view.
+- *Digest-affecting*: assert the two digests DIFFER, and pin that agent
+  runs and =tuxghost.execute= both use the default context — a trace
+  recorded at one scale must never be replayable at another, and the
+  header has no scale field to record it in.
+
+Either way also assert the geometry claim that motivated the work: the
+scaled frame's cropped PNG covers a larger fraction of the surface than
+the unscaled one, or the tile-size ratio is 4.
+
+- [ ] *Step 5: Write =docs/2026-08-26-display-scale-measurement.org=*
+
+Record: the two digests, the context parameters
+(=resolution=/=tile_size=/=scale=), both frame sizes, the conclusion, and
+which of the two worlds above the code now implements. This file is the
+measurement note the spec promised "either way".
+
+- [ ] *Step 6: Run the full gate and commit*
+
+#+begin_src bash
+make check-fast
+git add tuxghost/boot.py tuxghost/observe.py tests/test_display_scale.py \
+        docs/2026-08-26-display-scale-measurement.org
+git commit -m "measure: display scale versus the state digest
+
+headless_init pins scale=1 while the real game scales 4x, so the headless
+camera shows ~80x45 tiles where a human sees ~20x11. Measured, pinned by
+a test, and recorded in docs/ -- see the note for which way it went."
+#+end_src
+
+---
+
+* Task 10: Close out
+
+- [ ] *Step 1: Full gate, once, sequentially*
+
+#+begin_src bash
+make check
+#+end_src
+
+Never run two suites concurrently. Record the exact pass/skip counts.
+
+- [ ] *Step 2: Confirm the invariants that are easy to break silently*
+
+#+begin_src bash
+./.venv/bin/python -c "from tuxghost.digest import EXEMPTIONS; print(EXEMPTIONS)"
+git -C tuxemon status --short
+git -C tuxemon diff --stat | tail -1
+ls patches/
+#+end_src
+
+Expected: =EXEMPTIONS= is ={}=; =tuxemon/= shows only the six patches'
+own changes (18 files, 265 insertions, 63 deletions, plus
+=tuxemon/core/clock.py= and =tuxemon/core/ids.py= untracked); =patches/=
+still holds exactly six files. *If =tuxemon/= has any other change, S2
+edited the engine and the plan was violated.*
+
+- [ ] *Step 3: Update =docs/STATUS.org=*
+
+STATUS.org is the entry point and outranks every other document. Add an
+S2 section stating, with measured values: that the harness ships with no
+seventh patch and why (the =NullRenderer= 1-colour vs =MapRenderer=
+48-colour discrimination); the fixture's map, tile and party; the new
+test counts from Step 1; the display-scale conclusion; and the honest
+limits — model sampling is not determinism, rendered pixels are an
+unmeasured cross-platform surface, and =--goal= has no evaluator because
+scoring is S5. Move S2 out of "Next subsystem" and leave S3/S4/S5 there.
+
+- [ ] *Step 4: Flip the spec's status line*
+
+Change =#+STATUS:= in
+=docs/superpowers/specs/2026-08-26-cu-agent-harness-design.org= from
+="design, approved in outline; awaiting spec review"= to ="implemented"=,
+and correct any statement the implementation proved wrong — especially
+the display-scale section and the "renderer install survives" inference.
+A spec that says something the code disproves is worse than no spec.
+
+- [ ] *Step 5: Commit*
+
+#+begin_src bash
+git add docs/STATUS.org docs/superpowers/specs/2026-08-26-cu-agent-harness-design.org
+git commit -m "docs: S2 status -- CU-agent harness, measured
+
+No seventh patch: the harness reaches a full frame through public
+BaseClient seams only. Records the fixture, the test counts, the
+display-scale result, and the limits (model sampling is not determinism;
+rendered pixels are an unmeasured cross-platform surface)."
+#+end_src
+
+---
+
+* Self-review notes
+
+Checked against the spec, section by section:
+
+- *Evidence base* → Tasks 2 and 3 turn each probe into a test; Task 1
+  handles the defect probing exposed.
+- *Architecture (no patch 0007)* → Task 2; Task 10 Step 2 verifies
+  =tuxemon/= is untouched.
+- *Decision model (durations)* → Task 4, with =WALK_ONE_TILE= measured in
+  Task 3 Step 5 rather than inherited.
+- *Data flow (one mutable schedule)* → Task 5, pinned by the
+  schedule-equality test against =execute._schedule_of=.
+- *Observation (pixels + geometry)* → Task 2 (crop/upscale) and Task 9
+  (scale measurement).
+- *Policies* → Tasks 6 and 7; the gate never touches the network.
+- *Where a run starts* → Task 3 (fixture default), Task 5 (=cold_boot=
+  boots =build_client=, pinned by its own verify test) and Task 8
+  (=--cold-boot= wired and tested).
+- *Provenance* → Task 5 (=Recorder= gains =taints=/=claimed_outcome=) and
+  Task 8 (the per-policy mapping).
+- *CLI* → Task 8, including the relative-path test the old CLI's vacuous
+  test missed.
+- *Validation, all six gates* → gate 1 Tasks 2 and 5; gate 2 Task 5;
+  gate 3 Task 5; gate 4 Task 2; gate 5 Task 4; gate 6 Task 9.
+- *Known limitations* → Task 10 Step 3 writes them into STATUS.org.
+
+Known ordering wrinkle, stated rather than hidden: Task 2's *tests* need
+Task 3's fixture, and Task 5's tests need Task 6's =ScriptedPolicy=. Both
+implementations stand alone. Execute 1 → 3 → 2 → 4 → 6 → 5 → 7 → 8 → 9 →
+10 if you want every task's tests to pass at the moment you write them.
