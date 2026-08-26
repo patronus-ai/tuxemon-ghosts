@@ -121,18 +121,27 @@ caught, each in a different way:
   test, so `boot_from_save`'s own clock-handling code could be dead-coded
   entirely and the test still passed, riding for free on the fixture's
   own setup rather than exercising the code it named.
-- One rode for free on a sibling function's side effect: `verify()`'s
-  `except Refused: return 2` looked like tested coverage of a real
-  failure path, but `Refused` is raised by `tuxghost.trace.read()` — a
-  function `execute()`/`verify()` never call — so nothing in that code
-  path could ever actually raise it. The apparent coverage was borrowing
-  `read()`'s behavior by assumption, not exercising anything `verify()`
-  itself did.
-- One digest test passed across nine runs — including unseeded, unpinned
-  ones — purely because whoever ran the suite that week happened to run
-  it during daytime, real wall-clock time: the test never called
-  `pin_clock` at all, so it read genuine wall time, and only failed the
-  day a run happened to land after dark.
+- One digest was "deterministic" across nine runs — several of them
+  unseeded, across three different seeds — for the worst possible
+  reason: the earliest version of the state digest never captured
+  anything that actually changed. The probed route never moved the
+  player, and the digest was blind to the state stack, the only thing
+  changing, so nine runs all hashed to the same value and read as proof
+  of determinism. Two controls exposed it: instrumenting `random`
+  itself, which revealed 152 live RNG calls the digest never saw, and
+  requiring digests to diverge across different seeds, which only
+  started happening once party HP actually varied between runs (see
+  `docs/2026-08-25-determinism-spike.org`).
+- One digest test's pass depended entirely on what time of day someone
+  happened to run the suite: `tests/test_digest.py`'s `_run()` predated
+  `pin_clock` and never called it, so it silently read real wall-clock
+  time on every run. During a single working session, real local time
+  crossed into night partway through, and the run crashed (`AttributeError: 'NullRenderer' object
+  has no attribute 'layer'`, a pre-existing headless-rendering gap the
+  night-only `set_layer` event action exposed). Nothing about the
+  test's assertions had changed; only the wall clock had. Fixed by
+  pinning `_run()` to an explicit epoch, the same discipline every other
+  clock-dependent test in this project needed.
 - A CLI path test passed only because it never used a relative path:
   every path it exercised was an absolute `tmp_path` fixture path, so a
   real bug — the process `chdir`'d into the vendored `tuxemon/`
