@@ -1251,15 +1251,38 @@ def test_runner_schedule_equals_the_traces_schedule() -> None:
 
 def test_rendering_does_not_change_the_recorded_digest() -> None:
     """Gate 1, end to end: the same scripted run with and without an
-    observation pass must reach the same final digest."""
-    seen = run_agent(
+    observation pass must agree at EVERY step, not merely at the end.
+
+    Compares per-step digest SEQUENCES, not final digests. Measured in
+    task 2: a final-digest comparison cannot detect a render pass that
+    advances the game, because Tuxemon's grid movement makes a settled
+    tile an attractor -- extra `update()` calls only make movement
+    complete sooner, and both runs converge on the same tile by the end
+    of the window. Two different mutations (an injected `client.update`
+    and an injected `random.random()` draw) both left a final-digest
+    comparison green. The sequence form sees the transient at the step it
+    happens.
+    """
+    kwargs = dict(
         policy=_walk_policy(), save_data=_save(), seed=1234,
-        clock_epoch=EPOCH, step_budget=400, observe=True,
+        clock_epoch=EPOCH, step_budget=400, digest_every=1,
     )
-    blind = run_agent(
-        policy=_walk_policy(), save_data=_save(), seed=1234,
-        clock_epoch=EPOCH, step_budget=400, observe=False,
+    seen = run_agent(**kwargs, observe=True)
+    blind = run_agent(**kwargs, observe=False)
+
+    assert seen.digests, "digest_every=1 must record a digest per step"
+    assert len(seen.digests) == len(blind.digests)
+    first_diff = next(
+        (i for i, (a, b) in enumerate(zip(seen.digests, blind.digests))
+         if a != b),
+        None,
     )
+    assert first_diff is None, (
+        f"observed and blind runs diverged at step index {first_diff}: "
+        f"{seen.digests[first_diff]} != {blind.digests[first_diff]}"
+    )
+    # The end state must still agree -- the sequence check subsumes this,
+    # but the trace's own field is what `verify()` compares against.
     assert seen.trace.header.final_digest == blind.trace.header.final_digest
 
 
@@ -1378,6 +1401,7 @@ from typing import Any, Literal
 
 from tuxghost.agent.types import Action, Observation, Policy, validate_actions
 from tuxghost.boot import boot_from_save, build_client
+from tuxghost.digest import digest_of
 from tuxghost.loop import InputSchedule, install_schedule, run_steps
 from tuxghost.record import Recorder
 from tuxghost.trace import Trace
@@ -1417,6 +1441,9 @@ class RunResult:
     #: no fake object exists to leak into a caller.
     trace: Trace | None
     schedule: InputSchedule
+    #: `(step, digest)` pairs, one every `digest_every` steps. Empty when
+    #: `digest_every=0` (the default).
+    digests: list[tuple[int, str]] = field(default_factory=list)
     decisions: list[Decision] = field(default_factory=list)
     steps: int = 0
     frames: list[bytes] = field(default_factory=list)
@@ -1468,6 +1495,7 @@ def run_agent(
     upscale: int = 4,
     taints: Sequence[str] = (),
     claimed_outcome: str | None = None,
+    digest_every: int = 0,
 ) -> RunResult:
     """Run `policy` from `save_data` for at most `step_budget` steps.
 
@@ -1475,6 +1503,19 @@ def run_agent(
     empty frames. That is not a convenience: it is how
     `tests/test_agent_runner.py` proves the render pass is inert, by
     running the same scripted policy both ways and comparing digests.
+
+    `digest_every=N` records `(step, digest_of(session))` every N steps
+    into `RunResult.digests`. Default 0 records nothing and costs
+    nothing. This mirrors `tuxghost.execute.execute`'s existing
+    `checkpoint`/`capture_states` parameters -- test-support sampling
+    living in production code, deliberately, because the alternative is a
+    parallel stepping path that could drift from this one. It exists
+    because a FINAL-digest comparison is not sufficient to prove the
+    render pass is inert: Tuxemon's grid movement makes a settled tile an
+    attractor, so a render pass that advanced the game would make
+    movement finish sooner and both runs would still converge on the same
+    tile (measured in task 2, against two different injected side
+    effects). A per-step sequence sees the transient.
     """
     if step_budget < 1:
         raise ValueError(f"step_budget must be >= 1, got {step_budget!r}")
@@ -1535,7 +1576,18 @@ def run_agent(
             release = step + action.hold
             schedule[release] = [(action.button, RELEASED)]
             recorder.observe(release, action.button, RELEASED)
-            run_steps(client, action.hold + action.settle)
+
+            base = step
+
+            def sample(i: int, _base: int = base) -> None:
+                if digest_every and (_base + i) % digest_every == 0:
+                    result.digests.append((_base + i, digest_of(session)))
+
+            run_steps(
+                client,
+                action.hold + action.settle,
+                hook=sample if digest_every else None,
+            )
             step += action.hold + action.settle
 
         result.decisions.append(
@@ -2641,25 +2693,50 @@ returning it: =NullRenderer.__init__= reads that module global directly.
 
 Throwaway script in the scratchpad: boot the =paper_town= fixture twice at
 seed 1234 and the same epoch — once with the default context, once with
-=scaled_context()= — run an identical 300-step schedule, and print both
-=digest_of(session)= values and both rendered frames' sizes. Record the
-raw output.
+=scaled_context()= — run an identical 300-step schedule that keeps the
+player MOVING through the end of the window, and record a
+=digest_of(session)= **at every step** (via =run_steps='s =hook=), not
+just at the end. Print both sequences' lengths, the first index at which
+they differ (or =None=), and both rendered frames' sizes.
+
+*Why sequences, not final digests.* Measured in task 2: Tuxemon's grid
+movement makes a settled tile an attractor, so two runs that genuinely
+differ mid-window can converge on the same end state and a final-digest
+comparison sees nothing. Two different injected side effects each left
+such a comparison green. A scale change is exactly the kind of thing that
+could perturb timing transiently and re-converge — if that is what
+happens, this measurement must be able to say so.
+
+Use a walking direction the fixture actually permits: only =DOWN=, =UP=
+and =RIGHT= move the player from spawn tile (12, 12); =LEFT= is blocked
+by map collision.
 
 - [ ] *Step 4: Write the test that pins WHAT YOU MEASURED*
 
 Two possible worlds; write the one that is true, and say so in the test's
 docstring:
 
-- *Digest-neutral*: assert the two digests are equal, and make agent runs
-  default to =scaled_context()= for human field-of-view.
-- *Digest-affecting*: assert the two digests DIFFER, and pin that agent
-  runs and =tuxghost.execute= both use the default context — a trace
-  recorded at one scale must never be replayable at another, and the
-  header has no scale field to record it in.
+- *Digest-neutral*: assert the two per-step SEQUENCES are equal (not
+  merely the final digests), and make agent runs default to
+  =scaled_context()= for human field-of-view.
+- *Digest-affecting*: assert the sequences differ, record the first
+  differing step index in the docs note, and pin that agent runs and
+  =tuxghost.execute= both use the default context — a trace recorded at
+  one scale must never be replayable at another, and the header has no
+  scale field to record it in.
+- *Converging*: if the sequences differ mid-window but the FINAL digests
+  agree, that is the most important of the three outcomes and the one a
+  final-digest test would have hidden. Treat it as digest-affecting: a
+  transient difference means the two contexts are not interchangeable
+  even though a naive check would say they are.
 
-Either way also assert the geometry claim that motivated the work: the
-scaled frame's cropped PNG covers a larger fraction of the surface than
-the unscaled one, or the tile-size ratio is 4.
+Either way also assert the geometry claim that motivated the work, by
+DECODING the PNG rather than by its byte count: =pg.image.load(BytesIO(
+png)).get_size()= at each scale, with the scaled render's tile-size ratio
+being 4. Task 2 measured that a byte-count threshold discriminates nothing
+here — black padding compresses away, so removing the crop entirely
+(118,218 bytes) and removing the upscale entirely (35,385 bytes) both sat
+comfortably under the same 400,000-byte assertion.
 
 - [ ] *Step 5: Write =docs/2026-08-26-display-scale-measurement.org=*
 
