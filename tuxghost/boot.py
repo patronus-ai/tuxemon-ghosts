@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 
@@ -68,6 +69,46 @@ def _assert_fps_matches_step_rate(client: Any) -> None:
             "different dt on their first frame than on every frame after "
             "it, on this machine only."
         )
+
+
+def resolve_map_asset(current_map: str) -> str | None:
+    """Resolve a save's `npc_state.current_map` to a real map asset path.
+
+    Accepts the name with or without the `.tmx` extension, because BOTH
+    forms occur in real saves: `tuxemon/mods/tuxemon/maps/*.tmx` script
+    teleports as `teleport player,spyder_route1` (extension-less, and
+    `Teleporter.teleport_character` stores exactly the string it was
+    given via `place_npc_on_map` -> `NPC.set_current_map`), while the
+    `eclipse_*` yaml maps script `transition_teleport
+    player,eclipse_crystal_bank1.tmx,...` WITH one. Returns None when
+    neither form exists, so callers can refuse (exit 2) rather than let
+    `fetch_asset`'s bare OSError escape as exit 1 ("diverged").
+
+    Callable BEFORE a headless boot, not just after: `execute`'s own
+    precondition check (`tuxghost.execute`) calls this ahead of
+    `boot_from_save`, specifically so a bad `current_map` can be refused
+    (exit 2) without ever booting. `fetch_asset` only searches
+    `_MOD_ASSET_ROOTS`, which -- measured on this tree -- is populated as
+    a module-level side effect of importing `tuxemon.locale.locale`
+    (`fetch_mod_asset_roots(CONFIG)`, run once), itself only reached
+    through a full boot. Called first in a process, before anything has
+    booted, `fetch_asset` would see an always-empty root list and this
+    function would wrongly return `None` for every map, valid ones
+    included. `fetch_mod_asset_roots` is idempotent (a `_HAS_POPULATED`
+    guard), so calling it here is a no-op on every call after the first
+    real boot -- this only matters the one time nothing has booted yet.
+    """
+    from tuxemon.constants.asset_loader import fetch_asset, fetch_mod_asset_roots
+    from tuxemon.user_config import CONFIG
+
+    fetch_mod_asset_roots(CONFIG)
+
+    for candidate in (current_map, f"{current_map}.tmx"):
+        try:
+            return str(fetch_asset("maps", candidate))
+        except OSError:
+            continue
+    return None
 
 
 def build_client(seed: int, clock_epoch: int | None = None) -> tuple[Any, Any]:
@@ -217,7 +258,6 @@ def boot_from_save(
 
     context = headless_context()
 
-    from tuxemon.constants.asset_loader import fetch_asset
     from tuxemon.core.ids import seed_ids
     from tuxemon.entity.npc import NPC
     from tuxemon.main import headless_world
@@ -257,10 +297,27 @@ def boot_from_save(
     assert npc_state is not None and npc_state.current_map is not None
 
     NPC.create_player(local_session, slug=npc_state.player_slug or PLAYER_NPC)
-    client.push_state(
-        "WorldState",
-        session=local_session,
-        map_name=fetch_asset("maps", npc_state.current_map),
-    )
+    map_asset = resolve_map_asset(npc_state.current_map)
+    if map_asset is None:
+        raise ValueError(
+            f"save's npc_state.current_map={npc_state.current_map!r} "
+            "resolves to no map asset, with or without a .tmx extension; "
+            "callers that need a return code instead of an exception "
+            "should call resolve_map_asset() first (see tuxghost.execute)"
+        )
+    # `Entity.load_state` (below, via `local_session.load_state`) restores
+    # `current_map` onto the live NPC VERBATIM from whatever string was in
+    # `save_data.npc_state.current_map` -- see
+    # `tuxemon/entity/entity.py`'s `set_current_map(save_data.current_map)`.
+    # Left alone, two saves that both resolve to the exact same map asset
+    # (one recorded via a `spyder_*`-style extension-less teleport, one via
+    # an `eclipse_*`-style `...bank1.tmx` teleport) would restore to two
+    # DIFFERENT `current_map` strings -- diverging `npc_state.current_map`
+    # in `tuxghost.digest.state_of()` for a reason that has nothing to do
+    # with the actual game state. Canonicalize to the resolved asset's
+    # basename (matching what `session.client.get_map_name()` itself
+    # reports) so both forms restore identically.
+    npc_state.current_map = Path(map_asset).name
+    client.push_state("WorldState", session=local_session, map_name=map_asset)
     local_session.load_state(save_data)
     return client, local_session

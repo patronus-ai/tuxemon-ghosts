@@ -349,3 +349,15 @@ def test_assert_fps_matches_step_rate_rejects_non_positive_fps() -> None:
     client = SimpleNamespace(config=SimpleNamespace(fps=0.0))
     with pytest.raises(ValueError, match="positive"):
         _assert_fps_matches_step_rate(client)
+
+
+def test_resolve_map_asset_accepts_a_name_with_or_without_the_extension() -> None:
+    """`spyder_*` maps script teleports as `teleport player,spyder_route1`
+    (no extension) while `eclipse_*` maps use `...bank1.tmx`, so a real
+    save's `current_map` is legitimately either form."""
+    from tuxghost.boot import headless_context, resolve_map_asset
+
+    headless_context()  # fetch_asset needs the mod db loaded
+    assert resolve_map_asset("start_tuxemon.tmx") is not None
+    assert resolve_map_asset("start_tuxemon") is not None
+    assert resolve_map_asset("no_such_map_xyz") is None

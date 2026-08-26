@@ -62,7 +62,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from tuxghost.boot import boot_from_save
+from tuxghost.boot import boot_from_save, resolve_map_asset
 from tuxghost.compare import describe_divergence, first_divergent_step
 from tuxghost.determinism import pin_clock, seed_all
 from tuxghost.digest import digest_of, state_of
@@ -145,6 +145,14 @@ def execute(
             "trace is unrunnable here: initial_state.npc_state.current_map "
             "is required to restore a session (see tuxghost.boot"
             ".boot_from_save)"
+        )
+
+    if resolve_map_asset(save_data.npc_state.current_map) is None:
+        raise Refused(
+            "trace is unrunnable here: initial_state.npc_state.current_map="
+            f"{save_data.npc_state.current_map!r} resolves to no map asset "
+            "(tried it as given and with a .tmx extension). This is a "
+            "refusal, not a divergence."
         )
 
     _client, session = boot_from_save(

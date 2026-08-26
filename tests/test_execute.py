@@ -25,6 +25,8 @@ import pytest
 
 from tuxghost.compare import describe_divergence, first_difference, first_divergent_step
 
+GOLDEN = Path(__file__).parent / "golden" / "walk_1234.tuxghost"
+
 
 def test_first_difference_names_the_field_path() -> None:
     a = {"npc_state": {"battles": [{"timestamp": 1.0}]}}
@@ -435,3 +437,34 @@ def test_bisect_traces_rejects_a_non_positive_checkpoint_interval() -> None:
 
     with pytest.raises(ValueError, match="checkpoint"):
         bisect_traces(trace, trace, checkpoint=0)
+
+
+def test_execute_boots_a_save_whose_current_map_omits_the_extension() -> None:
+    """Pins the S1 defect: an extension-less `current_map` -- what every
+    `spyder_*` map's own teleport script produces -- raised an uncaught
+    OSError out of `fetch_asset`, so `verify()` raised instead of
+    returning 2 and the CLI would have exited 1 ("diverged") for what is
+    a refusal at worst and a bootable save at best."""
+    from tuxghost.execute import execute
+    from tuxghost.trace import read
+
+    trace = read(GOLDEN)
+    trace.header.step_count = 30
+    with_ext = execute(trace).final_digest
+
+    trace_no_ext = read(GOLDEN)
+    trace_no_ext.header.step_count = 30
+    trace_no_ext.initial_state["npc_state"]["current_map"] = "start_tuxemon"
+    assert execute(trace_no_ext).final_digest == with_ext
+
+
+def test_verify_refuses_a_trace_whose_map_cannot_be_resolved() -> None:
+    """A genuinely missing map is exit 2 (refused), never an exception and
+    never exit 1 (diverged) -- see tuxghost/cli.py's module docstring."""
+    from tuxghost.execute import verify
+    from tuxghost.trace import read
+
+    trace = read(GOLDEN)
+    trace.header.step_count = 30
+    trace.initial_state["npc_state"]["current_map"] = "no_such_map_xyz"
+    assert verify(trace) == 2
