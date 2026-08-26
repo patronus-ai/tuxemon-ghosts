@@ -30,11 +30,24 @@ def build_client(seed: int) -> tuple[Any, Any]:
 
     context = headless_context()
 
+    from tuxemon.core.ids import seed_ids
     from tuxemon.database.runtime import db
     from tuxemon.launcher import GameLauncher
     from tuxemon.main import headless_world
     from tuxemon.session import local_session
     from tuxemon.user_config import CONFIG
+
+    # Seed the id factory before anything below can draw from it --
+    # `local_session.reset()` immediately below is one such draw (see its
+    # docstring). Matches the `random.seed(seed)` call further down and
+    # `config.deterministic_seed = seed` next: this build's own `seed`
+    # argument must be authoritative for every entropy source it touches,
+    # not left to whatever `tuxghost.determinism.seed_all` last left on
+    # process-wide state (or never set at all, if a caller never called
+    # it -- e.g. every test in `tests/test_digest.py`, which builds
+    # straight from `build_client` and would otherwise draw ids from raw
+    # OS entropy).
+    seed_ids(seed)
 
     # `local_session` is a module-level singleton shared across every
     # `build_client` call in this process. Without resetting it first, a
@@ -83,11 +96,16 @@ def boot_from_save(save_data: Any, seed: int) -> tuple[Any, Any]:
     context = headless_context()
 
     from tuxemon.constants.asset_loader import fetch_asset
+    from tuxemon.core.ids import seed_ids
     from tuxemon.entity.npc import NPC
     from tuxemon.main import headless_world
     from tuxemon.platform.const.sizes import PLAYER_NPC
     from tuxemon.session import local_session
     from tuxemon.user_config import CONFIG
+
+    # See the matching comment in `build_client`: seed the id factory
+    # before `local_session.reset()` (the next line) can draw from it.
+    seed_ids(seed)
 
     # `local_session` is a module-level singleton shared with any prior
     # session in this process (e.g. the one that produced `save_data`).

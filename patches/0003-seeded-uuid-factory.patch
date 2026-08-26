@@ -1,0 +1,207 @@
+diff --git a/tuxemon/battle.py b/tuxemon/battle.py
+index cb7d38e..58a9094 100644
+--- a/tuxemon/battle.py
++++ b/tuxemon/battle.py
+@@ -6,8 +6,9 @@ import logging
+ import time
+ from collections.abc import Mapping, Sequence
+ from typing import Any
+-from uuid import UUID, uuid4
++from uuid import UUID
+ 
++from tuxemon.core.ids import new_id
+ from tuxemon.db import OutputBattle
+ 
+ logger = logging.getLogger(__name__)
+@@ -26,7 +27,7 @@ class Battle:
+     """Represents a single battle instance between two characters."""
+ 
+     def __init__(self) -> None:
+-        self.instance_id: UUID = uuid4()
++        self.instance_id: UUID = new_id()
+         self.fighter: str = ""
+         self.opponent: str = ""
+         self.outcome: OutputBattle = OutputBattle.DRAW
+diff --git a/tuxemon/core/ids.py b/tuxemon/core/ids.py
+new file mode 100644
+index 0000000..44e270d
+--- /dev/null
++++ b/tuxemon/core/ids.py
+@@ -0,0 +1,19 @@
++"""Central identifier factory, so ids can be made reproducible."""
++from __future__ import annotations
++
++import random
++import uuid
++
++_rng: random.Random | None = None
++
++
++def seed_ids(seed: int | None) -> None:
++    """Seed the id factory. None restores OS entropy."""
++    global _rng
++    _rng = None if seed is None else random.Random(seed)
++
++
++def new_id() -> uuid.UUID:
++    if _rng is None:
++        return uuid.uuid4()
++    return uuid.UUID(int=_rng.getrandbits(128), version=4)
+diff --git a/tuxemon/entity/entity.py b/tuxemon/entity/entity.py
+index 6fb5200..cc2e21e 100644
+--- a/tuxemon/entity/entity.py
++++ b/tuxemon/entity/entity.py
+@@ -5,8 +5,9 @@ from __future__ import annotations
+ from collections.abc import Sequence
+ from enum import Enum
+ from typing import TYPE_CHECKING
+-from uuid import UUID, uuid4
++from uuid import UUID
+ 
++from tuxemon.core.ids import new_id
+ from tuxemon.db import Direction, FacingMode
+ from tuxemon.map.map import dirs2, tile_distance, vector2_to_tile_pos
+ from tuxemon.math import Vector2
+@@ -215,7 +216,7 @@ class Entity:
+         self.session = session
+         self.client = session.client
+         self.event_bus = session.client.event_bus
+-        self.instance_id = instance_id or uuid4()
++        self.instance_id = instance_id or new_id()
+         self.body = Body(position=Vector2(0, 0))
+         self.mover = Mover(self.body)
+         self._current_map: str | None = None
+diff --git a/tuxemon/monster/monster.py b/tuxemon/monster/monster.py
+index 78a53fd..35acf77 100644
+--- a/tuxemon/monster/monster.py
++++ b/tuxemon/monster/monster.py
+@@ -6,9 +6,10 @@ import logging
+ import random
+ from collections.abc import Mapping, Sequence
+ from typing import TYPE_CHECKING, Any
+-from uuid import UUID, uuid4
++from uuid import UUID
+ 
+ from tuxemon import formula
++from tuxemon.core.ids import new_id
+ from tuxemon.database.rules import config_monster
+ from tuxemon.database.runtime import db
+ from tuxemon.db import (
+@@ -86,7 +87,7 @@ class Monster:
+         instance_id: UUID | None = None,
+     ) -> None:
+         self.slug: str = slug
+-        self.instance_id: UUID = instance_id or uuid4()
++        self.instance_id: UUID = instance_id or new_id()
+         self._custom_name: str | None = None
+ 
+         self.species = db_data.species
+diff --git a/tuxemon/session.py b/tuxemon/session.py
+index ad3e6d6..fb046a1 100644
+--- a/tuxemon/session.py
++++ b/tuxemon/session.py
+@@ -7,9 +7,10 @@ import time
+ from abc import ABC, abstractmethod
+ from datetime import datetime
+ from typing import TYPE_CHECKING, Generic, TypeVar
+-from uuid import UUID, uuid4
++from uuid import UUID
+ 
+ from tuxemon.celestial_handler import CelestialHandler
++from tuxemon.core.ids import new_id
+ from tuxemon.save_system import save
+ from tuxemon.save_system.save_state import (
+     TIME_FORMAT,
+@@ -39,7 +40,7 @@ class AbstractSession(ABC, Generic[ClientType]):
+     """
+ 
+     def __init__(self) -> None:
+-        self._uuid: UUID = uuid4()
++        self._uuid: UUID = new_id()
+         self.time = TimeHandler()
+         self.celestial = CelestialHandler.from_session(self)
+         self._start_time: datetime = datetime.now()
+@@ -94,7 +95,22 @@ class AbstractSession(ABC, Generic[ClientType]):
+         reset_world: bool = True,
+         reset_player: bool = True,
+     ) -> None:
+-        """Resets the main session components."""
++        """Resets the main session components.
++
++        Also draws a fresh `_uuid`. `local_session = Session()` is a
++        process-lifetime singleton: `__init__` (and its one `new_id()`
++        draw) runs exactly once per process, the first time
++        `tuxemon.session` is imported -- which, inside `build_client`,
++        happens before that build's own `seed_ids(seed)` call, so
++        `__init__`'s draw never actually lands on this build's seeded
++        stream. Without a redraw here, every `build_client()` call after
++        the first would silently keep whatever `_uuid` the first call's
++        `__init__` happened to draw, forever -- not reproducible per seed,
++        just frozen. Redrawing on every `reset()` (which every
++        `build_client`/`boot_from_save` call makes, after `seed_ids`) is
++        what actually ties `_uuid` to the build's seed.
++        """
++        self._uuid = new_id()
+         if reset_client:
+             self._client = None
+         if reset_world:
+diff --git a/tuxemon/status/status.py b/tuxemon/status/status.py
+index 8023770..7a24f04 100644
+--- a/tuxemon/status/status.py
++++ b/tuxemon/status/status.py
+@@ -5,7 +5,7 @@ from __future__ import annotations
+ import logging
+ from collections.abc import Mapping, Sequence
+ from typing import TYPE_CHECKING, Any
+-from uuid import UUID, uuid4
++from uuid import UUID
+ 
+ from tuxemon.core.asset import get_assets
+ from tuxemon.core.core_effect import StatusEffectResult
+@@ -14,6 +14,7 @@ from tuxemon.core.core_processor import (
+     ConditionValidationResult,
+     EffectProcessor,
+ )
++from tuxemon.core.ids import new_id
+ from tuxemon.database.runtime import db
+ from tuxemon.db import EffectPhase, StatusModel
+ from tuxemon.locale.locale import T
+@@ -43,7 +44,7 @@ class Status:
+     ) -> None:
+         self._host = host
+         self.slug = db_data.slug
+-        self.instance_id: UUID = instance_id or uuid4()
++        self.instance_id: UUID = instance_id or new_id()
+ 
+         self.sort = db_data.sort
+         self.icon = db_data.icon
+diff --git a/tuxemon/technique/technique.py b/tuxemon/technique/technique.py
+index bf06de3..f4fc822 100644
+--- a/tuxemon/technique/technique.py
++++ b/tuxemon/technique/technique.py
+@@ -5,7 +5,7 @@ from __future__ import annotations
+ import logging
+ from collections.abc import Mapping, Sequence
+ from typing import TYPE_CHECKING, Any
+-from uuid import UUID, uuid4
++from uuid import UUID
+ 
+ from tuxemon.core.asset import get_assets
+ from tuxemon.core.core_effect import TechEffectResult
+@@ -14,6 +14,7 @@ from tuxemon.core.core_processor import (
+     ConditionValidationResult,
+     EffectProcessor,
+ )
++from tuxemon.core.ids import new_id
+ from tuxemon.database.runtime import db
+ from tuxemon.db import (
+     TechniqueModel,
+@@ -53,7 +54,7 @@ class Technique:
+         failures: int = 0,
+     ) -> None:
+         self.slug = slug
+-        self.instance_id = instance_id or uuid4()
++        self.instance_id = instance_id or new_id()
+ 
+         self.tech_id = db_data.tech_id
+         self.sort = db_data.sort

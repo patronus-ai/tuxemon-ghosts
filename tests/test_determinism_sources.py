@@ -56,3 +56,16 @@ def test_copy_preserves_the_deterministic_seed() -> None:
     config = TuxemonConfig()
     config.deterministic_seed = 42
     assert config.copy().deterministic_seed == 42
+
+
+def test_entity_ids_are_reproducible() -> None:
+    from tuxghost.boot import build_client
+
+    def ids(seed: int) -> list[str]:
+        seed_all(seed)
+        _client, session = build_client(seed=seed)
+        session.client.event_engine.execute_action("add_monster", ("rockitten", 12))
+        return [str(m.instance_id) for m in session.player.monsters]
+
+    assert ids(1234) == ids(1234)
+    assert ids(1234) != ids(99)

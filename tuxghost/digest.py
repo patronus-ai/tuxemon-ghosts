@@ -20,30 +20,31 @@ from typing import Any
 # monster" is the intent, not "the `instance_id` of monster 0".
 #
 # `SessionSave` fields (`uuid`, `start_time`, `duration`, `total_playtime`)
-# are deliberately NOT listed here even though patch 0003/0004 will touch
-# them upstream: `state_of()` never digests `session.session_state`, only
-# `npc_state` and `world_state`, so none of those paths are reachable in
-# the tree below and an entry for them would be dead -- untestable and a
-# trap for `test_exemptions_are_all_reachable_in_the_digested_tree`. If a
-# later task starts digesting `SessionSave`, add the exemption then, at
-# the real path.
-EXEMPTIONS: dict[str, str] = {
-    "npc_state.instance_id": (
-        "entity id is uuid4; closed by patch 0003's seeded uuid factory"
-    ),
-    "npc_state.monsters.instance_id": (
-        "entity id is uuid4; closed by patch 0003's seeded uuid factory"
-    ),
-    "npc_state.monsters.moves.instance_id": (
-        "entity id is uuid4; closed by patch 0003's seeded uuid factory"
-    ),
-    "npc_state.game_variables.add_monster": (
-        "add_monster stores Monster.instance_id.hex (a uuid4) as a game "
-        "variable VALUE, not a schema field with a recognisable name; "
-        "closed by patch 0003's seeded uuid factory, since that also "
-        "makes Monster.instance_id deterministic"
-    ),
-}
+# are deliberately NOT listed here even though patch 0004 will touch
+# `start_time`/`duration`/`total_playtime` upstream: `state_of()` never
+# digests `session.session_state`, only `npc_state` and `world_state`, so
+# none of those paths are reachable in the tree below and an entry for
+# them would be dead -- untestable and a trap for
+# `test_exemptions_are_all_reachable_in_the_digested_tree`. If a later task
+# starts digesting `SessionSave`, add the exemption then, at the real path.
+# (`SessionSave.uuid` itself needs no entry at all, seeded or not: patch
+# 0003's `AbstractSession.reset()` already draws it from the seeded id
+# factory -- see `tuxemon/session.py` -- so it would be reproducible even
+# if `session_state` became reachable.)
+#
+# The four entries patch 0003 closed (`npc_state.instance_id`,
+# `npc_state.monsters.instance_id`, `npc_state.monsters.moves.instance_id`,
+# `npc_state.game_variables.add_monster`) are gone: every `instance_id` in
+# the digested tree -- NPC, Monster, Technique (a monster's moves), Status,
+# Battle -- and the `chosen_tech` game variable that stores a Technique's
+# `instance_id.hex` now come from `tuxemon.core.ids.new_id()`, seeded by
+# `seed_all`/`build_client`. Patch 0003 also fixed a load-bearing call site
+# the brief specifying this patch didn't list:
+# `tuxemon/monster/monster.py`'s own `uuid4()` (Monster does not subclass
+# Entity, so entity.py's fix alone did not cover it) -- without it,
+# `npc_state.monsters.instance_id` and `npc_state.game_variables.add_monster`
+# would still have diverged.
+EXEMPTIONS: dict[str, str] = {}
 
 
 def _canonical(obj: Any, path: str = "") -> Any:
