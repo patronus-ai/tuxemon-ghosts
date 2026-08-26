@@ -139,6 +139,14 @@ caught, each in a different way:
   directory *before* parsing arguments, silently breaking every relative
   trace path a real user would type — went undetected until a reviewer
   deliberately tried one.
+- One asserted only that a string was non-empty: the exemption-register
+  test's `assert reason.strip()` accepted any placeholder text at all as
+  a valid reason to exempt a field from the digest, so it would have
+  waved through `"asdf"` exactly as happily as a real justification.
+  Strengthened to `re.search(r"patch \d{4}", reason)` — a reason must
+  name the patch that actually closes the defect — after a real,
+  unrelated bug (an unfiltered `uuid4()` nonce silently entering the
+  digest) slipped past both round-0 tests undetected.
 
 Beyond the tests: **the implementation plan itself was the source of six
 defects** that would each have produced a fully green suite while the
