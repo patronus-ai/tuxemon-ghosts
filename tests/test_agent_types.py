@@ -20,6 +20,30 @@ def test_valid_actions_pass_through_unchanged() -> None:
     assert validate_actions(actions) == actions
 
 
+def test_positive_boundaries_hold_cap_is_accepted() -> None:
+    """hold == HOLD_CAP must be valid. An off-by-one to `<` would reject it."""
+    action = Action(buttons.A, hold=HOLD_CAP, settle=0)
+    assert validate_actions((action,)) == (action,)
+
+
+def test_positive_boundaries_settle_cap_is_accepted() -> None:
+    """settle == SETTLE_CAP must be valid. An off-by-one to `<` would reject it."""
+    action = Action(buttons.A, hold=1, settle=SETTLE_CAP)
+    assert validate_actions((action,)) == (action,)
+
+
+def test_positive_boundaries_settle_zero_is_accepted() -> None:
+    """settle == 0 is the documented "no wait after release" case."""
+    action = Action(buttons.A, hold=1, settle=0)
+    assert validate_actions((action,)) == (action,)
+
+
+def test_home_button_zero_is_valid() -> None:
+    """HOME = 0 is a valid button. Truthiness check would silently reject it."""
+    action = Action(buttons.HOME, hold=1, settle=0)
+    assert validate_actions((action,)) == (action,)
+
+
 def test_empty_means_stop_and_is_not_an_error() -> None:
     assert validate_actions(()) == ()
 

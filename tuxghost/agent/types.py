@@ -44,7 +44,10 @@ SETTLE_CAP = 600
 VALID_BUTTONS = frozenset(
     value
     for name, value in vars(_buttons).items()
-    if not name.startswith("_") and isinstance(value, int)
+    # type(x) is int rather than isinstance(x, int) to reject bool and other
+    # int subclasses, so a future vendor bump doesn't silently admit bools
+    # or other non-button int attributes as valid buttons
+    if not name.startswith("_") and type(value) is int
 )
 
 
