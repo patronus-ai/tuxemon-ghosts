@@ -53,8 +53,9 @@ def main() -> None:
     save = snapshot_save(session)
     assert save.npc_state is not None
     print(f"current_map={save.npc_state.current_map!r}")
-    OUT.write_text(save.model_dump_json())
+    OUT.write_text(save.model_dump_json() + "\n")
     print(f"wrote {OUT}")
 
 
-main()
+if __name__ == "__main__":
+    main()

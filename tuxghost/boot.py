@@ -288,10 +288,38 @@ def boot_from_save(
     registered on `client.npc_manager` (so `NPC.update`/`PathController`
     actually run for it every frame) and movement-unlocked (so a
     directional input event is not silently dropped by `MovementManager
-    .is_movement_allowed`). See the comment at the two calls that do this,
-    below -- found and fixed by task 3, whose walkability assertion was
-    the first thing in this repo to ever drive the player with directional
-    input after a bare `boot_from_save`.
+    .is_movement_allowed`). Found and fixed by task 3, whose walkability
+    assertion was the first thing in this repo to ever drive the restored
+    player with directional input -- 136 pre-existing tests all read
+    `session.player` state directly instead, which restores correctly
+    regardless of either gap, so neither was ever exercised before.
+
+    Live gameplay reaches both as a SIDE EFFECT of the engine's own event
+    actions: `Teleporter.teleport_character` (`tuxemon/teleporter.py`)
+    calls `npc_manager.place_npc_on_map`, and `TeleportAction.start`
+    (`tuxemon/event/actions/teleport.py`) separately calls
+    `movement_manager.unlock_controls`; upstream's own save-load path
+    (`tuxemon/event/actions/load_game.py`) gets both for free because it
+    re-teleports the player to their own saved position immediately after
+    `session.load_state(save_data)`. `boot_from_save` restores state
+    directly, with no event action ever running, so it does both calls
+    itself instead -- deliberately NOT via `execute_action("teleport",
+    ...)`: every event action goes through `EventEngine`'s deferred queue
+    (patch 0005), so its effects would not be visible until a subsequent
+    `update()`/`run_steps` call, breaking every existing caller that reads
+    `session.player` state immediately after `boot_from_save` returns
+    with no intervening step (e.g. `tests/test_boot.py
+    ::test_boot_from_save_restores_position_and_party`). `add_npc`/
+    `unlock_controls` are plain synchronous calls with no queue, so they
+    take effect before this function returns and touch no field
+    `load_state` already restored.
+
+    Digest-neutral, but not because it "touches no field the digest
+    sees" -- it does: `tuxghost.digest.state_of` reads `npc_manager` via
+    `get_persistent_npc_states` (`tuxghost/digest.py`). It is neutral
+    because that function filters `npc.slug != player_slug`
+    (`tuxemon/npc_manager.py`) -- the player is excluded from what it
+    returns, by slug, not because `NPCManager` itself is unread.
     """
     import random
 
@@ -382,48 +410,26 @@ def boot_from_save(
     client.push_state("WorldState", session=local_session, map_name=map_asset)
     local_session.load_state(save_data)
 
-    # Register the restored player as an on-map NPC and lift movement
-    # controls. Neither is part of `SaveData` (both are runtime-only
-    # bookkeeping owned by `NPCManager`/`MovementManager`, never digested
-    # by `tuxghost.digest.state_of`), so nothing about a fresh `NPCManager`/
-    # `MovementManager` (constructed a few lines up, inside `headless_world`)
-    # can pick either up from `load_state` above. Live gameplay reaches
-    # both as a SIDE EFFECT of the engine's own event actions instead --
-    # `Teleporter.teleport_character` (`tuxemon/teleporter.py`) calls
-    # `npc_manager.place_npc_on_map`, and `TeleportAction.start`
-    # (`tuxemon/event/actions/teleport.py`) separately calls
-    # `movement_manager.unlock_controls` -- and upstream's own save-load
-    # path (`tuxemon/event/actions/load_game.py`) gets both for free
-    # because it re-teleports the player to their own saved position
-    # immediately after `session.load_state(save_data)`, exactly to
-    # trigger this side effect. `boot_from_save` restores state directly,
-    # with no event action ever running, so without the two calls below
-    # the restored player is invisible to `NPCManager.update_npcs`
-    # (`WorldState.update` only iterates `npc_manager.npcs`/`npcs_off_map`,
-    # never `session.player` directly) and, independently, `is_movement_
-    # allowed` (`tuxemon/movement.py`) is False by default -- either gap
-    # alone is enough that `NPC.update`/`PathController.process_movement`
-    # never run for the player at all, so a directional input event sets
-    # `mover.move_direction` but nothing ever consumes it: the player
-    # looks fully booted (`active_state_names`, `get_map_name()`, party,
-    # tile_pos all read back correctly) while being unable to move one
-    # single tile. Measured directly while building this fixture (task 3):
-    # `client.npc_manager.npc_exists(player.slug)` is False and
-    # `client.movement_manager.allow_char_movement` is the empty set
-    # immediately after a bare `boot_from_save`, on every prior test in
-    # this suite that exercises `boot_from_save` -- none of them ever
-    # drove the player with directional input, which is exactly why this
-    # went uncaught until a walkability assertion existed to catch it.
-    # Deliberately NOT done via `execute_action("teleport", ...)` (what
-    # `load_game.py` does): every event action goes through `EventEngine`'s
-    # deferred queue (patch 0005), so its effects would not be visible
-    # until a subsequent `update()`/`run_steps` call -- breaking every
-    # existing caller that reads `session.player` state immediately after
-    # `boot_from_save` returns, with no intervening step (e.g. `tests
-    # /test_boot.py::test_boot_from_save_restores_position_and_party`).
-    # `add_npc`/`unlock_controls` are plain synchronous calls with no
-    # queue, so they take effect before this function returns and touch
-    # no position/state field `load_state` already restored.
+    # `NPC.create_player` only calls `session.set_player(npc)` when `not
+    # session.has_player()` (`tuxemon/entity/npc.py`), so `player` above
+    # equals `local_session.player` only because `local_session.reset()`
+    # cleared the singleton's player earlier in this function. Assert it
+    # rather than silently trusting it: if `reset()` ever stopped doing
+    # that, the two calls below would register/unlock a NON-player NPC
+    # while the digested `local_session.player` stayed unregistered and
+    # movement-locked -- exactly the module-level-singleton hazard
+    # CLAUDE.md documents, in a form nothing else here would catch.
+    assert player is local_session.player
+
+    # See this function's docstring for WHY these two calls are needed at
+    # all, and why not via `execute_action("teleport", ...)`. The one
+    # constraint a future editor must not miss: this placement, AFTER
+    # `push_state` above, is REQUIRED, not stylistic. `push_state(
+    # "WorldState", ...)` runs `MapTransition.change_map` synchronously
+    # (`tuxemon/states/world_state.py`), which calls `NPCManager
+    # .clear_npcs()` (`tuxemon/map/transition.py`'s `_clear_npcs`) as part
+    # of loading the new map -- registering the player any earlier would
+    # be silently wiped out by that clear.
     client.npc_manager.add_npc(player)
     client.movement_manager.unlock_controls(player)
 
