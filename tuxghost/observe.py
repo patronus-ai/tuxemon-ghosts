@@ -70,6 +70,24 @@ class FrameRenderer:
         if upscale < 1:
             raise ValueError(f"upscale must be >= 1, got {upscale!r}")
 
+        # MapRenderer.draw() gates its DebugRenderer on exactly this flag
+        # (tuxemon/map/view.py:522) -- wiring one in below is otherwise
+        # inert only by accident of the default config. A True value would
+        # silently burn collision boxes and a red centre line into every
+        # frame this class produces: a frame that quietly differs from
+        # what a human player sees, and the whole module docstring's claim
+        # ("no debug overlay") would be false without anyone changing a
+        # line in this file.
+        if client.config.collision_map:
+            raise ValueError(
+                "FrameRenderer refuses to run with config.collision_map "
+                "True: MapRenderer.draw() would draw upstream's debug "
+                "overlay (collision boxes, a red centre line) into every "
+                "frame, contradicting this module's no-debug-overlay "
+                "guarantee. Set display.collision_map: false (the "
+                "default) in ~/.tuxemon/tuxemon.yaml."
+            )
+
         self._client = client
         self._upscale = upscale
         self._surface = pg.Surface(client.context.resolution)
