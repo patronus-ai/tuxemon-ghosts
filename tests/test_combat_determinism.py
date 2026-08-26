@@ -91,9 +91,13 @@ def _battle_run(seed: int, steps: int) -> tuple[str, bool]:
     execute("add_monster", ("budaye", 10))
     # _start_battle returns early, and silently, when no environment is active
     execute("set_environment", ("grass",))
-    # skip=True runs start() without spinning: EventAction.run() never advances
-    # the client, so a normal call deadlocks headless forever
-    execute("random_battle", (2, 8, 14), True)
+    # Patch 0005 made this safe: EventAction.run() no longer spins on a
+    # wall clock that never advances the client -- it defers to the
+    # EventEngine's fixed-step queue, so this returns immediately and
+    # CombatState progresses on the same run_steps() calls below. Before
+    # patch 0005 this call needed skip=True or it deadlocked headless
+    # forever.
+    execute("random_battle", (2, 8, 14))
 
     install_schedule(client, _mash(buttons.A, steps // 5 + 2, 5))
     exited = False

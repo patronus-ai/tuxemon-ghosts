@@ -1,0 +1,149 @@
+diff --git a/tuxemon/event/eventaction.py b/tuxemon/event/eventaction.py
+index c7ee213..7f043e6 100644
+--- a/tuxemon/event/eventaction.py
++++ b/tuxemon/event/eventaction.py
+@@ -3,7 +3,6 @@
+ from __future__ import annotations
+ 
+ import logging
+-import time
+ from abc import ABC, abstractmethod
+ from collections.abc import Mapping, Sequence
+ from dataclasses import dataclass, field
+@@ -51,8 +50,15 @@ class ActionContextManager:
+ 
+         Ensures the action is properly cleaned up, unless it is marked as cancelled.
+         Logs a warning if the action is cancelled.
++
++        An action deferred to the EventEngine's step-clock queue (see
++        EventAction.run()) has not reached a terminal state yet when this
++        returns -- calling cleanup() here would run teardown before the
++        action's own work is done. The deferred queue calls cleanup()
++        itself once the action finishes.
+         """
+-        self.action.cleanup(self.session)
++        if self.action.done or self.action.cancelled:
++            self.action.cleanup(self.session)
+ 
+ 
+ @dataclass
+@@ -158,28 +164,33 @@ class EventAction(ABC):
+ 
+     def run(self, session: Session) -> None:
+         """
+-        Blocking call to run the action, without start or cleanup.
++        Run the action, without start or cleanup.
+ 
+         It is better to use EventAction.execute().
+ 
+-        This may cause the game to hang if an action is waiting on game
+-        changes.
++        Advances the action once on the caller's own turn (matching the
++        first iteration of the old spin loop), then, if the action has not
++        finished, hands it to the EventEngine's deferred queue so later
++        frames advance it on the client's fixed step instead of spinning on
++        a wall clock. The old loop computed dt from time.perf_counter() and
++        never returned control to the client, so any action waiting on game
++        state (e.g. a pushed State leaving the stack) hung forever, and any
++        action whose behaviour depended on dt was machine-speed dependent.
+         """
+         if self.cancelled:
+             logger.debug("Action is cancelled, not running")
+             return
+         try:
+-            last_time = time.perf_counter()
+-            while not self.done and not self.cancelled:
+-                if self._skip:
+-                    self.stop()
+-                    return
+-
+-                now = time.perf_counter()
+-                dt = now - last_time
+-                last_time = now
+-
+-                self.update(session, dt)
++            if self.done or self.cancelled:
++                return
++            if self._skip:
++                self.stop()
++                return
++
++            dt = 1.0 / session.client.config.fps
++            self.update(session, dt)
++            if not self.done and not self.cancelled:
++                session.client.event_engine.defer(self)
+         except Exception as e:
+             logger.error(f"Error running action: {e}")
+             raise
+diff --git a/tuxemon/event/eventengine.py b/tuxemon/event/eventengine.py
+index 7f8147b..98c8ff1 100644
+--- a/tuxemon/event/eventengine.py
++++ b/tuxemon/event/eventengine.py
+@@ -12,7 +12,7 @@ from tuxemon.user_config import CONFIG
+ 
+ if TYPE_CHECKING:
+     from tuxemon.db import EventObject, ParameterizableRule, SpatialCondition
+-    from tuxemon.event.eventaction import ActionManager
++    from tuxemon.event.eventaction import ActionManager, EventAction
+     from tuxemon.event.eventbehavior import BehaviorManager
+     from tuxemon.event.running import ConditionEvaluator
+     from tuxemon.map.tuxemon import AbstractMap
+@@ -55,6 +55,12 @@ class EventEngine:
+         self.current_map: AbstractMap | None = None
+         self._suspended: bool = False
+ 
++        # Actions deferred by EventAction.run() (see eventaction.py) once
++        # they outlive their first update() call. Advanced every frame by
++        # update() on the client's fixed step, instead of the action
++        # spinning on a wall clock and never returning control.
++        self._deferred: list[EventAction] = []
++
+         self.global_events: list[EventObject] = []
+         self.triggered_global_events: set[int] = set()
+         self._behavior_cache: dict[
+@@ -130,6 +136,36 @@ class EventEngine:
+             logger.error(f"Error executing action '{action_name}': {e}")
+             raise
+ 
++    def defer(self, action: EventAction) -> None:
++        """
++        Queue an action to be advanced by the client's fixed step.
++
++        Called by EventAction.run() once an action outlives its first
++        update() call, so it is advanced by update() -> _update_deferred()
++        on subsequent frames instead of spinning on a wall clock.
++        """
++        self._deferred.append(action)
++
++    def _update_deferred(self, dt: float) -> None:
++        """
++        Advance actions queued by defer(), on the client's fixed step.
++
++        Mirrors RunningEvent.process(): an action that finishes (done or
++        cancelled) this frame gets cleanup() called once, here, since
++        ActionContextManager.__exit__ skips cleanup() for an action that
++        was still running when EventAction.run() returned.
++        """
++        still_running: list[EventAction] = []
++        for action in self._deferred:
++            if action.done or action.cancelled:
++                continue
++            action.update(self.session, dt)
++            if action.done or action.cancelled:
++                action.cleanup(self.session)
++            else:
++                still_running.append(action)
++        self._deferred = still_running
++
+     def start_event(self, map_event: EventObject) -> None:
+         """
+         Begins execution of action list. Conditions are not checked.
+@@ -173,6 +209,8 @@ class EventEngine:
+         """
+         Check all the MapEvents and start their actions if conditions are met.
+         """
++        self._update_deferred(dt)
++
+         if self._suspended:
+             return
+ 
