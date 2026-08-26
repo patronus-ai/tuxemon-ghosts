@@ -253,12 +253,38 @@ Stated plainly, because the headline number is narrower than it sounds.
 - *One machine, one OS, one Python* (3.12.13, macOS arm64). Cross-platform
   reproducibility is unknown and untested.
 
-* Open question deferred
+* Open question closed: battle → world transition
 
-Whether combat is deterministic *through a completed battle transition* is the
-one measurement that could still change this format — if the battle → world exit
-proves nondeterministic, ~verify~ needs a divergence-tolerant mode. Current
-evidence says it will not, since every battle outcome reproduced exactly. The
-earliest task that technically can — Task 6 of the plan, once the
-scaffold, patch 0001, save-based boot, the stepping loop and the digest exist —
-closes it, before any format code is written.
+Whether combat is deterministic *through a completed battle transition* was
+the one measurement that could still change this format — if the battle →
+world exit proved nondeterministic, ~verify~ would need a divergence-tolerant
+mode. Task 6 of the plan closed it, before any format code was written.
+Measurement: ~docs/2026-08-25-battle-exit-measurement.org~.
+
+*Answer: no divergence-tolerant mode is needed.* A battle started via
+~random_battle(skip=True)~ exits — ~CombatState~ leaves the state stack —
+reproducibly at step 4945 of the post-battle input mash; no earlier run
+(spike or task) had ever observed a clean exit across up to 120000 steps.
+Two independent same-seed runs (seed 1234, 8000-step budget) through that
+exit differ in exactly four fields, all traced to source:
+
+- ~npc_state.monsters[].status[].instance_id~ — unseeded ~uuid4()~,
+  ~status/status.py:46~.
+- ~npc_state.battles[].instance_id~ — unseeded ~uuid4()~, ~battle.py:29~.
+- ~npc_state.battles[].timestamp~ — wall-clock ~time.time()~, ~battle.py:32~.
+- ~npc_state.game_variables.chosen_tech~ — a game variable storing a
+  ~Technique~'s ~uuid4()~ instance id as its value,
+  ~event/actions/get_pending_moves.py:62~.
+
+None is gameplay RNG. All four are already-planned fixes: patch 0003 (seeded
+uuid factory) closes the three ~uuid4()~ fields, patch 0004 (injectable
+clock) closes the timestamp. No other field diverged — party HP, levels,
+experience, monster list, tile position, facing, map, and the state stack
+all reproduced byte-for-byte between the two runs.
+
+*Limits, stated plainly:* the digest covers the player's own ~NPCState~ and
+the state stack by name only. It does not cover other NPCs
+(~SaveData.persistent_state~) or combat internals such as turn count or
+opponent HP. What this measurement establishes is that the *player-visible*
+outcome of a completed battle reproduces exactly, not that every internal
+combat computation does.
