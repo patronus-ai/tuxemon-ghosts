@@ -7,6 +7,17 @@ from `tuxghost.trace` rather than being re-derived here, so a trace
 recorded and immediately read back on the same build can never spuriously
 warn or refuse from the writer and reader computing the "current build"
 fingerprint two different ways.
+
+`Recorder` does NOT pin the clock or reset the session's own elapsed-time
+bookkeeping itself -- constructing a `Recorder` around an already-live
+session must not silently mutate that session's clock/playtime state as a
+side effect the caller didn't ask for. Instead, build the session with
+`clock_epoch` passed through `tuxghost.boot.build_client`/`boot_from_save`
+*before* constructing `Recorder`; see those functions' docstrings for why
+(`SessionSave.duration`/`total_playtime`/`start_time` otherwise leak real
+wall-clock time into `initial_state`, non-reproducibly). This also covers
+the executor (a later task), which calls `boot_from_save` directly and
+never constructs a `Recorder` at all.
 """
 
 from __future__ import annotations
@@ -15,7 +26,6 @@ import json
 from typing import Any, Literal
 
 from tuxghost.boot import snapshot_save
-from tuxghost.determinism import pin_clock
 from tuxghost.digest import digest_of
 from tuxghost.loop import STEP_RATE
 from tuxghost.trace import (
@@ -40,6 +50,12 @@ class Recorder:
     happens to be called in does not matter. See the module docstring on
     `tuxghost.trace` for why `PlayerInput.timestamp` must never enter this
     format.
+
+    `session` should already have been built with this same `clock_epoch`
+    (`tuxghost.boot.build_client(seed, clock_epoch=...)` or
+    `boot_from_save(save, seed, clock_epoch=...)`) -- see the module
+    docstring. `Recorder` trusts the caller here rather than resetting
+    session time itself.
     """
 
     def __init__(
@@ -56,30 +72,6 @@ class Recorder:
         self._recorder = recorder
         self._model = model
         self._inputs: list[tuple[int, int, float]] = []
-
-        # `AbstractSession._start_timestamp`/`_start_time` (upstream
-        # `tuxemon/session.py`) are set ONCE, at process start, when the
-        # module-level `local_session` singleton is constructed -- before
-        # any caller has had a chance to call `pin_clock`. `build_client`'s
-        # `reset()` does not touch them (only `reset_time()` does, and
-        # nothing calls it). `get_state()` (what `snapshot_save` drives)
-        # then computes `SessionSave.duration` from that frozen,
-        # real-wall-clock timestamp and, as a side effect, overwrites it
-        # with `now()` -- so a second recording in the same process
-        # measures a completely different (near-zero) `duration` than the
-        # first, even for the identical seed/schedule. Caught by a
-        # same-seed stability check recording twice in one process: the
-        # first `initial_state_digest` came out as `duration=-26762.9...`,
-        # the second as `duration=0.0`, for byte-identical gameplay.
-        # `duration`/`total_playtime`/`start_time` are playtime telemetry,
-        # not comparable game state -- `tuxghost.digest.state_of` never
-        # reads `session_state` at all, for the same reason. Pinning the
-        # clock (idempotent if the caller already did it) and resetting
-        # session time bookkeeping right before the snapshot makes
-        # `initial_state` a pure function of `(seed, clock_epoch)` again,
-        # matching every other reproducibility guarantee in this project.
-        pin_clock(clock_epoch)
-        session.reset_time()
 
         # Captured now, via the game's own save serialisation, rather than
         # re-derived at `finish()` time: `finish()` may be called long

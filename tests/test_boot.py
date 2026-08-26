@@ -91,6 +91,70 @@ def test_boot_from_save_ids_are_reproducible_regardless_of_prior_build_seed() ->
     assert player_iid_1 == player_iid_2
 
 
+def test_boot_from_save_session_time_is_reproducible_with_clock_epoch() -> None:
+    """The offline executor (a later task) calls `boot_from_save` directly
+    and never constructs a `tuxghost.record.Recorder` -- so it must get
+    session-time reproducibility from `boot_from_save` itself, not from the
+    recorder. Without `clock_epoch`, `AbstractSession._start_timestamp`
+    (`tuxemon/session.py`) is set once, at process start, from whatever
+    wall clock was in effect when the module-level `local_session`
+    singleton was first constructed -- almost always before any caller has
+    pinned the clock -- and `get_state()` (what `snapshot_save` drives)
+    mutates it as a side effect on every call. That leaks real, unpinned,
+    call-order-dependent time into `SessionSave.duration`/`total_playtime`/
+    `start_time`, invisible to `tuxghost.digest.state_of`/`digest_of`
+    (which never read `session_state` at all) but directly reachable from
+    a full `SaveData` snapshot -- exactly what `boot_from_save` produces
+    when a caller `snapshot_save`s the restored session.
+
+    `saved` is built WITH the clock pinned (`build_client(..., clock_epoch
+    =epoch)`) so its own `session_state` is the deterministic ground truth
+    a properly-recorded trace's `initial_state` would show: `duration ==
+    0.0`, `total_playtime == 0.0`, `start_time` == the epoch's own UTC
+    string. Asserting those exact values -- not merely that the two
+    restores agree with each other -- matters because a same-vs-same
+    comparison can pass vacuously once `_start_timestamp` has already
+    settled to the pinned epoch from an earlier call in the same process
+    (confirmed by hand while designing this test, see fix round 1 of the
+    task report), so agreement alone is not proof `boot_from_save` did the
+    resetting. An unrelated build runs in between the two restores to rule
+    out a coincidental one-time settling explaining the match."""
+    import json
+    from datetime import UTC, datetime
+
+    from tuxghost.boot import boot_from_save, build_client, snapshot_save
+
+    epoch = 1787694000
+    expected_start_time = (
+        datetime.fromtimestamp(epoch, tz=UTC)
+        .replace(tzinfo=None)
+        .strftime("%Y-%m-%d %H:%M")
+    )
+
+    _client, session = build_client(seed=1234, clock_epoch=epoch)
+    saved = snapshot_save(session)
+    source_session_state = json.loads(saved.model_dump_json())["session_state"]
+    assert source_session_state["duration"] == 0.0
+    assert source_session_state["total_playtime"] == 0.0
+    assert source_session_state["start_time"] == expected_start_time
+
+    def restore_and_snapshot() -> dict[str, object]:
+        _client_r, restored = boot_from_save(saved, seed=99, clock_epoch=epoch)
+        state: dict[str, object] = json.loads(
+            snapshot_save(restored).model_dump_json()
+        )["session_state"]
+        return state
+
+    session_state_1 = restore_and_snapshot()
+    _client_unrelated, _session_unrelated = build_client(seed=5555)
+    session_state_2 = restore_and_snapshot()
+
+    assert session_state_1 == session_state_2
+    assert session_state_1["duration"] == 0.0
+    assert session_state_1["total_playtime"] == 0.0
+    assert session_state_1["start_time"] == expected_start_time
+
+
 def test_build_client_resets_the_singleton_between_builds() -> None:
     """`local_session` is a module-level singleton reused by every
     `build_client` call in a process. Without an internal reset, a second

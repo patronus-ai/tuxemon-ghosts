@@ -26,7 +26,7 @@ from tuxghost.trace import (
 def test_recorder_indexes_inputs_by_step_not_arrival_order() -> None:
     from tuxghost.boot import build_client
 
-    _client, session = build_client(seed=1234)
+    _client, session = build_client(seed=1234, clock_epoch=1787694000)
     recorder = Recorder(
         session, seed=1234, clock_epoch=1787694000, recorder="offline-agent"
     )
@@ -48,7 +48,7 @@ def test_recorder_header_matches_this_builds_fingerprint() -> None:
     spuriously warn."""
     from tuxghost.boot import build_client
 
-    _client, session = build_client(seed=1234)
+    _client, session = build_client(seed=1234, clock_epoch=1787694000)
     recorder = Recorder(
         session, seed=1234, clock_epoch=1787694000, recorder="offline-agent"
     )
@@ -70,7 +70,7 @@ def test_recorded_trace_round_trips_without_warning_or_refusal(
     hard refusal -- must verify clean."""
     from tuxghost.boot import build_client
 
-    _client, session = build_client(seed=1234)
+    _client, session = build_client(seed=1234, clock_epoch=1787694000)
     recorder = Recorder(
         session, seed=1234, clock_epoch=1787694000, recorder="offline-agent"
     )
@@ -97,7 +97,7 @@ def test_tampered_initial_state_refuses_on_read_even_with_allow_mismatch(
 
     from tuxghost.boot import build_client
 
-    _client, session = build_client(seed=1234)
+    _client, session = build_client(seed=1234, clock_epoch=1787694000)
     recorder = Recorder(
         session, seed=1234, clock_epoch=1787694000, recorder="offline-agent"
     )
@@ -121,14 +121,17 @@ def test_recorder_output_is_stable_for_same_seed_and_clock_epoch() -> None:
     effectively random' -- only a same-seed equality check on the same
     route can. Record twice from scratch with the same seed and clock
     epoch and require the sealed trace to match exactly (aside from
-    `Provenance`, which carries no comparable content here)."""
+    `Provenance`, which carries no comparable content here).
+
+    Relies on `build_client`'s own `clock_epoch` parameter to reset session
+    time bookkeeping -- NOT on `Recorder` doing it, which would be a
+    surprising side effect of construction (see the module docstring on
+    `tuxghost.record`)."""
     from tuxghost.boot import build_client
-    from tuxghost.determinism import pin_clock
     from tuxghost.loop import install_schedule, run_steps
 
     def record_once() -> Trace:
-        pin_clock(1787694000)
-        _client, session = build_client(seed=1234)
+        _client, session = build_client(seed=1234, clock_epoch=1787694000)
         recorder = Recorder(
             session,
             seed=1234,

@@ -24,9 +24,35 @@ def headless_context() -> Any:
     return headless_init()
 
 
-def build_client(seed: int) -> tuple[Any, Any]:
-    """Build a headless client on a fresh game at the given seed."""
+def build_client(seed: int, clock_epoch: int | None = None) -> tuple[Any, Any]:
+    """Build a headless client on a fresh game at the given seed.
+
+    `clock_epoch`, if given, pins the wall clock (`tuxghost.determinism
+    .pin_clock`) and resets the session's own elapsed-time bookkeeping
+    (`local_session.reset_time()`) -- in that order, since `reset_time()`
+    reads the clock to set `_start_timestamp`/`_start_time`
+    (`tuxemon/session.py`). Without this, `AbstractSession.__init__`'s one
+    wall-clock read -- taken once, whenever the module-level
+    `local_session` singleton is first constructed, almost always before
+    any caller has had a chance to call `pin_clock` -- leaks real,
+    unpinned time into `SessionSave.duration`/`total_playtime`/
+    `start_time`. `tuxghost.digest.state_of` never reads `session_state`
+    so this is invisible to `digest_of`, but it IS reachable from a full
+    `SaveData` snapshot -- `tuxghost.record.Recorder` (which digests
+    exactly that) hit it as two different `initial_state_digest`s for the
+    same seed and schedule, recorded twice in one process. Deliberately
+    NOT done unconditionally: constructing a client is not the same
+    action as starting a *recording*, and forcing every caller (most of
+    `tests/`, which don't care about `session_state` at all) through a
+    clock pin would be a surprising side effect for them. `clock_epoch
+    =None` (the default) leaves clock behaviour exactly as before.
+    """
     import random
+
+    if clock_epoch is not None:
+        from tuxghost.determinism import pin_clock
+
+        pin_clock(clock_epoch)
 
     context = headless_context()
 
@@ -59,6 +85,13 @@ def build_client(seed: int) -> tuple[Any, Any]:
     # the executor, later tasks) to rediscover the hazard for themselves.
     local_session.reset()
 
+    # See this function's own docstring: must run AFTER `pin_clock` above
+    # (it reads the clock), so `_start_timestamp`/`_start_time` land on
+    # the pinned epoch rather than whatever real wall-clock reading
+    # `Session.__init__` happened to draw at process start.
+    if clock_epoch is not None:
+        local_session.reset_time()
+
     # `config.deterministic_seed` is what patch 0002 threads into
     # `WorldWeatherManager`, the only instance-RNG in the codebase (see
     # `tuxghost/determinism.py`). It is set here, directly on this build's
@@ -89,9 +122,27 @@ def snapshot_save(session: Any) -> Any:
     return save.get_save_data(session)
 
 
-def boot_from_save(save_data: Any, seed: int) -> tuple[Any, Any]:
-    """Boot a headless client and restore `save_data` into it."""
+def boot_from_save(
+    save_data: Any, seed: int, clock_epoch: int | None = None
+) -> tuple[Any, Any]:
+    """Boot a headless client and restore `save_data` into it.
+
+    `clock_epoch`: see the matching parameter on `build_client` -- same
+    behaviour, same ordering requirement (pin, then `reset_time()`), same
+    reason (`SessionSave.duration`/`total_playtime`/`start_time` leaking
+    real wall-clock time otherwise). This is the executor's path: it calls
+    `boot_from_save` directly and never constructs a
+    `tuxghost.record.Recorder`, so this parameter is what protects it --
+    passing the trace header's `clock_epoch` through gets the same
+    reproducibility guarantee a `Recorder`-driven recording gets, without
+    the executor needing to know why.
+    """
     import random
+
+    if clock_epoch is not None:
+        from tuxghost.determinism import pin_clock
+
+        pin_clock(clock_epoch)
 
     context = headless_context()
 
@@ -115,6 +166,11 @@ def boot_from_save(save_data: Any, seed: int) -> tuple[Any, Any]:
     # aliasing the old objects rather than by `load_state` doing
     # anything.
     local_session.reset()
+
+    # See the matching comment in `build_client`: must run AFTER
+    # `pin_clock` above, since `reset_time()` reads the clock.
+    if clock_epoch is not None:
+        local_session.reset_time()
 
     # See the matching comment in `build_client`: set the seed directly on
     # this build's own config copy so it is authoritative for the weather

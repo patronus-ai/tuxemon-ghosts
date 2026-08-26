@@ -128,6 +128,11 @@ class Provenance(BaseModel):
     model: str | None = None
     claimed_outcome: str | None = None
     taints: list[str] = Field(default_factory=list)
+    #: Free-form provenance only -- e.g. a human-readable timestamp for a
+    #: UI to display. Never read by `read()`/`write()` and never affects
+    #: execution or reproducibility, unlike `TraceHeader.clock_epoch`
+    #: (which does): traces are step-indexed, not wall-clock-indexed (see
+    #: the module docstring).
     recorded_at: str | None = None
 
 
