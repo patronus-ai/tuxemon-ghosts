@@ -69,3 +69,30 @@ def test_entity_ids_are_reproducible() -> None:
 
     assert ids(1234) == ids(1234)
     assert ids(1234) != ids(99)
+
+
+def test_session_uuid_is_reproducible() -> None:
+    """Pins `AbstractSession.reset()`'s `self._uuid = new_id()` redraw
+    (`tuxemon/session.py`). `local_session = Session()` is a process-lifetime
+    singleton: `__init__`'s own `new_id()` draw runs exactly once per
+    process, on the first import of `tuxemon.session`. Without a redraw in
+    `reset()` (called by every `build_client`/`boot_from_save`), `_uuid`
+    would be drawn once, ever, and then frozen for the rest of the process
+    -- every later build, regardless of seed, would silently keep that same
+    first value. This does not go through a digest comparison because
+    `tuxghost.digest.state_of()` deliberately never digests
+    `session.session_state` (see the comment above `EXEMPTIONS` in
+    `tuxghost/digest.py`); it asserts on `session._uuid` directly instead,
+    which is the only way to observe this value at all today."""
+    from tuxghost.boot import build_client
+
+    def get(seed: int) -> str:
+        _client, session = build_client(seed=seed)
+        return str(session._uuid)
+
+    first = get(1234)
+    other_seed = get(99)
+    second = get(1234)
+
+    assert first == second
+    assert first != other_seed

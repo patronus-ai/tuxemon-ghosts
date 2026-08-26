@@ -49,6 +49,25 @@ def test_digest_is_stable_for_one_seed_on_a_route_that_adds_a_monster() -> None:
     assert run_with_monster() == run_with_monster()
 
 
+def test_digest_is_stable_for_one_seed_on_a_route_that_adds_an_item() -> None:
+    """Companion control for `Item.instance_id`: `tuxemon/item/item.py`
+    called raw `uuid4()` even after patch 0003's sweep of the five (then
+    six, once `monster.py` was found) load-bearing entity-id sites --
+    `items` is a real `NPCState` field, and this route reaches it, so
+    fix-round-1 review caught a genuine, digested divergence: two same-seed
+    runs disagreed on `npc_state.items[0].instance_id`. Route through
+    `add_item` (companion to `add_monster`'s own test above) so this stays
+    reachable and `test_exemptions_are_all_reachable_in_the_digested_tree`
+    would catch it if it ever stopped being so."""
+
+    def run_with_item() -> str:
+        _client, session = build_client(seed=1234)
+        session.client.event_engine.execute_action("add_item", ("potion", 2))
+        return digest_of(session)
+
+    assert run_with_item() == run_with_item()
+
+
 def test_digest_discriminates_between_seeds() -> None:
     """A digest that cannot tell seeds apart makes every determinism test
     vacuous. This is the control that caught a worthless probe in the spike.

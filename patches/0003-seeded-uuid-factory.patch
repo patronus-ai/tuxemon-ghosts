@@ -71,6 +71,36 @@ index 6fb5200..cc2e21e 100644
          self.body = Body(position=Vector2(0, 0))
          self.mover = Mover(self.body)
          self._current_map: str | None = None
+diff --git a/tuxemon/item/item.py b/tuxemon/item/item.py
+index 957142c..ee5ac48 100644
+--- a/tuxemon/item/item.py
++++ b/tuxemon/item/item.py
+@@ -5,7 +5,7 @@ from __future__ import annotations
+ import logging
+ from collections.abc import Mapping, Sequence
+ from typing import TYPE_CHECKING, Any
+-from uuid import UUID, uuid4
++from uuid import UUID
+ 
+ from tuxemon import graphics
+ from tuxemon.core.asset import get_assets
+@@ -15,6 +15,7 @@ from tuxemon.core.core_processor import (
+     ConditionValidationResult,
+     EffectProcessor,
+ )
++from tuxemon.core.ids import new_id
+ from tuxemon.database.runtime import db
+ from tuxemon.db import (
+     ItemModel,
+@@ -39,7 +40,7 @@ class Item:
+ 
+     def __init__(self, slug: str, db_data: ItemModel) -> None:
+         self.slug = slug
+-        self.instance_id: UUID = uuid4()
++        self.instance_id: UUID = new_id()
+ 
+         self.visuals = db_data.visuals
+         self.sound = db_data.sound
 diff --git a/tuxemon/monster/monster.py b/tuxemon/monster/monster.py
 index 78a53fd..35acf77 100644
 --- a/tuxemon/monster/monster.py

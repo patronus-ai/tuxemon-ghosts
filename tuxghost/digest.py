@@ -34,16 +34,34 @@ from typing import Any
 #
 # The four entries patch 0003 closed (`npc_state.instance_id`,
 # `npc_state.monsters.instance_id`, `npc_state.monsters.moves.instance_id`,
-# `npc_state.game_variables.add_monster`) are gone: every `instance_id` in
-# the digested tree -- NPC, Monster, Technique (a monster's moves), Status,
-# Battle -- and the `chosen_tech` game variable that stores a Technique's
-# `instance_id.hex` now come from `tuxemon.core.ids.new_id()`, seeded by
-# `seed_all`/`build_client`. Patch 0003 also fixed a load-bearing call site
-# the brief specifying this patch didn't list:
-# `tuxemon/monster/monster.py`'s own `uuid4()` (Monster does not subclass
-# Entity, so entity.py's fix alone did not cover it) -- without it,
-# `npc_state.monsters.instance_id` and `npc_state.game_variables.add_monster`
-# would still have diverged.
+# `npc_state.game_variables.add_monster`) are gone: NPC (`entity.py`),
+# Monster (`monster.py`), Technique -- a monster's moves -- (`technique.py`),
+# Status (`status.py`), Battle (`battle.py`), and Item (`item.py`)
+# `instance_id`s, plus the `chosen_tech` game variable that stores a
+# Technique's `instance_id.hex`, all now come from
+# `tuxemon.core.ids.new_id()`, seeded by `seed_all`/`build_client`/
+# `boot_from_save`. Patch 0003 also fixed two load-bearing call sites the
+# brief specifying this patch didn't list: `tuxemon/monster/monster.py`'s
+# own `uuid4()` (Monster does not subclass Entity, so `entity.py`'s fix
+# alone did not cover it -- without this one, `npc_state.monsters
+# .instance_id` and `npc_state.game_variables.add_monster` would still have
+# diverged) and `tuxemon/item/item.py`'s own `uuid4()`, found in fix-round-1
+# review (`npc_state.items[].instance_id` diverges on the same
+# `add_item`-exercising route as `add_monster`'s own stability test above).
+#
+# This list is a statement about what `EXEMPTIONS == {}` actually covers,
+# not a claim that every `uuid4()` in the vendored tree is gone: two sites
+# still call it raw, deliberately left unpatched because no route any test
+# in this suite drives ever reaches them (an exemption for either would be
+# a dead entry, caught by `test_exemptions_are_all_reachable_in_the_digested
+# _tree`, and a fix would be an unpinned hunk -- see fix-round-1 finding 1's
+# corrective, which is exactly why `item.py` was NOT left in this same
+# category): `tuxemon/mission/mission.py:47`
+# (`npc_state.missions[].instance_id`, never populated -- no test route
+# ever completes a mission) and `tuxemon/event/eventparser.py:52` (an
+# internal event-bus id, not a persisted/digested state field at all). If
+# a future task starts exercising either, route it through `new_id()` and
+# update this note.
 EXEMPTIONS: dict[str, str] = {}
 
 

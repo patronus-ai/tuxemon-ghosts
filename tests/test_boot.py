@@ -49,6 +49,48 @@ def test_boot_from_save_restores_position_and_party() -> None:
     assert tuple(session2.player.tile_pos) == expected_tile_pos
 
 
+def test_boot_from_save_ids_are_reproducible_regardless_of_prior_build_seed() -> None:
+    """Pins `boot_from_save`'s own `seed_ids(seed)` call (`tuxghost/boot.py`).
+    Without it, `boot_from_save`'s `seed` argument is not authoritative for
+    entity ids: `local_session.reset()` (called inside `boot_from_save`)
+    draws from whatever `_rng` state a *prior, unrelated* `build_client`
+    call in the same process happened to leave behind, so restoring the
+    same save with the same `restore_seed` gives different ids depending on
+    what seed some earlier, unrelated build used -- a disagreement between
+    `boot_from_save`'s own explicit `seed` parameter and the ids it
+    actually produces. (Restored monsters keep their saved
+    `instance_id`s -- `load_state` round-trips them -- so the divergence is
+    not visible there; it shows up in the freshly-created player NPC and
+    in `session._uuid`, both drawn fresh by `boot_from_save` itself.)
+
+    Sequence: build with seed 1234, snapshot, restore with seed 99 --
+    then build again with an unrelated seed 5555 (to perturb `_rng`), and
+    restore the *same* save with the *same* restore seed 99 again. Every
+    comparable field must match between the two restores, since only the
+    restore seed (99, unchanged) should be authoritative."""
+    from tuxghost.boot import boot_from_save, build_client, snapshot_save
+    from tuxghost.digest import digest_of
+
+    _client, session = build_client(seed=1234)
+    saved = snapshot_save(session)
+
+    _client_r1, restored_1 = boot_from_save(saved, seed=99)
+    digest_1 = digest_of(restored_1)
+    uuid_1 = str(restored_1._uuid)
+    player_iid_1 = str(restored_1.player.instance_id)
+
+    _client_unrelated, _session_unrelated = build_client(seed=5555)
+
+    _client_r2, restored_2 = boot_from_save(saved, seed=99)
+    digest_2 = digest_of(restored_2)
+    uuid_2 = str(restored_2._uuid)
+    player_iid_2 = str(restored_2.player.instance_id)
+
+    assert digest_1 == digest_2
+    assert uuid_1 == uuid_2
+    assert player_iid_1 == player_iid_2
+
+
 def test_build_client_resets_the_singleton_between_builds() -> None:
     """`local_session` is a module-level singleton reused by every
     `build_client` call in a process. Without an internal reset, a second
