@@ -155,3 +155,54 @@ def test_build_client_does_not_leak_the_network_port() -> None:
         threading.excepthook = previous_hook
 
     assert thread_exceptions == []
+
+
+def test_null_renderer_survives_set_bubble() -> None:
+    """Fix round 3 (patch 0001): `HeadlessClient` never pushes a real
+    `MapRenderer` (there is nothing to draw to), so `session.client
+    .map_renderer` stays a `NullRenderer` for the life of any headless
+    client -- confirmed below by `isinstance`, not assumed. `set_bubble`
+    (a common map-script action) reads and writes `map_renderer
+    .bubble_manager` unconditionally; before this fix `NullRenderer` never
+    set it, so this raised `AttributeError` the first time any headless
+    route touched a speech bubble. `check_world`'s `"bubble"` branch reads
+    `bubble_manager.has_bubble(...)` too, so the assertions below exercise
+    both call sites, not just the mutator."""
+    from tuxemon.event.conditions.check_world import CheckWorldCondition
+    from tuxemon.map.view import NullRenderer
+
+    from tuxghost.boot import build_client
+
+    _client, session = build_client(seed=1234)
+    assert isinstance(session.client.map_renderer, NullRenderer)
+
+    execute = session.client.event_engine.execute_action
+    execute("set_bubble", ("player", "note"), True)
+    has_bubble = CheckWorldCondition("bubble", "player").test(session)
+    assert has_bubble is True
+
+    execute("set_bubble", ("player",), True)
+    has_bubble_after_removal = CheckWorldCondition("bubble", "player").test(
+        session
+    )
+    assert has_bubble_after_removal is False
+
+
+def test_null_renderer_survives_map_and_tile_animations() -> None:
+    """Fix round 3 (patch 0001): `play_map_animation`/`play_tile_animation`
+    read `map_renderer.map_animations` unconditionally and call
+    `.setup_and_play(...)`, which loads and caches a real animation from
+    the mod's asset data (`grass`, used by several maps' own scripts, e.g.
+    `mods/tuxemon/maps/eclipse_park_south.yaml`) -- not a stub call.
+    Before this fix `NullRenderer` never set `map_animations`, so either
+    action raised `AttributeError` the first time a headless route reached
+    one."""
+    from tuxghost.boot import build_client
+
+    _client, session = build_client(seed=1234)
+
+    execute = session.client.event_engine.execute_action
+    execute("play_map_animation", ("grass", 0.1, "noloop", "player"), True)
+    execute("play_tile_animation", (0, 0, "grass", 0.1, "noloop"), True)
+
+    assert "grass" in session.client.map_renderer.map_animations._cache

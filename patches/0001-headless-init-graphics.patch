@@ -18,28 +18,53 @@ index 995c89b..c00a6fd 100644
      rect = screen.get_rect()
  
 diff --git a/tuxemon/map/view.py b/tuxemon/map/view.py
-index 731f475..ccd84dd 100644
+index 731f475..b0f23cd 100644
 --- a/tuxemon/map/view.py
 +++ b/tuxemon/map/view.py
-@@ -419,10 +419,26 @@ class AbstractRenderer(ABC):
+@@ -419,10 +419,55 @@ class AbstractRenderer(ABC):
  
  
  class NullRenderer(AbstractRenderer):
 -    """A no-op renderer for when no map is loaded."""
 +    """A no-op renderer for when no map is loaded.
 +
-+    Mirrors the subset of `MapRenderer`'s attributes that other code reads
-+    or writes through the `AbstractRenderer` interface even while no real
-+    map is loaded: `set_layer.py` (a common map-script action) reads and
-+    writes `layer`/`layer_color`/`layer_image` unconditionally, and
-+    `check_world.py`'s "check_world layer" event condition reads
-+    `layer_color`. Without them, any headless client that reaches a
-+    `set_layer` call before a real `MapRenderer` is pushed -- e.g. a map's
-+    own ambient "on world load" event, which runs on the very first
-+    event-engine tick, before any input -- raises `AttributeError` on
-+    `renderer.layer.fill(...)`. `layer` is a real (if never-drawn) Surface,
-+    not a sentinel, so `set_layer`'s `.fill(...)`/`.get_at(...)` calls are
-+    harmless no-ops instead of crashes.
++    Mirrors every attribute `AbstractRenderer` declares and that other
++    code reads or writes through the `map_renderer` interface even while
++    no real map is loaded, so those call sites get a genuinely working
++    no-op rather than a second `AttributeError` one level deeper than the
++    first:
++
++    * `layer`/`layer_color`/`layer_image` -- `set_layer.py` (a common
++      map-script action) reads and writes all three unconditionally, and
++      `check_world.py`'s "check_world layer" condition reads
++      `layer_color`.
++    * `bubble_manager` -- `check_world.py`'s "check_world bubble" branch
++      calls `.has_bubble(char)`, and `set_bubble.py` calls
++      `.has_bubble`/`.add_bubble`/`.remove_bubble`. A real `BubbleManager`
++      is used, not `None`: `None.has_bubble(...)` would just move the
++      crash one attribute deeper, and `BubbleManager` itself has no
++      dependency beyond a `DisplayContext` and an internal dict -- cheap,
++      and functionally correct (bubbles set while headless are tracked
++      and queryable, simply never drawn).
++    * `map_animations` -- `play_map_animation.py`/`play_tile_animation.py`
++      call `.setup_and_play(...)`. A real `AnimationManager` is used for
++      the same reason: it loads and caches real animation data, has no
++      renderer dependency, and works identically whether or not anything
++      ever draws it.
++    * `cinema_x_ratio`/`cinema_y_ratio` -- declared on `AbstractRenderer`
++      but every external touch through this interface
++      (`start_cinema_mode.py`/`stop_cinema_mode.py`) is a plain
++      assignment, never a read (the only reads are inside
++      `MapRenderer.draw()` itself, which `NullRenderer` does not call);
++      Python allows assigning a new attribute to any object regardless of
++      whether `__init__` set it first, so these were never crash-prone.
++      Set anyway, for completeness against the full `AbstractRenderer`
++      contract and in case a future read site is added through this
++      interface -- the cost is two `None` assignments.
++
++    Without all of the above, any headless client that reaches a
++    `set_layer`/`set_bubble`/`play_map_animation`/`play_tile_animation`
++    call before a real `MapRenderer` is pushed raises `AttributeError`.
 +    """
  
      def __init__(self) -> None:
@@ -47,6 +72,10 @@ index 731f475..ccd84dd 100644
 +        self.layer = Surface(DISPLAY_CONTEXT.rect.size, SRCALPHA)
 +        self.layer_color: ColorLike | None = None
 +        self.layer_image: bool = False
++        self.bubble_manager = BubbleManager(context=DISPLAY_CONTEXT)
++        self.map_animations = AnimationManager()
++        self.cinema_x_ratio: float | None = None
++        self.cinema_y_ratio: float | None = None
  
      @property
      def label(self) -> str:
