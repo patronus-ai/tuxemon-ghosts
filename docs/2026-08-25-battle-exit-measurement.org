@@ -1,0 +1,175 @@
+#+TITLE: Battle exit measurement — closing the spec's open question
+#+DATE: 2026-08-25
+
+* The question
+
+The spike (=docs/2026-08-25-determinism-spike.org=) verified combat
+determinism up to 120000 steps, but every run — including that one — left
+=CombatState= on the state stack. "What was NOT measured" named the gap
+explicitly: *capture, evolution, and a clean exit from =CombatState= back to
+the world — no run left combat.* This document closes that gap using the real
+=tuxghost= harness (=build_client=, =install_schedule=, =run_steps=,
+=digest_of=), not spike throwaway code.
+
+*Answer: the battle exits, reproducibly, at a modest step count — but the
+raw digest does NOT match across same-seed runs at exit.* Every diverging
+field is already-cataloged, already-scheduled-for-fix nondeterminism (unseeded
+=uuid4=, closed by the planned patch 0003; a wall-clock =Battle.timestamp=,
+closed by the planned patch 0004/injectable clock) — the same two root causes
+the spike already found, just reaching one field further than the spike's
+120000-step run did. No field outside that pattern diverged: party HP,
+levels, experience, monster list, tile position, facing, map, and the state
+stack all matched byte-for-byte between independent same-seed runs.
+
+* Method
+
+=tests/test_combat_determinism.py= (marked =@pytest.mark.slow=, gated behind
+=TUXGHOST_RUN_SLOW=) drives seed 1234 through the same three-step recipe the
+brief specified for reaching a battle headless:
+
+1. Walk past the intro's blocking =InputMenu= by mashing A for 700 steps.
+2. =add_monster= twice, =set_environment grass= (required or
+   =RandomBattleAction._start_battle= silently no-ops), then
+   =random_battle(2, 8, 14)= with =skip=True= (a non-=skip= call deadlocks
+   headless forever — see the brief and the spike's Gate 2 for why).
+3. Mash A again and watch =client.state_manager.active_states= every step for
+   =CombatState= entering, then leaving, the stack.
+
+** Finding the step budget empirically, not by guessing 200000
+
+The brief's draft used 200000 steps twice, which risked 30+ minutes given the
+spike's ~8-minutes-per-120000-active-combat-steps figure. Before committing to
+that, an exploratory script instrumented the stack and printed on every
+change, starting at 20000 steps (a budget cheap enough to throw away).
+
+Result: =CombatState= left the stack at *step 4945*, reproducibly — identical
+across two independent explorations (budgets 12000 and 20000, differing only
+in how many future mash inputs were scheduled) and reached in ~1-2 seconds of
+wall time. This was faster and cheaper than expected; the spike's "minutes per
+run" figure describes deeper play (through the full post-battle reward path,
+120000 steps), not just reaching the exit.
+
+The committed test uses =BATTLE_STEP_BUDGET = 8_000= — roughly 60% margin
+over the measured exit step, and still only single-digit seconds per run. Full
+sequence after exit: =CombatState= drops out, a =MonsterMovesState= /
+=DialogState= sequence runs (level-up move management), and the run settles
+into a second blocking =InputMenu= (unrelated to the intro's) that A-mashing
+does not dismiss — irrelevant to this measurement, since "exited" is defined
+as =CombatState= leaving the stack, which already happened by then.
+
+* Result: the battle exited
+
+Both runs of the committed test report =exited = True=, at the same step
+within each run. This closes the "no run left combat" gap directly: a battle
+starting from =random_battle(2, 8, 14, skip=True)= reaches =CombatState='s
+exit within a step budget cheap enough to run in CI-adjacent time (single-digit
+seconds, not minutes).
+
+* Result: the digests diverge, and only on already-cataloged fields
+
+Running =PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 ./.venv/bin/python -m pytest
+tests/test_combat_determinism.py -v= against the committed test:
+
+: FAILED tests/test_combat_determinism.py::test_battle_is_deterministic_through_its_exit
+: AssertionError: combat diverged; verify needs a divergence-tolerant mode
+: assert 'ff64c420a4a1693a3d701c1c2c5e791d0506fc197480659736c81770333a64da' == '798d121927c47d98faf46d33dcc326834140c05ee05c79ab3c55e7e6332a3581'
+
+Both digests, run A and run B, same seed (1234), same step budget (8000):
+
+| run | exited | digest (sha256)                                                  |
+|-----+--------+-------------------------------------------------------------------|
+| A   | True   | =798d121927c47d98faf46d33dcc326834140c05ee05c79ab3c55e7e6332a3581= |
+| B   | True   | =ff64c420a4a1693a3d701c1c2c5e791d0506fc197480659736c81770333a64da= |
+
+The test asserts same-seed digest *equality* on the same route — per the
+Task 5 process rule, only a same-seed stability check, not a cross-seed
+*difference* check, can tell "diverged" apart from "the digest doesn't see
+anything." This one genuinely diverged.
+
+** Field-level diff
+
+=digest_of()= only returns a hash, so the divergence was isolated by running
+the identical scenario a second time through =state_of()= (same seed, same
+8000-step budget) and diffing the two trees field by field. The result was
+identical across three independent repeats of this diagnostic (only the
+field *values* changed run to run, never the field *set*):
+
+#+begin_src
+npc_state.monsters[0].status[0].instance_id   (uuid4)
+npc_state.battles[0].instance_id              (uuid4)
+npc_state.battles[0].timestamp                (wall-clock time.time())
+npc_state.game_variables.chosen_tech          (uuid4, stored as a variable VALUE)
+#+end_src
+
+No other field diverged — not =tile_pos=, =facing=, =map=, =state_stack=, nor
+any field inside =npc_state.monsters= besides the one =status= entry's
+=instance_id= (HP, level, experience, moves and their own =instance_id=s were
+identical, since those are already covered by the existing
+=npc_state.monsters.instance_id= / =npc_state.monsters.moves.instance_id=
+exemptions in =tuxghost/digest.py=).
+
+*All four fields trace to the same two already-known root causes*, both
+already named in =tuxghost/digest.py='s exemption-register commentary and in
+the spike doc's recommendations — this measurement did not find a new class
+of nondeterminism, it reached one field deeper into fields the spike already
+predicted would be there:
+
+- *Unseeded =uuid4()=* (=tuxemon/status/status.py='s status effect
+  =instance_id=, =tuxemon/battle.py='s =Battle.instance_id=). Same category as
+  the existing =npc_state.monsters.instance_id= /
+  =npc_state.monsters.moves.instance_id= exemptions, just at two paths the
+  current =EXEMPTIONS= dict does not yet list. Closed by the planned patch
+  0003 (seeded uuid factory) — see the plan's Task 8.
+- =game_variables.chosen_tech= is the same *variable-stores-a-uuid4* pattern
+  already documented for =game_variables.add_monster=: the =Check Max Moves=
+  map event (=get_pending_moves chosen_tech=, fired because a level-up during
+  this battle pushed a monster past its move cap) stores a pending
+  =Technique='s =instance_id.hex= as the variable's value, not as a
+  recognizably-named field. Same root cause (unseeded uuid4), same planned
+  fix (patch 0003), a different path shape.
+- =npc_state.battles[0].timestamp= is =Battle.__init__='s
+  =self.timestamp: float = time.time()= — the exact wall-clock leak the spike
+  found at 120000 steps in Gate 3 ("The whole divergence is one field"), now
+  confirmed to appear the moment any battle actually *completes*, which a
+  clean =CombatState= exit requires. =tests/test_digest.py='s
+  =test_exemptions_each_name_a_defect= already asserts =timestamp= must never
+  be silently added to =EXEMPTIONS= for exactly this reason. Closed by the
+  planned patch 0004 (injectable clock) — see the plan's Task 9.
+
+Patches 0003 and 0004 are not yet applied to this vendored tree (only 0001
+and 0006 are, per =git -C tuxemon diff --stat=), so this divergence was
+expected the moment a battle was driven to completion, not a surprise. The
+plan's Task 15 revisits this exact test file and expects it to *still pass*
+after 0003/0004 land, which is only consistent with it failing beforehand.
+
+* Verdict: is the format safe?
+
+*Yes, with the two fixes already on the plan — no new divergence-tolerant
+comparison mode is needed on combat's account.*
+
+The substantive, player-visible game state — party composition, HP, levels,
+experience, tile position, facing, map, and the state stack — reproduced
+byte-for-byte across two independent same-seed runs through a completed
+battle and its exit back to the world. The only fields that diverged are
+exactly the fields the digest's own exemption-register commentary and the
+spike doc already named as pending, not-yet-applied fixes (unseeded =uuid4=,
+one wall-clock timestamp). Once patches 0003 and 0004 land, this same test
+should turn green without any change to its assertion, and =verify= can
+compare traces by strict digest equality through a full battle, not just
+through in-progress combat.
+
+*What this does not claim*: the digest does not see combat internals (turn
+count, opponent HP — see =tuxghost/digest.py='s and the spike's stated
+coverage limits) or other NPCs' state. "Digests match" means the *player's*
+post-battle state matched, which is the scope =state_of()= was built to
+cover.
+
+* Reproducing
+
+#+begin_src bash
+PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 ./.venv/bin/python -m pytest \
+    tests/test_combat_determinism.py -v -s
+#+end_src
+
+Expected today (before patches 0003/0004): =FAILED=, with the assertion
+message above and a two-digest diff limited to the four fields listed.
