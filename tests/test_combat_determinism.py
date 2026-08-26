@@ -54,9 +54,17 @@ pytestmark = pytest.mark.slow
 
 BATTLE_STEP_BUDGET = 8_000
 
-# Arbitrary fixed epoch (2026-08-25T14:40:00 local) so both `_battle_run`
-# calls in a comparison see the same "now" -- see the module docstring.
-BATTLE_EPOCH = 1787694000
+# Fixed epoch so both `_battle_run` calls in a comparison see the same
+# "now" -- see the module docstring. Fix round 1 (patch 0004) changed
+# `now_datetime()` to interpret the epoch in UTC rather than the host's
+# local time; the original value here, 1787694000, is 21:20 UTC ("night"
+# by `_get_stage_of_day`), which -- purely as a side effect of that
+# reinterpretation, not anything wrong with the UTC fix itself -- started
+# tripping the same pre-existing `NullRenderer.layer` gap documented in
+# `tests/test_digest.py` (world event "Night Day Cycle Outside/Inside" in
+# `mods/tuxemon/maps/spyder.yaml`, gated on `stage_of_day == "night"`).
+# 1787659200 is 2026-08-25T12:00:00 UTC, comfortably inside `daytime`.
+BATTLE_EPOCH = 1787659200
 
 _run_slow = pytest.mark.skipif(
     not os.environ.get("TUXGHOST_RUN_SLOW"),

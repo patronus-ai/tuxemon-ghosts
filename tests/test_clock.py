@@ -14,7 +14,9 @@ the same route.
 
 from __future__ import annotations
 
-from datetime import datetime
+import os
+import time as _time
+from datetime import UTC, datetime
 
 from tuxemon.db import OutputBattle
 from tuxemon.save_system.save_state import TIME_FORMAT
@@ -22,21 +24,25 @@ from tuxemon.save_system.save_state import TIME_FORMAT
 from tuxghost.boot import build_client, snapshot_save
 from tuxghost.determinism import pin_clock, seed_all
 
-EPOCH = 1787694000  # 2026-08-25T12:20:00 (local, via datetime.fromtimestamp)
+EPOCH = 1787694000  # 2026-08-25T21:20:00 UTC (via now_datetime's UTC interpretation)
 
 
 def _expected_datetime(epoch: float) -> datetime:
     """The exact conversion `tuxemon.core.clock.now_datetime()` performs.
 
-    Naive on purpose, matching production: `now_datetime()` is
-    `datetime.fromtimestamp(now())` with no `tz`, because `TimeHandler`
-    (hemisphere season logic, `daytime`/`stage_of_day` cutoffs, weekday
-    names, ...) was already naive-local-time throughout upstream before
-    this patch; comparing against a tz-aware value here would raise
+    Naive on purpose, matching production: `now_datetime()` builds an
+    aware UTC datetime via `datetime.fromtimestamp(epoch, tz=UTC)`
+    -- so the pinned epoch alone determines the result, independent of the
+    host's `TZ` (see `test_pinned_epoch_is_independent_of_host_timezone`
+    below and the docstring on `tuxemon.core.clock.now_datetime`) -- then
+    strips the tzinfo, since `TimeHandler` (hemisphere season logic,
+    `daytime`/`stage_of_day` cutoffs, weekday names, ...) and everything
+    else that consumes it was already naive-datetime throughout upstream
+    before this patch; comparing against a tz-aware value here would raise
     `TypeError` on any comparison with the naive value this test is
     checking, not make the test more correct.
     """
-    return datetime.fromtimestamp(epoch)  # noqa: DTZ006
+    return datetime.fromtimestamp(epoch, tz=UTC).replace(tzinfo=None)
 
 
 def test_time_variables_come_from_the_pinned_epoch() -> None:
@@ -202,3 +208,55 @@ def test_save_data_time_is_pinned() -> None:
     _client, session = build_client(seed=1234)
     saved = snapshot_save(session)
     assert saved.time == _expected_datetime(float(EPOCH)).strftime(TIME_FORMAT)
+
+
+def test_pinned_epoch_is_independent_of_host_timezone() -> None:
+    """Fix round 1: the pinned epoch alone must determine the resulting
+    wall-clock fields, independent of the host machine's `TZ` -- a trace
+    recorded on one machine must replay byte-identically on another.
+
+    A first cut of `now_datetime()` used `datetime.fromtimestamp(now())`
+    (local time), exactly as the task-9 brief's own code sketch
+    specified. Measured with `EPOCH` fixed and only `TZ` varying:
+    `TZ=UTC` gave `(hour, day_of_year) = (21, 237)`,
+    `TZ=Asia/Tokyo` gave `(6, 238)` -- a different calendar day for the
+    identical pinned epoch, and `Monster.capture_date` (which IS in the
+    digested tree) shifted the same way. `now_datetime()` now interprets
+    the epoch in UTC before stripping tzinfo (see its docstring), so this
+    test drives the two most different zones available (UTC and
+    Asia/Tokyo, +9h with no overlapping daylight-saving complications)
+    and requires every wall-clock-derived, digest-reachable field to
+    match. `os.environ["TZ"]`/`time.tzset()` is Unix-only; fine here,
+    since this suite already assumes a Unix-like host (`SDL_VIDEODRIVER
+    =dummy`, headless pygame, ...). The original `TZ` is restored in
+    `finally` so this test cannot contaminate any test that runs after
+    it in the same process.
+    """
+    original_tz = os.environ.get("TZ")
+
+    def _measure(tz: str) -> tuple[object, object, object]:
+        os.environ["TZ"] = tz
+        _time.tzset()
+        seed_all(1234)
+        pin_clock(EPOCH)
+        _client, session = build_client(seed=1234)
+        session.client.event_engine.execute_action("update_time", ("player",))
+        session.client.event_engine.execute_action("add_monster", ("rockitten", 12))
+        variables = dict(session.player.game_variables.items())
+        return (
+            variables.get("day_of_year"),
+            variables.get("hour"),
+            session.player.monsters[-1].capture_date,
+        )
+
+    try:
+        utc = _measure("UTC")
+        tokyo = _measure("Asia/Tokyo")
+        assert utc != (None, None, None)
+        assert utc == tokyo
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        _time.tzset()

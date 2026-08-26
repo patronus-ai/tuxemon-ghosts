@@ -96,7 +96,8 @@ Version *1*. Any other value is rejected outright rather than read.
     "mod_version":          "0.4.35",
     "seed":                 1234,           // ONE master seed
     "step_rate":            60,             // the existing FIXED_DT = 1/60
-    "clock_epoch":          1787694000,     // REQUIRED; pins all wall clock
+    "clock_epoch":          1787694000,     // REQUIRED; UTC epoch seconds,
+                                                   // pins all wall clock
     "initial_state_digest": "sha256:…",
     "step_count":           120000
   },
@@ -112,7 +113,7 @@ Version *1*. Any other value is rejected outright rather than read.
 }
 #+end_src
 
-Three decisions, each forced by a measurement:
+Four decisions, each forced by a measurement:
 
 *One master seed, not three.* The spike found exactly three entropy sources
 (global ~random~, ~WorldWeatherManager._rng~, ~uuid4~). One seed derives all
@@ -124,6 +125,22 @@ identical hashes and meant nothing.
 unpinned clock silently stops reproducing at midnight, and gates day/night map
 events. It corrupted a comparison twice in one afternoon while every gameplay
 outcome looked perfect. A warning would have been ignored both times.
+
+*=clock_epoch= is interpreted in UTC, never the executing host's local
+timezone.* Found by measurement, not by design: an executor implementation
+that converted the epoch with the host's local time (~datetime.fromtimestamp~
+with no ~tz~) reproduced perfectly on one machine and diverged on another,
+with the *same* trace and the *same* ~clock_epoch~ -- ~(hour, day_of_year)~ for
+epoch 1787694000 came out ~(21, 237)~ under ~TZ=UTC~, ~(6, 238)~ under
+~TZ=Asia/Tokyo~, one calendar day apart, and every wall-clock-derived,
+digest-reachable field (~Monster.capture_date~ among them) shifted with it.
+That fails the format's own stated goal -- a trace recorded on one machine
+must replay byte-identically on another -- so the epoch alone, independent of
+where it is replayed, must determine every value derived from it. An executor
+must convert ~clock_epoch~ as a UTC timestamp before deriving anything from
+it (~datetime.fromtimestamp(clock_epoch, tz=timezone.utc)~, naive or aware
+per the implementation's own downstream needs, but UTC-*interpreted*
+either way).
 
 *=initial_state= reuses ~SaveData~.* Upstream's ~InputRecorder~ stores
 ={map, x, y, direction}= and cannot describe a world with a party, an inventory

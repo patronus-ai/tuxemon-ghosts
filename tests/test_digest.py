@@ -5,8 +5,28 @@ from typing import Any
 from tuxemon.platform.const import buttons
 
 from tuxghost.boot import build_client
+from tuxghost.determinism import pin_clock
 from tuxghost.digest import EXEMPTIONS, digest_of, state_of
 from tuxghost.loop import InputSchedule, install_schedule, run_steps
+
+# Fix round 1 (patch 0004): this file predates `pin_clock` (Task 5/6, before
+# Task 9) and never pinned the clock, so `_run`'s 900-step mash was reading
+# real wall time. `mods/tuxemon/maps/spyder.yaml`'s ambient "Night Day Cycle
+# Outside/Inside" world events call `set_layer` whenever `stage_of_day`
+# reaches "night", and headless `NullRenderer` (`tuxemon/map/view.py`) has
+# no `.layer` attribute -- `AttributeError: 'NullRenderer' object has no
+# attribute 'layer'`, a pre-existing headless-rendering gap unrelated to
+# patch 0004 (reproduces identically with the clock unpinned regardless of
+# local-vs-UTC interpretation; not something this patch introduced or is
+# responsible for fixing). Left unpinned, this suite silently depended on
+# the real time of day it happened to run at -- it passed every earlier run
+# in this project purely because those all fell in real daytime hours, and
+# started failing the moment a session ran past real dusk. That is exactly
+# the failure mode patch 0004 exists to close; pinning to a fixed
+# midday-UTC epoch here removes it, and is a matter of applying the tool
+# this task built, not a claim about the underlying `NullRenderer` gap
+# (parked, not fixed, for whoever owns headless rendering / patch 0001).
+DIGEST_EPOCH = 1787659200  # 2026-08-25T12:00:00 UTC -- safely inside `daytime`
 
 
 def _run(seed: int, steps: int = 900) -> str:
@@ -15,6 +35,7 @@ def _run(seed: int, steps: int = 900) -> str:
     # (see `tuxghost/boot.py`; previously that reset had to be done here by
     # hand, three times over, which is exactly the kind of workaround a
     # forgotten call turns into silent contamination rather than an error).
+    pin_clock(DIGEST_EPOCH)
     client, session = build_client(seed=seed)
     schedule: InputSchedule = {}
     for i in range(40):

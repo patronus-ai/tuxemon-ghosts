@@ -26,10 +26,10 @@ index 58a9094..43c9326 100644
  
 diff --git a/tuxemon/core/clock.py b/tuxemon/core/clock.py
 new file mode 100644
-index 0000000..29d747a
+index 0000000..24eec91
 --- /dev/null
 +++ b/tuxemon/core/clock.py
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,58 @@
 +"""Injectable wall clock, so recorded state can be reproduced.
 +
 +Unpinned, wall clock leaks into persisted game state (day_of_year, hour,
@@ -37,11 +37,33 @@ index 0000000..29d747a
 +reproducing the next day. `set_epoch` pins every wall-clock read in this
 +module to a fixed value; `tuxghost.determinism.pin_clock` is the public
 +entry point callers should use instead of calling `set_epoch` directly.
++
++`now_datetime()` interprets `now()`'s epoch in UTC, not the host's local
++timezone. A first cut used `datetime.fromtimestamp(now())` (local time,
++exactly as the task-9 brief's own code sketch specified); measurement
++showed the SAME pinned epoch producing a different `(hour, day_of_year)`
++-- and therefore a different `Monster.capture_date` and combat digest --
++depending on the machine's `TZ` (e.g. `1787694000` gives hour 21 under
++UTC, hour 6 under Asia/Tokyo, one calendar day apart). That breaks the
++project's actual goal: a trace recorded on one machine must replay
++byte-identically on another. Pinning `clock_epoch` alone must be
++sufficient, independent of `TZ`, so every wall-clock consumer needs a
++fixed, not host-dependent, interpretation of the epoch. The returned
++datetime is deliberately naive (not `tzinfo=timezone.utc`): every
++downstream consumer in this vendored engine (`TimeHandler`, `Battle`,
++`AbstractSession`, `SaveData`) only ever extracts naive-datetime fields
++(`.hour`, `.month`, `strftime(...)`, `.toordinal()`) or produces one
++itself (`datetime.now()` elsewhere, before this patch); returning an
++aware datetime here risks a `TypeError` the moment any of that vendored,
++not-fully-audited code compares or subtracts against a naive value. A
++naive datetime whose fields are UTC's is the safe way to get "pinned
++epoch alone determines the value" without also auditing every datetime
++consumer in the engine for aware/naive mixing.
 +"""
 +from __future__ import annotations
 +
 +import time as _time
-+from datetime import datetime
++from datetime import datetime, timezone
 +
 +_epoch: float | None = None
 +
@@ -56,7 +78,16 @@ index 0000000..29d747a
 +
 +
 +def now_datetime() -> datetime:
-+    return datetime.fromtimestamp(now())
++    """The pinned (or real) epoch as a naive datetime, UTC-interpreted.
++
++    Naive on purpose -- see the module docstring. `datetime.fromtimestamp
++    (epoch, tz=timezone.utc)` first builds an aware UTC datetime so the
++    conversion never consults the host's local `TZ`, then
++    `.replace(tzinfo=None)` strips the tzinfo so callers keep getting the
++    same naive `datetime` type they got before this fix (only the
++    timezone the epoch is interpreted in changed, not the awareness).
++    """
++    return datetime.fromtimestamp(now(), tz=timezone.utc).replace(tzinfo=None)
 diff --git a/tuxemon/entity/battle.py b/tuxemon/entity/battle.py
 index 586fb38..c415204 100644
 --- a/tuxemon/entity/battle.py
