@@ -114,13 +114,30 @@ def test_boot_from_save_session_time_is_reproducible_with_clock_epoch() -> None:
     string. Asserting those exact values -- not merely that the two
     restores agree with each other -- matters because a same-vs-same
     comparison can pass vacuously once `_start_timestamp` has already
-    settled to the pinned epoch from an earlier call in the same process
-    (confirmed by hand while designing this test, see fix round 1 of the
-    task report), so agreement alone is not proof `boot_from_save` did the
-    resetting. An unrelated build runs in between the two restores to rule
-    out a coincidental one-time settling explaining the match."""
+    settled to the pinned epoch from an earlier call in the same process.
+
+    That vacuous-pass risk is not hypothetical: an earlier version of this
+    test built `saved` via `build_client(..., clock_epoch=epoch)` and then
+    called `boot_from_save` with NO further isolation. `build_client`'s own
+    `pin_clock`+`reset_time()` (run to produce `saved`) already settles the
+    shared `local_session` singleton's `_start_timestamp` to `epoch`, and
+    `local_session.reset()` (which `boot_from_save` DOES call) never clears
+    it -- only `reset_time()` does. `get_state()` then self-corrects to a
+    fixed point once the clock is pinned, so `boot_from_save`'s OWN
+    clock-pinning rode for free on `build_client`'s earlier call: deleting
+    `pin_clock`/`reset_time()` from `boot_from_save` entirely did not fail
+    this test. Fixed by deliberately DIRTYING the singleton's clock
+    bookkeeping between producing `saved` and calling `boot_from_save`:
+    unpin the clock and force one more `get_state()` call (via
+    `snapshot_save`) while unpinned, settling `_start_timestamp` back to
+    real wall-clock time. `boot_from_save` must then redo the pin-and-reset
+    itself to reach the expected epoch-derived values -- it can no longer
+    inherit them for free. An unrelated build still runs between the two
+    restores, to rule out THAT accounting for the match instead."""
     import json
     from datetime import UTC, datetime
+
+    from tuxemon.core.clock import set_epoch
 
     from tuxghost.boot import boot_from_save, build_client, snapshot_save
 
@@ -137,6 +154,15 @@ def test_boot_from_save_session_time_is_reproducible_with_clock_epoch() -> None:
     assert source_session_state["duration"] == 0.0
     assert source_session_state["total_playtime"] == 0.0
     assert source_session_state["start_time"] == expected_start_time
+
+    # Dirty the singleton's clock bookkeeping: unpin the clock, then force
+    # another `get_state()` call while unpinned so `_start_timestamp`/
+    # `_start_time` settle back to real wall-clock time. Without this,
+    # `boot_from_save` inherits `build_client`'s earlier pin for free (see
+    # this test's own docstring), and the assertions below would pass even
+    # with `boot_from_save`'s own pin/reset entirely deleted.
+    set_epoch(None)
+    snapshot_save(session)
 
     def restore_and_snapshot() -> dict[str, object]:
         _client_r, restored = boot_from_save(saved, seed=99, clock_epoch=epoch)
