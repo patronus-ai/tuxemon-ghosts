@@ -614,6 +614,30 @@ Two mutations, both required in the report:
 
 Restore after each; =git diff= to confirm.
 
+- [ ] *Step 5b: Re-measure the first non-blank frame through this seam*
+
+Carried from the task-3 review. Task 3 measured, with an ad-hoc script,
+that a frame drawn immediately after =boot_from_save= — before any
+=run_steps= — is already non-blank (99 distinct sampled colours) on the
+=paper_town= fixture, contradicting an earlier controller premise that the
+first frame is black. That earlier premise came from a measurement on the
+GOLDEN save, whose =current_map= is the near-empty =start_tuxemon.tmx=
+staging map — a different route.
+
+The mechanism supports the new number: =WorldState.__init__= calls
+=change_map= synchronously (=states/world_state.py:76=), which calls
+=load_map_data= synchronously (=map/transition.py:46=), so map data is
+loaded before =push_state= returns. But the ad-hoc measurement's control
+(a =NullRenderer= baseline reading 1 colour) cannot distinguish real map
+art from a debug overlay or HUD.
+
+Re-measure it here, through the committed seam, at near-zero cost:
+=len(distinct_colors(FrameRenderer(client).surface()))= at step 0 on the
+fixture, with no =run_steps= first. Record the number in the task report.
+If it is 1 (blank), say so loudly — Task 5 assumes the agent's opening
+frame is real, and a blank first frame would mean the runner needs an
+input-free warmup before its first observation.
+
 - [ ] *Step 6: Commit*
 
 #+begin_src bash
@@ -805,17 +829,30 @@ def test_player_can_walk_from_the_fixture_spawn() -> None:
     install_schedule(client, schedule)
     start = world.player.tile_pos
 
-    moved = None
-    for button in (buttons.DOWN, buttons.UP, buttons.LEFT, buttons.RIGHT):
-        schedule.clear()
-        base = 5
+    # `base` MUST advance by the chunk length each iteration.
+    # `install_schedule`'s closure holds a monotonic step counter
+    # (`tuxghost/loop.py`) that `run_steps` never resets, so a fixed
+    # `base = 5` would leave every iteration after the first inserting
+    # input at a step index already in the past -- delivering nothing,
+    # while the assertion message claims all four directions were tried.
+    # Measured with a fake client: the fixed-base form delivered 2 events
+    # (both DOWN) across four iterations; the advancing form delivers 8.
+    moved = []
+    for i, button in enumerate(
+        (buttons.DOWN, buttons.UP, buttons.LEFT, buttons.RIGHT)
+    ):
+        base = 5 + 120 * i
         schedule[base] = [(button, 1.0)]
         schedule[base + 60] = [(button, 0.0)]
+        before = world.player.tile_pos
         run_steps(client, 120)
-        if world.player.tile_pos != start:
-            moved = button
-            break
-    assert moved is not None, (
+        if world.player.tile_pos != before:
+            moved.append(button)
+
+    # Assert the SET, not "at least one": this pins the fixture's actual
+    # mobility, so a change in upstream map data around the spawn is a
+    # test failure rather than a silently narrower test.
+    assert moved, (
         f"player could not leave tile {start} in any direction; the "
         "fixture spawn is boxed in -- regenerate it at a different tile"
     )
@@ -838,8 +875,14 @@ The spec forbids inheriting the Game Boy's 10/120 frame numbers. Measure
 this project's real numbers with a throwaway script (scratchpad, not
 committed): from the fixture, hold the walking direction found above and
 record how many steps elapse per tile boundary crossed, over at least 5
-tiles. Write the result into =tuxghost/agent/types.py='s constants in
-Task 4 and quote the raw measurement in the task report.
+tiles. Report the per-tile numbers, not an average — if they are not all
+equal, say so, because Task 4 pins a single constant from this.
+
+*Measured result (task 3): 16 steps per tile*, raw deltas
+=[2, 16, 16, 16, 16]= (the leading 2 is a start-position edge effect).
+Corroborated by the engine's own constants: =STEP_RATE= 60 /
+=CONFIG.player_walkrate= 3.75 = 16. Task 4's =WALK_ONE_TILE= is this
+number.
 
 - [ ] *Step 6: Commit*
 
@@ -940,8 +983,9 @@ Expected: =ModuleNotFoundError: No module named 'tuxghost.agent'=.
 
 - [ ] *Step 3: Implement*
 
-=tuxghost/agent/types.py= (replace =WALK_ONE_TILE = 0= with Task 3 Step
-5's measured value, and quote the measurement in the docstring):
+=tuxghost/agent/types.py=. =WALK_ONE_TILE= is already filled in below with
+Task 3's measured value (16 steps per tile, corroborated by =STEP_RATE= 60
+/ =player_walkrate= 3.75); use it verbatim rather than re-measuring:
 
 #+begin_src python
 """The agent's vocabulary: what it sees, what it may answer.
@@ -969,9 +1013,12 @@ from typing import Protocol, runtime_checkable
 from tuxemon.platform.const import buttons as _buttons
 
 #: Steps a held direction takes to cross one tile. MEASURED on the
-#: `paper_town` fixture (see the task-3 report for the raw numbers), not
-#: inherited from any Game Boy harness.
-WALK_ONE_TILE = 0  # <- replace with the measured value
+#: `paper_town` fixture, not inherited from any Game Boy harness: raw
+#: per-tile deltas were `[2, 16, 16, 16, 16]` over five consecutive tiles
+#: (the leading 2 is a start-position edge effect, not the real cost).
+#: Corroborated independently by the engine's own numbers --
+#: `STEP_RATE` 60 / `CONFIG.player_walkrate` 3.75 = 16.
+WALK_ONE_TILE = 16
 
 #: A single decision may not hold a button, or wait, for longer than 10
 #: seconds of game time. A cap is not a style preference: an LLM that
