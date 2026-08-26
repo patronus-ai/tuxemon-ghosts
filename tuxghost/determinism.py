@@ -28,6 +28,20 @@ of / outside of any one client build; it also mirrors the seed onto the
 process-wide `CONFIG` singleton's `deterministic_seed` so that any client
 built by a path other than `build_client` (which does not override it)
 still inherits a definite value instead of falling back to OS entropy.
+
+`pin_clock` closes a fourth leak that is not an entropy source at all --
+wall time. Patch 0004 routes `TimeHandler.get_current_time()` (and
+therefore `get_ordinal()`/`get_time_variables()`), `Monster.capture_date`
+(`today_month_day()`), `Battle.timestamp` (both where it is set --
+`battle.py`'s `Battle.__init__` and, load-bearingly, `entity/battle.py`'s
+`BattlesHandler.record_battle()`, which otherwise overwrites it via
+`Battle.from_save_data()`), `SaveData.time`, and `AbstractSession`'s
+`_start_time`/`_start_timestamp` bookkeeping through
+`tuxemon.core.clock.now()`/`now_datetime()`. Unlike `seed_ids`, the pinned
+epoch is not reset by `build_client`/`boot_from_save`: it is process-global
+state on `tuxemon.core.clock`, so a caller must call `pin_clock` itself
+(there is no per-build epoch argument to be authoritative over, the way
+there is for the seed).
 """
 
 from __future__ import annotations
@@ -43,3 +57,10 @@ def seed_all(seed: int) -> None:
 
     CONFIG.deterministic_seed = seed
     seed_ids(seed)
+
+
+def pin_clock(epoch: int) -> None:
+    """Pin all wall-clock reads to a fixed epoch (seconds since 1970)."""
+    from tuxemon.core.clock import set_epoch
+
+    set_epoch(float(epoch))
