@@ -2256,10 +2256,23 @@ Note the =SYSTEM= prompt reads =HOLD_CAP=/=SETTLE_CAP= from
 validator enforces but the prompt does not mention is a cap the model will
 keep tripping over, and two hardcoded copies would drift.
 
+- [ ] *Step 4b: Close a deferred gap in =ReplayPolicy='s transcript handling*
+
+Carried from the task-6 review. =ReplayPolicy= guards =claimed_outcome=
+with =if record.get("claimed_outcome")= so a later record that omits it
+cannot clobber an earlier value — the design calls that guarantee out
+explicitly, and this task is where =claimed_outcome= starts being relied
+on, but no test pins it. Add one to =tests/test_agent_policies.py=: a
+three-record transcript where record 2 sets =claimed_outcome= and record 3
+omits it, asserting the value survives record 3. Demonstrate it by
+dropping the truthy guard (=self.claimed_outcome = record.get(
+"claimed_outcome")= unconditionally) and watching it fail.
+
 - [ ] *Step 5: Run tests and the fast gate*
 
 #+begin_src bash
-PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_agent_claude.py -v && make check-fast
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_agent_claude.py \
+  tests/test_agent_policies.py -v && make check-fast
 #+end_src
 
 - [ ] *Step 6: Capture a real transcript and commit it as a replay fixture*
