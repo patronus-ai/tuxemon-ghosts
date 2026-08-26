@@ -1,0 +1,409 @@
+#+TITLE: S2 — CU-agent harness for Tuxemon
+#+DATE: 2026-08-26
+#+STATUS: design, approved in outline; awaiting spec review
+
+* What this is
+
+S2 gives an agent *eyes and hands*: it renders a real frame of the running
+game, hands that frame to a policy, and turns the policy's answer into
+button edges on exact step indices — funnelled through the *same*
+=tuxghost.record.Recorder= S1 already ships. The deliverable is a
+=.tuxghost= trace whose =provenance.recorder= is ~"cu-agent"~ and which
+=tuxghost verify= replays to the digest it recorded, using the S1 executor
+unchanged.
+
+What S2 is *not*: it does not score, reward, or check whether the agent
+achieved anything (S5), it does not render ghosts (S4), and it does not
+change the trace format (v1 already carries ~"cu-agent"~, ~model~, and
+~claimed_outcome~ — see =tuxghost/trace.py='s ~Provenance~).
+
+* Evidence base
+
+Everything below rests on four throwaway probes run on this tree
+(=make check= green at =c4a6fdf=), not on inspection:
+
+- *A full frame renders headless, through public seams only.* With a real
+  ~MapRenderer~ installed via ~BaseClient.set_renderer~ and upstream's
+  ~StateDrawer~ drawing the active-state stack onto a Surface we own, the
+  campaign-select screen rendered with legible text (78 distinct sampled
+  colours) and =spyder_bedroom.tmx= rendered as a real map — floor, bed,
+  furniture, player sprite (48 distinct sampled colours).
+- *=NullRenderer= draws literally nothing.* The same
+  ~WorldState.draw(surface)~ call with the stock headless ~NullRenderer~
+  produced *1* distinct colour: pure black. The renderer install is the
+  whole difference between a blank frame and a usable one.
+- *Drawing is digest-neutral on the probed route.* Installing the
+  renderer and issuing five extra draw passes left ~digest_of(session)~
+  byte-identical. This is evidence, not proof: it is one route, no combat
+  state, and it becomes a real regression test in Validation below.
+- *The intro is a wall.* Mashing =A= from a cold boot did not reach a bare
+  ~WorldState~ within 6000 steps: it walks campaign-select → bedroom
+  dialogs → a teleport → and *wedges on ~InputMenu~* (the name-entry
+  keyboard) by step 1140, after which the state stack stopped changing for
+  the remaining 4860 steps probed, with
+  the opaque full-screen ~ImageState~ cutscene backdrop covering the world
+  the entire time. ~StateDrawer~ stops at the first opaque full-screen
+  state, so during the whole intro the map is not merely unrendered — it
+  is correctly occluded.
+
+* Architecture: harness only, no seventh patch
+
+#+begin_example
+tuxghost/
+  observe.py        renderer install, frame render, PNG encode, obs metadata
+  agent/
+    types.py        Observation, Action, Policy protocol
+    runner.py       the agent loop
+    scripted.py     ScriptedPolicy   -- drives the gate
+    replay.py       ReplayPolicy     -- canned model responses from JSONL
+    claude.py       ClaudePolicy     -- Anthropic SDK, vision, window + notes
+  cli.py            new `agent` subcommand
+#+end_example
+
+*Nothing under =tuxemon/= changes.* The patch series stays at six. Every
+engine seam S2 touches is already public on ~BaseClient~:
+~set_renderer()~, ~state_manager~, ~config~, ~context~. This was not the
+expected answer — the working assumption was a patch 0007 giving
+~HeadlessClient~ a ~draw_frame()~ mirroring ~LocalPygameClient~ — and it
+matters because =patches/= is the sole durable record of every engine
+change (see =CLAUDE.md=): a seventh patch would cost a full
+=make unpatch && make patch= series re-verification and widen
+=make lint-patched='s surface, to buy a seam we do not need.
+
+*Why ~StateDrawer~ and not upstream's ~Renderer~.* ~Renderer~ adds only an
+fps window caption, a debug-overlay pass, and ~save_frame~-to-disk. All
+three are either wall-clock-flavoured or ours to do better. ~StateDrawer~
+is the part that matters: it walks ~state_manager.active_states~ and draws
+bottom-to-top with the same occlusion rule the real game uses, so a frame
+we render is the frame a human would see.
+
+*Why the renderer install is expected to survive — unmeasured.*
+~reset_renderer()~ is a no-op on ~BaseClient~ (only ~LocalPygameClient~
+overrides it), so nothing in the engine should swap our ~MapRenderer~ back
+out on a map change; and ~MapRenderer~ holds *managers*, not a map
+(~draw()~ takes ~current_map~ as an argument), so it should stay correct
+across teleports. Both of those are read off constructor signatures and
+call sites, *not* probed: no probe crossed a map boundary with a real
+renderer installed. Gate 4 in Validation is what turns them into
+knowledge.
+
+*Where animation time comes from.* ~WorldState.update(dt)~ already calls
+~self.client.map_renderer.update(dt)~ every step. So once a real renderer
+is installed, its animation clock is advanced by the engine's own
+per-step update at this harness's fixed ~dt~ — *not* by how often the
+agent chooses to look. Observation frequency cannot leak into animation
+state.
+
+* The decision model
+
+An action is a *duration*, not an instant:
+
+#+begin_src python
+@dataclass(frozen=True)
+class Action:
+    button: int   # tuxemon.platform.const.buttons (UP=1, DOWN=2, A=64, ...)
+    hold: int     # steps the button is held, 1 <= hold <= HOLD_CAP
+    settle: int   # steps run after release, before the next observation
+#+end_src
+
+*Why durations, and why the harness owns them.* At 60 steps/s a single
+step of =UP= does not move the player one tile, a dialog needs =A=
+pressed *and released*, and a combat menu needs several presses. The
+prior art divides cleanly:
+
+- =ClaudePlaysPokemonStarter='s ~press_buttons~, per its =agent/
+  emulator.py=: press, tick *10 frames*, release, then tick *120 frames*
+  when ~wait=True~, else 10 — then screenshot. The emulator advances only
+  when the harness ticks it, so model latency is free.
+- Public Claude-Plays-Pokémon writeups describe the same shape: capture
+  the screen every few seconds, send frame + goal + memory, forward the
+  chosen presses.
+- =PokemonRedExperiments= (the RL side) uses one *fixed* action window
+  (~act_freq~): press at tick 0, release at tick 8, remaining ticks
+  settle. Fixed because PPO wants a uniform step.
+
+Those are not rival designs; they are the LLM-harness convention and the
+RL-harness convention. A fixed window is expressible as a policy that
+always returns the same ~(hold, settle)~ — so the *harness* owns
+durations and *cadence becomes a property of the policy*. S3 (the offline
+optimizer, the RL-shaped consumer) gets a fixed-window policy for free,
+with no harness change.
+
+*The 10/120 numbers are not inherited.* They are Game Boy frame counts.
+Tuxemon's real step costs — one tile of walking, one dialog advance, one
+combat-menu selection — are measured during implementation and pinned as
+the defaults, with the measurement recorded in =docs/=.
+
+*Everything stays synchronous.* The game advances only inside
+~run_steps~; the policy thinks while the game is frozen; no wall clock
+enters the decision. =CLAUDE.md= already forbids the alternative:
+anything that reads real wall-clock time to decide what happens next is a
+determinism bug. A real-time harness would still emit a *replayable*
+trace, but the *run* would not be reproducible and the agent's speed
+would silently rescale it — which is exactly the defect
+=tuxghost/loop.py= was written to avoid inheriting from upstream's
+~InputRecorder~ playback path.
+
+* Data flow: one mutable schedule
+
+=install_schedule='s closure reads ~schedule.get(state["step"])~ off *the
+dict object* on every call (=tuxghost/loop.py=). So the runner installs
+one *empty* dict at boot and appends to it as the agent decides:
+
+#+begin_example
+boot (build_client | boot_from_save, clock_epoch)
+install_schedule(client, sched)        # sched = {}, mutated below
+Recorder(session, seed, clock_epoch, recorder="cu-agent", model=...)
+
+loop, until the step budget is spent or the policy stops:
+    obs     = observe(client, step)
+    actions = policy.decide(obs)
+    for a in actions:
+        sched[step]          = [(a.button, 1.0)] ; recorder.observe(step,          a.button, 1.0)
+        sched[step + a.hold] = [(a.button, 0.0)] ; recorder.observe(step + a.hold, a.button, 0.0)
+        run_steps(client, a.hold + a.settle)
+        step += a.hold + a.settle
+
+trace = recorder.finish(step)
+#+end_example
+
+*Every edge written to the schedule is also handed to the recorder*, so
+the trace *is* the schedule. An agent run and its replay then differ only
+in who filled the dict: the runner fills it live, =tuxghost.execute=
+fills it from the trace up front, and both call the same ~run_steps~ over
+the same ~install_schedule~. S2 therefore ships *zero* new format,
+execution, or verification code — its output is checked by the S1
+verifier that already exists. This symmetry is a stated invariant, pinned
+by a test that compares the runner's dict to the one =execute= rebuilds.
+
+*No second input mechanism.* The temptation is a per-step ~hook~ callback
+(=run_steps= has one) or a re-installed schedule per chunk. Both are
+rejected: a re-install would reset the closure's own step counter and
+silently rebase every later input, and a hook would create a second path
+by which input can reach the engine — the thing =tuxghost/loop.py='s
+docstring exists to prevent.
+
+* Observation
+
+~observe()~ returns pixels plus metadata:
+
+#+begin_src python
+@dataclass(frozen=True)
+class Observation:
+    step: int                      # absolute step index this frame was rendered at
+    frame_png: bytes
+    state_stack: tuple[str, ...]   # for logs and tests, NOT the agent's eyes
+    map_name: str
+    tile_pos: tuple[int, int]
+#+end_src
+
+*Pixels are the observation; the metadata is for humans.* The frame is
+what the policy sees. The metadata exists so a failing test can say
+*where* the agent was and so =decisions.jsonl= is auditable after the
+fact. A policy that reads ~state_stack~ to decide is a state-machine
+agent wearing a CU agent's clothes; ~ClaudePolicy~ is prompted from
+~frame_png~ alone.
+
+*Display scale is a measured gate, then a pinned constant.*
+=headless_init= hardcodes ~scale=1~/~DefaultScaling(1)~, while the real
+game builds its context with ~make_default_scaling(CONFIG,
+NATIVE_RESOLUTION)~ — scale 4 at 1280x720. The consequence is not
+cosmetic: at ~scale=1~ the camera shows roughly 80x45 tiles where a human
+sees roughly 20x11, so the probe's frames were a small native-scale
+island in a large black field. Implementation *measures* whether booting
+the scaled context changes ~digest_of~ against ~scale=1~ on a fixed
+route, and the result is recorded in =docs/= either way:
+
+- If scale is digest-neutral, agent runs boot the scaled, human-FOV
+  context and =tuxghost.execute= is unaffected.
+- If scale is digest-affecting, then scale is a *boot constant* shared by
+  record and replay, and a trace recorded at one scale must never be
+  replayable at another — the header has no scale field and gains none in
+  S2, so the constant is the only safe answer.
+
+Either way the frame handed to a model is cropped to the drawn region and
+integer-upscaled (nearest-neighbour, no smoothing) — pixel art must not
+be resampled into mush, and a mostly-black 1280x720 PNG wastes tokens.
+
+* Policies
+
+#+begin_src python
+class Policy(Protocol):
+    def decide(self, obs: Observation) -> Sequence[Action]: ...
+#+end_src
+
+- *ScriptedPolicy* — a fixed action list. Drives every harness test in
+  the gate. Deterministic by construction.
+- *ReplayPolicy* — replays canned model responses from a JSONL captured
+  from a real ~ClaudePolicy~ run. This is what gives prompt-building and
+  response-parsing — the code most likely to rot silently — real gate
+  coverage without a network call.
+- *ClaudePolicy* — the Anthropic SDK, vision, one frame per turn.
+
+*Context management: sliding window plus agent notes.* The last K
+observations (frame, action taken, resulting frame) are kept verbatim,
+plus one model-writable notes block carried forward in full. No
+summarization model call: a summarizer's output silently steers the run
+and is a second prompt to maintain, which is more moving parts than the
+harness itself has. The notes are written to the run directory, never to
+the trace.
+
+*No network in =make check=.* The gate runs ~ScriptedPolicy~ and
+~ReplayPolicy~ only. A live-model test, if one exists at all, sits behind
+an opt-in env var in the manner of the existing ~slow~ tier.
+
+* Where a run starts
+
+*Default: a committed post-intro save fixture*, restored via
+=tuxghost.boot.boot_from_save=, so the agent begins in the overworld with
+a party. Producing that fixture is a scripted-input exercise, not an
+agent one: the intro needs campaign select, several dialogs, a teleport,
+and the ~InputMenu~ name-entry keyboard, and the probe showed A-mashing
+wedges there indefinitely. Building it once and committing it keeps every
+later agent run and every test from re-paying that cost in model calls.
+
+*Cold boot stays supported.* Starting at the title screen is the honest
+computer-use test — a keyboard-navigated text-entry screen read from
+pixels is precisely the hard case — and it is the only route that
+exercises the title/menu states at all. It is available, exercised by at
+least one non-gate route, and not the default.
+
+* Provenance and the trace
+
+=Provenance= is filled as follows, and none of it is new format:
+
+- ~recorder="cu-agent"~ for ~ClaudePolicy~ runs, with ~model~ set to the
+  exact model id and no taint: a live model looked at pixels and decided.
+- ~recorder="cu-agent"~ for ~ReplayPolicy~ runs too — the decisions *are*
+  a CU agent's — with ~model~ carrying the captured run's model id and
+  ~taints~ gaining an entry recording that the decisions were replayed
+  from a transcript rather than taken live. This is what ~taints~ is
+  for, and =tuxghost/cli.py='s =compare= already surfaces taints as
+  findings, so this costs no new code.
+- ~recorder="human"~ for ~ScriptedPolicy~ runs: a person authored that
+  action list, and no agent was involved. This follows the existing
+  precedent in =tuxghost/cli.py='s =_record=, which labels a
+  hand-specified, no-input "walk N steps from this save" recording
+  ~"human"~.
+- ~"offline-agent"~ is *not* used by S2. It is left for S3's offline
+  optimizer, which is the thing that name describes.
+- ~claimed_outcome~ carries the agent's own final self-report, *stated
+  and unverified*. S2 writes it; S5 is what checks it. It is a claim, not
+  a measurement, and the field name is honest about that.
+- ~taints~ stays empty for live runs: a live agent recording is a
+  legitimate first-generation trace, not a tainted replay. Only
+  ~ReplayPolicy~ adds an entry, per the bullet above.
+
+*Frames never enter the trace.* They go to the run directory. Task 14
+already learned this the expensive way: an unstripped ~SaveData.screenshot~
+was 99.8% of a 3.7MB trace, cut to 12KB by stripping it
+(=tuxghost.boot.snapshot_save=). A trace stays inputs-only.
+
+* CLI
+
+#+begin_example
+tuxghost agent --policy {scripted,replay,claude} --seed S --clock-epoch E
+               [--from-save PATH] [--cold-boot] --steps N [--goal "..."]
+               --out trace.tuxghost --run-dir DIR
+#+end_example
+
+The run directory holds =frames/NNNNN.png= and =decisions.jsonl= (one
+record per decision: observation metadata, actions returned, agent notes,
+raw model response). A run is auditable afterwards without re-running it.
+
+*Exit codes follow the existing contract exactly* (=tuxghost/cli.py='s
+module docstring): 0 ran to completion, 2 refused — an unreadable or
+non-validating =--from-save=, a save missing ~npc_state.current_map~, a
+policy configuration that cannot be built. 1 is *never* returned by
+=agent=: there is nothing for a recording to diverge *from*, and
+conflating "refused" with "diverged" is a defect this CLI already fixed
+once and must not reintroduce. Path arguments are ~.resolve()~d
+immediately after ~parse_args~, before any vendored-tuxemon bootstrap
+chdirs — the relative-path defect the old CLI shipped with, and the
+vacuous test that missed it, are both on the record in =CLAUDE.md=.
+
+*=--goal= is free text with no evaluator.* It goes into the prompt and
+the run directory. Nothing in S2 checks it. Scoring is S5, and a
+half-scorer here would be a worse one than S5's.
+
+* Validation
+
+Per =CLAUDE.md='s non-negotiable, every regression test below must be
+*demonstrated* to fail against the defect it pins — mutate, run, watch
+it fail with a real message, restore, run, watch it pass — with the real
+before/after output in the task report. Six tests in this project already
+passed vacuously, and the S1 *plan* itself produced six defects that each
+yielded a green suite while the feature quietly did not work. The
+observation path is exactly the shape that invites a seventh: a test that
+renders a frame and asserts it is "not empty" proves almost nothing, and
+"1 distinct colour vs 48" is the difference it must actually detect.
+
+1. *Observation must not perturb digested state.* The structural hazard:
+   recording draws, replay does not. Two runs of an identical
+   ~ScriptedPolicy~ — one rendering at every decision, one with rendering
+   disabled — must reach the same ~final_digest~. Must cover a combat
+   frame, not just the overworld: the probe's digest-neutrality evidence
+   is overworld-only.
+2. *A recorded agent trace verifies.* An end-to-end
+   ~ScriptedPolicy~ run's trace must ~verify() == 0~ through the S1
+   executor, which never draws.
+3. *Schedule/trace equality.* The dict the runner built must equal the
+   dict =execute= reconstructs from the written trace. This is the test
+   that pins the whole one-mutable-schedule invariant.
+4. *The renderer install actually renders.* Assert the *specific* thing
+   the probe measured: a ~NullRenderer~ frame of a loaded map is a single
+   uniform colour, and the ~MapRenderer~ frame of the same state is not.
+   Plus: the installed renderer survives a map change (teleport), and
+   ~reset_renderer()~ does not clobber it.
+5. *Boundary validation, per the standing project preference.* ~hold <
+   1~, ~hold > HOLD_CAP~, negative ~settle~, an unknown button constant,
+   a policy returning a non-sequence or an empty sequence, and step-budget
+   exhaustion each raise an explicit error at the boundary rather than
+   being coerced. A policy is untrusted input.
+6. *Display scale.* The measurement described above, as a test that
+   records the answer rather than a note that asserts it.
+
+=make check= (fast + slow) must be green, =mypy --strict= clean,
+=ruff= and =make lint-patched= clean, and =EXEMPTIONS= must remain ~{}~ —
+an observation path is not a licence to exempt a field.
+
+* Known limitations, stated up front
+
+- *One machine.* Same as S1: macOS 26.6.1 arm64, Python 3.12, one SDL
+  build. Rendered pixels are a *new* cross-platform risk surface (font
+  rasterisation and blit paths need not be byte-identical across
+  platforms), and nothing in S2 measures it. Frames are an observation,
+  never a digested input, so this cannot silently corrupt a trace — but a
+  policy's behaviour could differ on another machine even where the trace
+  format holds.
+- *Model sampling is not determinism.* A ~ClaudePolicy~ run is not
+  reproducible from seed alone; the same seed and the same prompts can
+  yield different actions. What *is* reproducible is the trace once
+  recorded, which is the guarantee this project actually makes.
+  ~ReplayPolicy~ exists so that a model-driven run *can* be re-executed
+  decision-for-decision.
+- *No occlusion-aware framing.* ~StateDrawer~'s occlusion rule means an
+  opaque full-screen state hides the world, faithfully. During long
+  cutscenes the agent sees a cutscene, which is correct and also means it
+  can burn decisions there.
+- *Combat internals stay undigested.* Unchanged from S1: there is no
+  serializer seam on ~CombatState~, so an agent that fights produces a
+  trace certifying the player-visible outcome reproduced, not that combat
+  played out turn-by-turn identically.
+- *No summarization, so long runs drift.* Sliding window plus notes is
+  bounded context, not unbounded memory. A very long run will forget, and
+  S2 does not pretend otherwise.
+
+* Sources for the prior art
+
+Read during design, for the decision-model section above. Numbers quoted
+there come from these repositories' own source files, not their READMEs:
+
+- =ClaudePlaysPokemonStarter= — https://github.com/davidhershey/ClaudePlaysPokemonStarter
+  (=agent/emulator.py=: the 10-frame hold and 120-frame settle).
+- =PokemonRedExperiments= — https://github.com/PWhiddy/PokemonRedExperiments
+  (=baselines/red_gym_env.py=: ~act_freq~, press at tick 0, release at
+  tick 8).
+- =GeminiPlaysPokemonLive= — https://github.com/nichosta/GeminiPlaysPokemonLive
+  (read; its README documents no loop timings, so nothing above is
+  sourced from it).
