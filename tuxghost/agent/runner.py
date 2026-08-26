@@ -22,13 +22,18 @@ exists to prevent:
 Every edge written into the schedule is also handed to `Recorder.observe`,
 so the trace IS the schedule -- pinned by
 `tests/test_agent_runner.py::test_runner_schedule_equals_the_traces_schedule`.
+Edges are APPENDED (via `_add_edge`), not assigned: two edges can legally
+land on the same step index (a `settle=0` action's release lands exactly
+on the next action's press), and `schedule[step] = [...]` would silently
+drop one -- see `_add_edge`'s own docstring, and task 5 review round 1,
+which found this reachable from a perfectly ordinary policy.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from tuxghost.agent.types import Action, Observation, Policy, validate_actions
 from tuxghost.boot import boot_from_save, build_client
@@ -36,6 +41,17 @@ from tuxghost.digest import digest_of
 from tuxghost.loop import InputSchedule, install_schedule, run_steps
 from tuxghost.record import Recorder
 from tuxghost.trace import Trace
+
+if TYPE_CHECKING:
+    # Only for the annotations below -- `FrameRenderer` is a real class of
+    # OURS (`tuxghost.observe`), not an untyped upstream engine object, so
+    # it does not fall under this project's established "bare `Any` for
+    # unannotated upstream types" convention and should be spelled out
+    # properly. Imported lazily at runtime inside `run_agent` (below,
+    # guarded by `observe=`) so constructing a `FrameRenderer` -- which
+    # mutates the client by installing a real `MapRenderer` -- stays an
+    # opt-in side effect, not a module-import-time one.
+    from tuxghost.observe import FrameRenderer
 
 PRESSED = 1.0
 RELEASED = 0.0
@@ -66,11 +82,15 @@ class Decision:
 
 @dataclass
 class RunResult:
-    #: `None` only while the run is in flight; `run_agent` never returns a
-    #: `RunResult` whose trace is unset. Typed `| None` rather than
-    #: initialised with a dummy Trace so mypy --strict needs no ignore and
-    #: no fake object exists to leak into a caller.
-    trace: Trace | None
+    #: Never optional: `run_agent` only ever constructs a `RunResult` once
+    #: it has a real `Trace` in hand (`recorder.finish()` has already run).
+    #: Everything accumulated while the run is in flight
+    #: (`digests`/`decisions`/`frames`/`steps`) is built up in plain local
+    #: variables inside `run_agent` instead, precisely so this field never
+    #: has to be `Trace | None` -- no dummy `Trace` object, no `# type:
+    #: ignore`, and no caller-side `assert result.trace is not None`
+    #: needed just to read it back. Task 5 review round 1.
+    trace: Trace
     schedule: InputSchedule
     #: `(step, digest)` pairs, one every `digest_every` steps. Empty when
     #: `digest_every=0` (the default).
@@ -80,8 +100,50 @@ class RunResult:
     frames: list[bytes] = field(default_factory=list)
 
 
+def _add_edge(
+    schedule: InputSchedule, step: int, button: int, value: float
+) -> None:
+    """Insert one `(button, value)` edge at `step`, appending rather than
+    assigning, and keeping the list at that key sorted by `(button,
+    value)`.
+
+    `schedule[step] = [...]` (this function's predecessor) SILENTLY
+    OVERWRITES rather than accumulates. `validate_actions` permits
+    `settle == 0`, and an action with `settle=0` schedules its release at
+    exactly the step the *next* action's press lands on (`release = step
+    + action.hold` equals the following iteration's starting `step`).
+    Task 5 review round 1 found this reachable from an entirely ordinary
+    policy: the trace (built by `Recorder.observe`, which only ever
+    appends) kept both edges, but the live schedule kept only the last
+    write -- so `result.schedule != _schedule_of(result.trace)`, and
+    worse, REPLAY would then deliver a button release the RECORDING never
+    actually delivered to the engine.
+
+    Sorted by `(button, value)`, on every insert, rather than left in
+    whatever order calls happened to arrive: `_schedule_of`
+    (`tuxghost.execute`) rebuilds each step's list from
+    `sorted(trace.inputs)`, which sorts by the full `(step, button,
+    value)` tuple -- so within one step, the reconstructed list is always
+    in ascending `(button, value)` order. Matching that order here is not
+    just for the equality check: `install_schedule`'s `process_events`
+    yields a step's edges in LIST ORDER, and delivers them to the live
+    engine as it goes. An insertion-order list could still compare `==`
+    to `_schedule_of`'s output as a Python list (if it happened to already
+    be in the same order) while, on a different policy, delivering a
+    press/release pair to the ENGINE in the opposite order replay would --
+    a divergence no equality check on the schedule alone would catch,
+    only matching, canonical ordering does. Safe to re-sort on every
+    insert (not just once, lazily) because a step's list is only ever
+    written before `run_steps` reaches that step, never mutated after the
+    engine has already consumed it.
+    """
+    edges = schedule.setdefault(step, [])
+    edges.append((button, value))
+    edges.sort()
+
+
 def _observation(
-    client: Any, step: int, frames: Any
+    client: Any, step: int, frames: FrameRenderer | None
 ) -> tuple[Observation, bytes]:
     from tuxemon.states.world_state import WorldState
 
@@ -147,6 +209,14 @@ def run_agent(
     movement finish sooner and both runs would still converge on the same
     tile (measured in task 2, against two different injected side
     effects). A per-step sequence sees the transient.
+
+    `taints`/`claimed_outcome` pass straight through to `Recorder` --
+    see `Recorder.__init__`/`finish()` for what they mean. `claimed_outcome`
+    falls back to `policy.claimed_outcome` only when the caller passes
+    `None` (the default) -- checked with `is None`, not truthiness, so an
+    explicit `claimed_outcome=""` from a caller is honoured as-is rather
+    than silently overridden by the policy's own value (task 5 review
+    round 1).
     """
     if step_budget < 1:
         raise ValueError(f"step_budget must be >= 1, got {step_budget!r}")
@@ -168,7 +238,7 @@ def run_agent(
             save_data, seed=seed, clock_epoch=clock_epoch
         )
 
-    frames = None
+    frames: FrameRenderer | None = None
     if observe:
         from tuxghost.observe import FrameRenderer
 
@@ -185,7 +255,9 @@ def run_agent(
         taints=taints,
     )
 
-    result = RunResult(trace=None, schedule=schedule)
+    digests: list[tuple[int, str]] = []
+    decisions: list[Decision] = []
+    frame_log: list[bytes] = []
     step = 0
 
     while step < step_budget:
@@ -202,17 +274,17 @@ def run_agent(
             break
 
         for action in actions:
-            schedule[step] = [(action.button, PRESSED)]
+            _add_edge(schedule, step, action.button, PRESSED)
             recorder.observe(step, action.button, PRESSED)
             release = step + action.hold
-            schedule[release] = [(action.button, RELEASED)]
+            _add_edge(schedule, release, action.button, RELEASED)
             recorder.observe(release, action.button, RELEASED)
 
             base = step
 
             def sample(i: int, _base: int = base) -> None:
                 if digest_every and (_base + i) % digest_every == 0:
-                    result.digests.append((_base + i, digest_of(session)))
+                    digests.append((_base + i, digest_of(session)))
 
             run_steps(
                 client,
@@ -221,7 +293,7 @@ def run_agent(
             )
             step += action.hold + action.settle
 
-        result.decisions.append(
+        decisions.append(
             Decision(
                 step=obs.step,
                 actions=actions,
@@ -235,12 +307,21 @@ def run_agent(
             )
         )
         if png:
-            result.frames.append(png)
+            frame_log.append(png)
 
-    result.steps = step
-    result.trace = recorder.finish(
+    trace = recorder.finish(
         step_count=step,
-        claimed_outcome=claimed_outcome
-        or getattr(policy, "claimed_outcome", None),
+        claimed_outcome=(
+            claimed_outcome
+            if claimed_outcome is not None
+            else getattr(policy, "claimed_outcome", None)
+        ),
     )
-    return result
+    return RunResult(
+        trace=trace,
+        schedule=schedule,
+        digests=digests,
+        decisions=decisions,
+        steps=step,
+        frames=frame_log,
+    )

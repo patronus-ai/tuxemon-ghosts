@@ -51,7 +51,6 @@ def test_recorded_trace_verifies() -> None:
         clock_epoch=EPOCH,
         step_budget=400,
     )
-    assert result.trace is not None
     assert verify(result.trace) == 0
 
 
@@ -63,7 +62,6 @@ def test_runner_schedule_equals_the_traces_schedule() -> None:
         clock_epoch=EPOCH,
         step_budget=400,
     )
-    assert result.trace is not None
     assert result.schedule == _schedule_of(result.trace)
     assert result.schedule, "a walking policy must have scheduled input"
 
@@ -99,6 +97,20 @@ def test_rendering_does_not_change_the_recorded_digest() -> None:
     blind = run_agent(**kwargs(), observe=False)
 
     assert seen.digests, "digest_every=1 must record a digest per step"
+    # Anti-vacuity control (task 5 review round 1): if `digest_of` were
+    # ever blind to what actually changes along this route -- exactly
+    # the historical failure mode in CLAUDE.md's vacuous-test list, where
+    # nine runs across three seeds all hashed to the same value because
+    # the probed route never touched what the digest covered -- `seen ==
+    # blind` would hold trivially, with every entry identical, and the
+    # sequence comparison below would pass for no reason at all. Requires
+    # at least two distinct digest values across the run so the sequence
+    # check is actually discriminating something.
+    assert len({d for _, d in seen.digests}) > 1, (
+        "every recorded digest was identical -- digest_of is blind to "
+        "whatever this route actually changes, so the sequence "
+        "comparison below cannot prove anything"
+    )
     assert len(seen.digests) == len(blind.digests)
     first_diff = next(
         (i for i, (a, b) in enumerate(zip(seen.digests, blind.digests))
@@ -111,8 +123,6 @@ def test_rendering_does_not_change_the_recorded_digest() -> None:
     )
     # The end state must still agree -- the sequence check subsumes this,
     # but the trace's own field is what `verify()` compares against.
-    assert seen.trace is not None
-    assert blind.trace is not None
     assert seen.trace.header.final_digest == blind.trace.header.final_digest
 
 
@@ -151,7 +161,6 @@ def test_step_budget_is_never_exceeded() -> None:
         policy=forever, save_data=_save(), seed=1234,
         clock_epoch=EPOCH, step_budget=budget,
     )
-    assert result.trace is not None
     assert result.steps <= budget
     assert result.trace.header.step_count == result.steps
 
@@ -165,7 +174,6 @@ def test_cold_boot_run_records_a_verifiable_trace() -> None:
         policy=_walk_policy(), cold_boot=True, seed=1234,
         clock_epoch=EPOCH, step_budget=400,
     )
-    assert result.trace is not None
     assert verify(result.trace) == 0
 
 
@@ -193,3 +201,79 @@ def test_a_policy_returning_junk_is_refused() -> None:
             policy=Junk(), save_data=_save(), seed=1234,
             clock_epoch=EPOCH, step_budget=100,
         )
+
+
+def test_a_zero_settle_action_does_not_silently_drop_the_next_press() -> None:
+    """Task 5 review round 1: a `settle=0` action's release lands on
+    exactly the step the NEXT action's press lands on (`release = step +
+    action.hold` equals the following iteration's starting `step`).
+    `validate_actions` permits `settle == 0`, so this is reachable from an
+    entirely ordinary policy -- `_add_edge`'s predecessor
+    (`schedule[step] = [...]`) silently overwrote the first edge with the
+    second instead of accumulating both."""
+    policy = ScriptedPolicy(
+        [
+            (Action(buttons.DOWN, hold=30, settle=0),),
+            (Action(buttons.RIGHT, hold=30, settle=10),),
+        ]
+    )
+    result = run_agent(
+        policy=policy, save_data=_save(), seed=1234,
+        clock_epoch=EPOCH, step_budget=400,
+    )
+    assert result.schedule == _schedule_of(result.trace)
+    assert verify(result.trace) == 0
+
+
+def test_taints_and_claimed_outcome_reach_the_trace_provenance() -> None:
+    """Task 5 review round 1: nothing pinned `taints=`/`claimed_outcome=`
+    actually reaching `trace.provenance` -- the whole suite stayed green
+    even with `taints=[]` hardcoded or `claimed_outcome=claimed_outcome`
+    deleted from the `Provenance(...)` call. `taints` is an integrity
+    signal (how a replayed, not-model-authored trace gets marked so
+    `tuxghost.cli`'s `compare` can flag it), so a silently dropped taint
+    would make a replayed trace look live."""
+    result = run_agent(
+        policy=_walk_policy(), save_data=_save(), seed=1234,
+        clock_epoch=EPOCH, step_budget=400,
+        taints=("replayed",), claimed_outcome="won",
+    )
+    assert result.trace.provenance.taints == ["replayed"]
+    assert result.trace.provenance.claimed_outcome == "won"
+
+
+def test_claimed_outcome_falls_back_to_the_policy_when_not_given() -> None:
+    """The `getattr(policy, "claimed_outcome", None)` fallback path,
+    exercised separately from the explicit-argument path above."""
+    policy = _walk_policy()
+    policy.claimed_outcome = "policy-said-so"
+    result = run_agent(
+        policy=policy, save_data=_save(), seed=1234,
+        clock_epoch=EPOCH, step_budget=400,
+    )
+    assert result.trace.provenance.claimed_outcome == "policy-said-so"
+
+
+def test_claimed_outcome_explicit_empty_string_is_not_treated_as_unset() -> None:
+    """Task 5 review round 1, minor: `claimed_outcome or getattr(...)`
+    would treat an explicit `claimed_outcome=""` as falsy and silently
+    fall back to the policy's own value. Must be an `is None` check."""
+    policy = _walk_policy()
+    policy.claimed_outcome = "policy-fallback-that-must-not-win"
+    result = run_agent(
+        policy=policy, save_data=_save(), seed=1234,
+        clock_epoch=EPOCH, step_budget=400, claimed_outcome="",
+    )
+    assert result.trace.provenance.claimed_outcome == ""
+
+
+def test_digest_every_zero_records_nothing() -> None:
+    """`digest_every=0` (the default) must cost nothing: `RunResult.digests`
+    stays empty. `run_agent`'s own docstring names this as a requirement
+    ("Default 0 records nothing and costs nothing"); nothing previously
+    asserted the first half."""
+    result = run_agent(
+        policy=_walk_policy(), save_data=_save(), seed=1234,
+        clock_epoch=EPOCH, step_budget=400,
+    )
+    assert result.digests == []
