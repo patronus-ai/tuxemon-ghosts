@@ -382,6 +382,34 @@ an observation path is not a licence to exempt a field.
   recorded, which is the guarantee this project actually makes.
   ~ReplayPolicy~ exists so that a model-driven run *can* be re-executed
   decision-for-decision.
+- *The frames themselves are wall-clock dependent, and =clock_epoch= does
+  not fix it.* Measured during implementation: =pyscroll/data.py:132=
+  (a third-party dependency, reached through ~MapRenderer~) computes
+  ~self._last_time = time.time() * 1000~ to drive tile animation, and
+  =tuxghost.determinism.pin_clock= does not cover it — that pins the
+  *engine's* own clock module (patch 0004), not =time= inside an
+  unrelated package. Two back-to-back ~png()~ calls were observed to
+  differ about one run in three because of it.
+
+  What this does and does not break. It does NOT break trace replay:
+  =tuxghost= never imports pyscroll, nothing pyscroll touches enters
+  ~state_of()~, and inputs are ground truth once recorded — a trace
+  recorded from a wall-clock-animated frame still replays byte-identically.
+  What it breaks is *frame* reproducibility: the same agent, at the same
+  seed and the same =clock_epoch=, can be shown two different images of
+  the same game state. So a live ~ClaudePolicy~ run is unreproducible for
+  a second reason beyond model sampling, and this one would persist even
+  with temperature zero. This is the sharpest argument for
+  ~ReplayPolicy~: replaying a captured transcript is the only way to
+  re-execute a model-driven run decision-for-decision.
+
+  Not fixed here, by choice. Pinning =time.time= process-wide to make
+  frames reproducible would be a much larger intervention than S2 needs
+  (it would mean either vendoring pyscroll into the patch series, which
+  =patches/= is not for, or a global monkeypatch that every test and
+  every consumer inherits), and the trace guarantee — the thing this
+  project actually promises — is unaffected. Documented rather than
+  quietly worked around.
 - *No occlusion-aware framing.* ~StateDrawer~'s occlusion rule means an
   opaque full-screen state hides the world, faithfully. During long
   cutscenes the agent sees a cutscene, which is correct and also means it
