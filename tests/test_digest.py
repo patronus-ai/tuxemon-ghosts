@@ -13,29 +13,35 @@ from tuxghost.loop import InputSchedule, install_schedule, run_steps
 # Task 9) and never pinned the clock, so `_run`'s 900-step mash was reading
 # real wall time. `mods/tuxemon/maps/spyder.yaml`'s ambient "Night Day Cycle
 # Outside/Inside" world events call `set_layer` whenever `stage_of_day`
-# reaches "night", and headless `NullRenderer` (`tuxemon/map/view.py`) has
+# reaches "night", and headless `NullRenderer` (`tuxemon/map/view.py`) had
 # no `.layer` attribute -- `AttributeError: 'NullRenderer' object has no
-# attribute 'layer'`, a pre-existing headless-rendering gap unrelated to
-# patch 0004 (reproduces identically with the clock unpinned regardless of
-# local-vs-UTC interpretation; not something this patch introduced or is
-# responsible for fixing). Left unpinned, this suite silently depended on
-# the real time of day it happened to run at -- it passed every earlier run
-# in this project purely because those all fell in real daytime hours, and
-# started failing the moment a session ran past real dusk. That is exactly
-# the failure mode patch 0004 exists to close; pinning to a fixed
-# midday-UTC epoch here removes it, and is a matter of applying the tool
-# this task built, not a claim about the underlying `NullRenderer` gap
-# (parked, not fixed, for whoever owns headless rendering / patch 0001).
+# attribute 'layer'`. Left unpinned, this suite silently depended on the
+# real time of day it happened to run at -- it passed every earlier run in
+# this project purely because those all fell in real daytime hours, and
+# started failing the moment a session ran past real dusk.
+#
+# Fix round 2 (patch 0001): the `NullRenderer` gap itself -- flagged as
+# "parked" in fix round 1 -- turned out to block a third of `clock_epoch`'s
+# domain (`stage_of_day == "night"` is `hour < 4 or hour >= 20`, 8 of 24
+# UTC hours) on frame one of *any* route, not just this file's, so it was
+# promoted from parked to fixed: `NullRenderer.__init__` now sets a real
+# `layer` Surface (plus `layer_color`/`layer_image`), mirroring
+# `MapRenderer`, so `set_layer`'s calls are harmless no-ops instead of
+# crashes. `DIGEST_EPOCH` stays a daytime epoch (no reason to move a
+# passing route back to the region that used to crash); `NIGHT_EPOCH` below
+# adds the coverage that region never had, rather than trading one for the
+# other.
 DIGEST_EPOCH = 1787659200  # 2026-08-25T12:00:00 UTC -- safely inside `daytime`
+NIGHT_EPOCH = 1787774400  # 2026-08-26T20:00:00 UTC -- stage_of_day == "night"
 
 
-def _run(seed: int, steps: int = 900) -> str:
+def _run(seed: int, steps: int = 900, epoch: int = DIGEST_EPOCH) -> str:
     # `build_client` resets the `local_session` singleton internally before
     # building, so two in-process calls here do not contaminate each other
     # (see `tuxghost/boot.py`; previously that reset had to be done here by
     # hand, three times over, which is exactly the kind of workaround a
     # forgotten call turns into silent contamination rather than an error).
-    pin_clock(DIGEST_EPOCH)
+    pin_clock(epoch)
     client, session = build_client(seed=seed)
     schedule: InputSchedule = {}
     for i in range(40):
@@ -48,6 +54,21 @@ def _run(seed: int, steps: int = 900) -> str:
 
 def test_digest_is_stable_for_one_seed() -> None:
     assert _run(1234) == _run(1234)
+
+
+def test_digest_is_stable_for_one_seed_at_a_night_epoch() -> None:
+    """Fix round 2 (patch 0001): pins the `NullRenderer.layer` fix and
+    closes the coverage hole fix round 1 opened -- `DIGEST_EPOCH` moved
+    every digest test in this file to daytime, so nothing exercised the
+    night third of `clock_epoch`'s domain at all until this test. Per the
+    project's process rule, a route that only ever ran once could not
+    distinguish "fixed" from "coincidentally didn't crash this time" --
+    same-seed equality on the same night route is what actually proves it.
+    Before the `NullRenderer` fix this raised `AttributeError:
+    'NullRenderer' object has no attribute 'layer'` inside `run_steps`,
+    not merely a digest mismatch; see the task-9 fix-round-2 report for
+    the real traceback."""
+    assert _run(1234, epoch=NIGHT_EPOCH) == _run(1234, epoch=NIGHT_EPOCH)
 
 
 def test_digest_is_stable_for_one_seed_on_a_route_that_adds_a_monster() -> None:

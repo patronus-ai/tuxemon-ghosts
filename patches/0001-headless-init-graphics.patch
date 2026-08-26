@@ -17,3 +17,36 @@ index 995c89b..c00a6fd 100644
      screen = pg.Surface(CONFIG.resolution)
      rect = screen.get_rect()
  
+diff --git a/tuxemon/map/view.py b/tuxemon/map/view.py
+index 731f475..ccd84dd 100644
+--- a/tuxemon/map/view.py
++++ b/tuxemon/map/view.py
+@@ -419,10 +419,26 @@ class AbstractRenderer(ABC):
+ 
+ 
+ class NullRenderer(AbstractRenderer):
+-    """A no-op renderer for when no map is loaded."""
++    """A no-op renderer for when no map is loaded.
++
++    Mirrors the subset of `MapRenderer`'s attributes that other code reads
++    or writes through the `AbstractRenderer` interface even while no real
++    map is loaded: `set_layer.py` (a common map-script action) reads and
++    writes `layer`/`layer_color`/`layer_image` unconditionally, and
++    `check_world.py`'s "check_world layer" event condition reads
++    `layer_color`. Without them, any headless client that reaches a
++    `set_layer` call before a real `MapRenderer` is pushed -- e.g. a map's
++    own ambient "on world load" event, which runs on the very first
++    event-engine tick, before any input -- raises `AttributeError` on
++    `renderer.layer.fill(...)`. `layer` is a real (if never-drawn) Surface,
++    not a sentinel, so `set_layer`'s `.fill(...)`/`.get_at(...)` calls are
++    harmless no-ops instead of crashes.
++    """
+ 
+     def __init__(self) -> None:
+-        pass
++        self.layer = Surface(DISPLAY_CONTEXT.rect.size, SRCALPHA)
++        self.layer_color: ColorLike | None = None
++        self.layer_image: bool = False
+ 
+     @property
+     def label(self) -> str:
