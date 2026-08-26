@@ -214,79 +214,85 @@ def test_recording_renders_matches_a_render_free_replay() -> None:
     `WorldState.update` calls it on EVERY step
     (`states/world_state.py:152`). A recorded run therefore executes
     strictly more per-step engine code than a render-free replay of the
-    identical schedule. `test_rendering_does_not_change_the_digest` above
-    only checks a snapshot taken before/after idle drawing; it never
-    drives rendering through the stepping loop itself, so it cannot see
-    this. This test drives `png()` through `run_steps`'s `hook` on every
-    step of a real multi-step walk and requires the same final digest a
-    render-free run of the identical schedule reaches.
+    identical schedule.
 
-    INFERENCE-TO-KNOWLEDGE, NOT a demonstrated-mutation regression test
-    (same caveat as `test_installed_renderer_survives_a_map_change`
-    below; if this ever fails, that is a real finding, report it and
-    stop rather than patching the test). Measured, THREE separate times,
-    that it does NOT catch the review's suggested mutations on this
-    fixture/route:
+    REVIEW ROUND 2, RULING L: a FINAL-digest comparison (round 1's first
+    attempt) cannot see this, and it is not because the render pass is
+    inert -- it is because a grid-movement endpoint is an ATTRACTOR. Extra
+    `update()` calls make movement complete SOONER, but by the end of a
+    fully-drained schedule both runs settle onto the same tile, so the
+    transient gets erased before the final snapshot is ever taken. This
+    version compares the digest SEQUENCE, captured every step via
+    `run_steps`'s `hook`, which catches the recorded run being AHEAD of
+    the replay while a move is still in flight, and the schedule below
+    schedules a walk that is still resolving a move within the last few
+    steps of the window (not settled well before it) specifically so the
+    tail of the sequence is not itself an attractor.
 
-      1. `self._client.update(1.0 / 60)` added to `FrameRenderer.surface()`
-         (the exact mutation that DOES fail
-         `test_rendering_does_not_change_the_digest`, see the task
-         report) -- final digest UNCHANGED on this 150-step DOWN+RIGHT
-         walk, and also unchanged on an open-ended (never-released) hold.
-      2. A bare `random.random()` call added to `surface()` -- also
-         unchanged.
-
-    Mechanism, read from `tuxghost/loop.py`: `install_schedule`'s step
-    counter (`state["step"]`) increments once per call to
-    `client.input_manager.process_events`, which fires from EVERY
-    `client.update()` call regardless of who calls it -- monotonically,
-    by exactly 1, with no gaps. An extra render-induced `update()` call
-    therefore never skips or double-fires a scheduled input; it only
-    reaches each scheduled counter value sooner, then idles past it,
-    and idling is invisible to this digest (see
-    `test_rendering_does_not_change_the_digest`'s own docstring). Tuxemon's
-    grid movement is triggered by discrete counter-keyed events, not
-    accumulated continuously from `dt` (measured: holding `DOWN` open-ended
-    for 600 steps reaches the exact same tile as 75), so doubling the
-    total `update()` call count does not move the player any further,
-    either. Nothing on this route draws from `random` unconditionally per
-    tick (no `WorldWeatherManager` is wired into `WorldState` for this
-    map). Net effect: for schedule-driven grid movement replayed through
-    `tuxghost.loop`, "recording renders, replay doesn't" is SAFE by
-    construction, given the counter design above -- not because nothing
-    could go wrong, but because this specific mechanism can't produce a
-    divergence here. A live per-step recorder (Task 5) that keys its own
-    schedule by an INDEPENDENT loop counter while ALSO rendering each
-    step is a different, not-yet-built hazard this test cannot speak to.
+    Confirmed both ways on this exact schedule/window: unmutated, the two
+    sequences are identical at all 60 indices (see the task report for
+    the real command output). With `self._client.update(1.0 / 60)` added
+    to `FrameRenderer.surface()` -- the same mutation this file's
+    `test_rendering_does_not_change_the_digest` already uses -- the
+    sequences diverge at index 1 and stay diverged through index 56 of
+    59, re-converging only in the last 3 steps (the final `RIGHT` move
+    settles in both by then). Round 1's final-digest-only version would
+    have missed all of this.
     """
     schedule: InputSchedule = {
-        5: [(buttons.DOWN, 1.0)],
-        65: [(buttons.DOWN, 0.0)],
-        75: [(buttons.RIGHT, 1.0)],
-        135: [(buttons.RIGHT, 0.0)],
+        0: [(buttons.DOWN, 1.0)],
+        8: [(buttons.DOWN, 0.0)],
+        12: [(buttons.DOWN, 1.0)],
+        20: [(buttons.DOWN, 0.0)],
+        # Scheduled late enough that this move is still resolving at the
+        # end of the window, not settled well before it -- see the
+        # docstring above (Ruling L's "no attractor at the tail").
+        40: [(buttons.RIGHT, 1.0)],
+        48: [(buttons.RIGHT, 0.0)],
     }
+    steps = 60
+
+    def _digest_sequence(client: Any, session: Any, *, render: bool) -> list[str]:
+        install_schedule(client, dict(schedule))
+        digests: list[str] = []
+        if render:
+            frames = FrameRenderer(client)
+
+            def hook(_i: int) -> None:
+                frames.png()
+                digests.append(digest_of(session))
+
+        else:
+
+            def hook(_i: int) -> None:
+                digests.append(digest_of(session))
+
+        run_steps(client, steps, hook=hook)
+        return digests
 
     client_replay, session_replay = _boot_fixture()
     start = tuple(session_replay.player.tile_pos)
-    install_schedule(client_replay, dict(schedule))
-    run_steps(client_replay, 150)
-    replay_digest = digest_of(session_replay)
+    replay_digests = _digest_sequence(client_replay, session_replay, render=False)
 
     client_recorded, session_recorded = _boot_fixture()
-    install_schedule(client_recorded, dict(schedule))
-    frames = FrameRenderer(client_recorded)
-
-    def _render_every_step(_i: int) -> None:
-        frames.png()
-
-    run_steps(client_recorded, 150, hook=_render_every_step)
-    recorded_digest = digest_of(session_recorded)
+    recorded_digests = _digest_sequence(client_recorded, session_recorded, render=True)
 
     # The schedule must have actually moved the player in BOTH runs, or
     # this proves nothing about the recording/replay axis at all.
     assert tuple(session_replay.player.tile_pos) != start
     assert tuple(session_recorded.player.tile_pos) != start
-    assert recorded_digest == replay_digest
+    assert len(replay_digests) == len(recorded_digests) == steps
+
+    first_diff = next(
+        (i for i in range(steps) if replay_digests[i] != recorded_digests[i]),
+        None,
+    )
+    assert first_diff is None, (
+        f"recorded (rendered) and replay (render-free) digest sequences "
+        f"first diverge at step {first_diff} of {steps - 1}: "
+        f"replay={replay_digests[first_diff]!r} "
+        f"recorded={recorded_digests[first_diff]!r}"
+    )
 
 
 def test_installed_renderer_survives_a_map_change() -> None:
