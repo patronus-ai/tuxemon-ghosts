@@ -116,10 +116,34 @@ def build_client(seed: int, clock_epoch: int | None = None) -> tuple[Any, Any]:
 
 
 def snapshot_save(session: Any) -> Any:
-    """Serialise the live session into upstream's SaveData model."""
+    """Serialise the live session into upstream's SaveData model.
+
+    Strips `screenshot`/`screenshot_width`/`screenshot_height` before
+    returning: `save.get_save_data` renders and base64-encodes a full
+    frame (a 1280x720 RGB buffer, ~99.8% of the resulting payload's
+    size) into `SaveData.screenshot` for upstream's own save-file UI.
+    Nothing in `tuxghost` or `tests` ever reads it -- `initial_state_
+    digest` is computed from the frozen bytes already written into a
+    trace, never by re-rendering, and `tuxghost.digest.state_of` (what
+    `final_digest` is built from) only ever looks at `npc_state`/
+    `world_state`/`persistent_npc_state`. Stripped here, at the one
+    place every caller of this module (`Recorder`, the executor's own
+    round-trip helpers, `tuxghost.cli`'s `record`/`compare`, and every
+    test that calls `snapshot_save` directly) goes through, rather than
+    only excluded from the digest: leaving the bytes in place but
+    unhashed would still require every trace and ad-hoc save this
+    project produces to carry them, buying nothing. `SaveData.
+    screenshot`/`screenshot_width`/`screenshot_height` are all `X |
+    None = Field(default=None)`, so nulling them post-hoc is a clean,
+    supported state of the model -- not a workaround.
+    """
     from tuxemon.save_system import save
 
-    return save.get_save_data(session)
+    save_data = save.get_save_data(session)
+    save_data.screenshot = None
+    save_data.screenshot_width = None
+    save_data.screenshot_height = None
+    return save_data
 
 
 def boot_from_save(

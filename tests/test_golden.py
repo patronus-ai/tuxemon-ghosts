@@ -16,11 +16,23 @@ script and why the brief's own literal Step 3 script (missing
 `install_schedule`/`run_steps` before `finish()`) would have pinned a
 vacuous digest instead.
 
-`EXPECTED_DIGEST_FILE` (`walk_1234.digest`) is a redundant, human-readable/
-diffable sidecar: `trace.header.final_digest` is the field `verify()`
-actually compares against and is authoritative. Both are asserted here so
-a corrupted sidecar OR a corrupted header both fail loudly rather than
-silently agreeing with each other.
+Fix round 1 dropped the brief's `.digest` sidecar file
+(`walk_1234.digest`): it was a byte-for-byte copy of
+`trace.header.final_digest`, the field `verify()`/`execute()` actually
+compare against, with no independent reader anywhere in this project --
+a second committed artifact that could only ever drift OUT of sync with
+the header, never catch something the header missed, and that this very
+fix round had to remember to regenerate alongside the trace itself. See
+`test_golden_trace_still_reaches_its_recorded_digest` below: comparing a
+fresh `execute()` against `trace.header.final_digest` is not the
+"compared an object to itself" anti-pattern the task warned about --
+`trace.header.final_digest` is a value FROZEN at recording time (parsed
+back off disk, unrelated to today's process), while `execute(trace)`
+recomputes it from scratch by running the real game engine; the two
+happening to live in the same JSON file doesn't make one a copy of the
+other at test time. `test_golden_trace_verifies` (below) exercises the
+same comparison through the `verify()` entry point / exit-code contract
+instead of `execute()`'s raw dataclass, which is why both are kept.
 """
 
 from __future__ import annotations
@@ -34,17 +46,11 @@ from tuxghost.execute import execute, verify
 from tuxghost.trace import read
 
 GOLDEN = Path(__file__).parent / "golden" / "walk_1234.tuxghost"
-EXPECTED_DIGEST_FILE = GOLDEN.with_suffix(".digest")
 
 
 def test_golden_trace_still_reaches_its_recorded_digest() -> None:
     trace = read(GOLDEN)
-    assert execute(trace).final_digest == EXPECTED_DIGEST_FILE.read_text().strip()
-    # The sidecar is redundant with the header by construction (both were
-    # stamped from the same recording run) -- assert they agree, so a hand
-    # edit to only one of the two is caught here rather than silently
-    # trusted.
-    assert trace.header.final_digest == EXPECTED_DIGEST_FILE.read_text().strip()
+    assert execute(trace).final_digest == trace.header.final_digest
 
 
 def test_golden_trace_verifies() -> None:
