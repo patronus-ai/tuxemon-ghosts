@@ -1,8 +1,31 @@
 PY := ./.venv/bin/python
 
-.PHONY: check check-fast lint lint-patched types test slow
+.PHONY: check check-fast lint lint-patched types test slow patch unpatch
 check: lint lint-patched types test slow
 check-fast: lint lint-patched types test
+
+# Applies patches/*.patch to the vendored tuxemon/ clone, in numeric filename
+# order (the shell glob already sorts them), producing the tree every other
+# target in this Makefile assumes exists. Fails fast: a patch that does not
+# apply cleanly stops the loop and the target, rather than silently leaving
+# the tree half-patched.
+patch:
+	cd tuxemon && for p in ../patches/*.patch; do echo "applying $$p"; git apply "$$p" || exit 1; done
+
+# Destroys the applied tree and restores the pristine vendored clone:
+# discards tracked-file edits (git checkout -- .) and removes untracked
+# files the patch series added (git clean -fd) -- e.g. tuxemon/core/clock.py
+# and tuxemon/core/ids.py. The clone's two `git stash` entries are left
+# alone; neither command touches the stash.
+#
+# DESTRUCTIVE: the applied tree is git-ignored by the outer repo, so it is
+# NOT otherwise recoverable once this runs -- patches/*.patch are the sole
+# durable record, and `make patch` must genuinely restore an identical tree
+# from them. This was verified end to end (`make unpatch && make patch &&
+# make check`, tree confirmed byte-identical) before this target shipped;
+# see docs/STATUS.org.
+unpatch:
+	cd tuxemon && git checkout -- . && git clean -fd
 
 lint:
 	$(PY) -m ruff check tuxghost tests

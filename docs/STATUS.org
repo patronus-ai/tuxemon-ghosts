@@ -1,0 +1,158 @@
+#+TITLE: Project status — deterministic trace format and offline replay
+#+DATE: 2026-08-25
+
+Read this file first, before any spec, plan, or task report under
+=.superpowers/sdd/=. It states what is true of the tree right now; those
+other documents state what was *intended*, or what was true at the moment
+they were written. When they disagree, the authority order is: this file's
+own measured claims (re-run them if in doubt) > =docs/*.org= measurement
+notes > the spec > the plan. See =CLAUDE.md= for how that order applies
+day to day.
+
+* Deliverable, achieved
+
+A portable, step-indexed trace format plus an offline executor for
+Tuxemon. Given a seed, Tuxemon now replays byte-identically — verified
+through a *completed* battle (capture, level-ups, experience, winnings,
+and a clean exit of =CombatState= back to the world), at both a daytime
+and a night-hour =clock_epoch=.
+
+* The patch series — the sole durable record
+
+The applied =tuxemon/= tree is git-ignored (see =.gitignore=); nothing
+under it is committed directly. The six files under =patches/= are the
+only durable record of every engine change this project made, and
+=make patch=/=make unpatch= are how you move between "pristine vendored
+clone" and "the tree every test in this repo assumes". Applying all six
+from pristine, in numeric order, produces: 18 files changed, 265
+insertions(+), 63 deletions(-), plus 2 untracked files
+(=tuxemon/core/clock.py=, =tuxemon/core/ids.py=). Verified for real as
+part of this task — see "Patch round-trip, verified" below.
+
+| Patch | What it closes |
+|-------+-----------------|
+| =0001-headless-init-graphics= | =pg.init()= + =set_mode()=, so headless can load sprites at all; =NullRenderer= gains =layer=/=layer_color=/=layer_image=/=bubble_manager=/=map_animations=/cinema ratios — without these a night-hour epoch crashed with =AttributeError= at =set_layer.py:54=. |
+| =0002-seed-weather-rng= | =WorldWeatherManager(seed=…)=, the only =random.Random= INSTANCE in the codebase; plus =config.deterministic_seed= and its propagation through =copy()=. |
+| =0003-seeded-uuid-factory= | =tuxemon/core/ids.py=; six call sites (entity, monster, technique, status, battle, item). =uuid4()= ignores =random.seed()= entirely, so nothing short of replacing the call sites closes this. |
+| =0004-injectable-clock= | =tuxemon/core/clock.py=; =clock_epoch= is interpreted in *UTC*, not host-local time — the two disagree on both hour and day-of-year for the same epoch, which corrupted a comparison twice during the spike before this was pinned. |
+| =0005-action-step-clock= | =EventAction.run()='s wall-clock spin loop replaced by an =EventEngine= deferral queue advanced from =update(dt)=. Removed the need for =skip=True= on combat calls; closed an observed deadlock. |
+| =0006-headless-entry-from-save= | =headless_world()= entry plus =start_networking=False=. |
+
+* Patch round-trip, verified
+
+Ran, in this task, on this tree:
+
+#+begin_src bash
+make unpatch && make patch && make check
+#+end_src
+
+- =make unpatch= (=git checkout -- . && git clean -fd= inside =tuxemon/=)
+  removed both untracked patch files and reverted every tracked edit;
+  =git -C tuxemon diff --stat= was empty afterward.
+- =make patch= (=git apply= over =patches/*.patch=, numeric order) applied
+  all six cleanly, no failures.
+- The resulting tree was diffed byte-for-byte (=diff -rq --exclude=.git=)
+  against a snapshot of the tree taken immediately before =unpatch= ran:
+  *zero differences*. =git -C tuxemon diff --stat= reported the same 18
+  files / 265 insertions(+) / 63 deletions(-), same 2 untracked files, as
+  before the round-trip.
+- =make check= on the freshly-restored tree: green (see below), same
+  counts as the pre-round-trip run.
+
+=unpatch= is destructive — the applied tree is git-ignored and not
+otherwise recoverable — so this round-trip is the thing that makes
+trusting =make patch= as the restoration path reasonable, rather than an
+assumption.
+
+* Exemption register
+
+=tuxghost/digest.py='s =EXEMPTIONS= is =={}=, the spec's stated target.
+Its size is the honest measure of remaining known nondeterminism in
+whatever =state_of()= actually digests — not a claim that every source of
+nondeterminism in the vendored engine is gone, only that none of them are
+currently being silently masked by an exemption entry. Two raw =uuid4()=
+call sites remain outside the digested tree entirely (see "Known limits"
+below) precisely because an exemption for them would be untestable dead
+weight, not because they were missed.
+
+* Test state
+
+=make check= green: 119 passed / 3 skipped (fast), plus 3 passed behind
+the =slow= marker (opt-in via =TUXGHOST_RUN_SLOW=1=). The 3 skipped are
+the slow-marked tests themselves, correctly deselected without that
+env var. Re-confirmed on the freshly re-patched tree in this task, same
+counts, same digests.
+
+* Measured determinism results, with real digests
+
+- *Golden trace* (=tests/golden/walk_1234.tuxghost=, seed 1234, 900
+  steps, daytime =clock_epoch=): =header.final_digest= =
+  =badf7f1010af0c93c7bb21882d7ca04da1f909a1dcda2d347ac7b6c91fea5aec=.
+  =execute()= against this trace reproduces that exact digest today; the
+  only field that legitimately drifts is the metadata
+  =patch_series_id= (it hashes the current =patches/= directory, which
+  keeps changing as patches are added — =verify()=/=execute()= warn on
+  this, by design, rather than fail; see =tuxghost/trace.py='s refuse/warn
+  matrix).
+- *Completed battle, daytime* (=tests/test_combat_determinism.py=, seed
+  1234, =BATTLE_EPOCH = 1787659200= = 2026-08-25T12:00:00 UTC):
+  =CombatState= reaches step 4945 and exits back to the world,
+  reproducibly. With patches 0003/0004/0005 applied, the full state
+  digest — not just exit/no-exit — matches byte-for-byte between two
+  independent same-seed runs. Before those three patches, the same
+  scenario diverged in exactly four fields, all unseeded =uuid4()= or a
+  wall-clock =Battle.timestamp= (see
+  =docs/2026-08-25-battle-exit-measurement.org= for the field-level
+  diagnosis); none of that divergence remains.
+- *Night-hour epoch* (=tests/test_digest.py='s
+  =NIGHT_EPOCH = 1787774400= = 2026-08-26T20:00:00 UTC,
+  =stage_of_day == "night"=): digest-stable across repeated runs, once
+  patch 0001's =NullRenderer= fixes existed — before them, this route
+  crashed outright (=AttributeError= at =set_layer.py:54=), it did not
+  merely diverge.
+
+* What is still unmeasured
+
+- *Capture and evolution as their own scenarios.* The completed-battle
+  measurement above exercises level-ups and winnings as a side effect of
+  one battle route; nothing separately isolates capture or evolution as
+  their own digest-stability scenario.
+- *A trace that captures a RESOLVED battle mid-recording.*
+  =boot_from_save= cannot restore mid-combat state (there is no
+  serializer seam on =CombatState=), and a resolving battle needs
+  ~4945+ steps from a cold boot — no golden trace covers this; it needs
+  its own slow-tier golden.
+- *Cross-platform reproducibility.* Untested. One machine (macOS
+  26.6.1 arm64), one OS, one Python (3.12).
+- *Combat internals.* =state_of()= covers the player's =NPCState=,
+  =world_state=, =persistent_npc_state=, map, tile, facing, and the
+  state-stack NAMES. It does NOT cover combat internals (turn count,
+  opponent HP) — there is no serializer seam on =CombatState=. So
+  =verify() == 0= certifies that the player-visible outcome reproduced,
+  not that combat itself played out identically turn-by-turn.
+- =persistent_npc_state= is plumbed and discriminates correctly (a
+  dedicated test hand-flips a spawned NPC's =persistence= flag to prove
+  it), but is =[]= on every currently-recordable trace: no NPC in
+  =mods/tuxemon/db/npc/*.yaml= sets =persistence: true=. It adds no
+  practical coverage today.
+- =tuxemon/mission/mission.py:47= and =tuxemon/event/eventparser.py:52=
+  still hold raw =uuid4()=, unreachable by any route this suite currently
+  drives.
+- Cancelled-between-frames deferred actions (patch 0005) never get
+  =cleanup()= called on them. This matches upstream's existing behavior
+  for the analogous case, and =EventAction.cancel()= has zero callers
+  anywhere in the vendored tree, so it is latent, not live.
+- *The test suite depends on mutable state OUTSIDE this repo*:
+  =~/.tuxemon/cache/l18n/*.mo= (corrupted once by two concurrent test
+  runs racing on the same file — do not run two full suites at once; see
+  =CLAUDE.md=), and =~/.tuxemon/tuxemon.yaml='s =display.fps= (now guarded
+  by an assertion at boot — a mismatched or non-positive =fps= raises a
+  clear =ValueError= instead of silently producing a wrong first-frame
+  =dt= or a bare =ZeroDivisionError= — but it is still an external input
+  nothing in this repo controls).
+
+* Next subsystem
+
+*S2, the CU-agent harness*, is next. S3 (offline optimizer), S4 (ghost
+rendering), and S5 (finish lines / rewards) follow. Each gets its own
+spec — this project's spec covered only S1 (this trace/replay core).
