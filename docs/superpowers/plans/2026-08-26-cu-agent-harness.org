@@ -95,10 +95,20 @@ no =.tmx= extension makes =boot_from_save= raise an uncaught
 *raises* instead of returning 2, and =tuxghost/cli.py= would exit *1
 ("diverged")* instead of 2 ("refused") — precisely the conflation the CLI
 module docstring says must never be reintroduced. The trigger is
-realistic: =tuxemon/mods/tuxemon/maps/spyder_paper_town.tmx= and its
-neighbours script teleports as =teleport player,spyder_route1= with *no
-extension*, while the eclipse maps use =...bank1.tmx= *with* one — so an
-in-game save's =current_map= may legitimately be either form.
+realistic: the extension-less form arrives from any caller that teleports
+with a bare name (this project's own fixture generator did, below), and
+crucially the ENGINE ITSELF accepts either form —
+=tuxemon/tuxemon/map/loader.py:83-85= does =Path(path).stem= then
+=fetch_asset("maps", f"{name}.tmx")=. A precondition check stricter than
+the loader it guards would refuse saves the engine can actually run.
+
+*Correction, recorded rather than quietly fixed*: an earlier draft of this
+plan claimed =spyder_*= maps script teleports without the extension. That
+was wrong, and the error was a self-deceiving grep — the character class
+=[a-z_0-9,]*= excludes =.=, so it truncated every name at the dot and the
+truncation was read as evidence. All 252 distinct teleport targets under
+=tuxemon/mods/tuxemon/maps/= carry =.tmx=. The refusal fix below is
+unaffected and still needed; only its stated motivation changes.
 
 *Files:*
 - Modify: =tuxghost/boot.py= (=boot_from_save=, around the =fetch_asset("maps", ...)= call)
@@ -117,9 +127,10 @@ In =tests/test_boot.py=:
 
 #+begin_src python
 def test_resolve_map_asset_accepts_a_name_with_or_without_the_extension() -> None:
-    """`spyder_*` maps script teleports as `teleport player,spyder_route1`
-    (no extension) while `eclipse_*` maps use `...bank1.tmx`, so a real
-    save's `current_map` is legitimately either form."""
+    """The engine's own map loader accepts either form
+    (`tuxemon/map/loader.py:83-85` stems the name and re-appends `.tmx`),
+    so a precondition check must not be stricter than the loader it
+    guards."""
     from tuxghost.boot import headless_context, resolve_map_asset
 
     headless_context()  # fetch_asset needs the mod db loaded
@@ -132,11 +143,11 @@ In =tests/test_execute.py=:
 
 #+begin_src python
 def test_execute_boots_a_save_whose_current_map_omits_the_extension() -> None:
-    """Pins the S1 defect: an extension-less `current_map` -- what every
-    `spyder_*` map's own teleport script produces -- raised an uncaught
-    OSError out of `fetch_asset`, so `verify()` raised instead of
-    returning 2 and the CLI would have exited 1 ("diverged") for what is
-    a refusal at worst and a bootable save at best."""
+    """Pins the S1 defect: an extension-less `current_map` -- a form the
+    engine's own map loader boots happily -- raised an uncaught OSError
+    out of `fetch_asset`, so `verify()` raised instead of returning 2 and
+    the CLI would have exited 1 ("diverged") for what is a refusal at
+    worst and a bootable save at best."""
     from tuxghost.execute import execute
     from tuxghost.trace import read
 
@@ -189,15 +200,18 @@ In =tuxghost/boot.py=:
 def resolve_map_asset(current_map: str) -> str | None:
     """Resolve a save's `npc_state.current_map` to a real map asset path.
 
-    Accepts the name with or without the `.tmx` extension, because BOTH
-    forms occur in real saves: `tuxemon/mods/tuxemon/maps/*.tmx` script
-    teleports as `teleport player,spyder_route1` (extension-less, and
-    `Teleporter.teleport_character` stores exactly the string it was
-    given via `place_npc_on_map` -> `NPC.set_current_map`), while the
-    `eclipse_*` yaml maps script `transition_teleport
-    player,eclipse_crystal_bank1.tmx,...` WITH one. Returns None when
-    neither form exists, so callers can refuse (exit 2) rather than let
-    `fetch_asset`'s bare OSError escape as exit 1 ("diverged").
+    Accepts the name with or without the `.tmx` extension, mirroring the
+    engine's own loader: `tuxemon/map/loader.py:83-85` does
+    `Path(path).stem` then `fetch_asset("maps", f"{name}.tmx")`, so the
+    engine boots either form. A precondition check stricter than the
+    loader it guards would refuse saves the engine can actually run.
+    Either form can reach a save because `Teleporter.teleport_character`
+    stores exactly the string it was handed (`place_npc_on_map` ->
+    `NPC.set_current_map`), whatever that string looked like.
+
+    Returns None when neither form resolves, so callers can refuse
+    (exit 2) rather than let `fetch_asset`'s bare OSError escape as
+    exit 1 ("diverged").
     """
     from tuxemon.constants.asset_loader import fetch_asset
 
@@ -285,11 +299,12 @@ git add tuxghost/boot.py tuxghost/execute.py tests/test_boot.py tests/test_execu
 git commit -m "fix: an unresolvable map is a refusal (exit 2), not an uncaught OSError
 
 Found while planning S2. A save whose npc_state.current_map lacks the
-.tmx extension -- what every spyder_* map's own teleport script produces
--- made boot_from_save raise OSError out of fetch_asset, so verify()
-raised instead of returning 2 and the CLI would have exited 1
-('diverged') for a refusal. resolve_map_asset() accepts either form,
-because real saves contain both."
+.tmx extension -- a form the engine's own map loader boots happily
+(map/loader.py stems the name and re-appends .tmx) -- made boot_from_save
+raise OSError out of fetch_asset, so verify() raised instead of returning
+2 and the CLI would have exited 1 ('diverged') for a refusal.
+resolve_map_asset() mirrors the loader's leniency so the precondition
+check is never stricter than the loader it guards."
 #+end_src
 
 ---
@@ -627,9 +642,14 @@ name-entry keyboard, by step 1140 and the stack never changes again.
 So the fixture is built by *teleporting* — the engine's own event action —
 and snapshotting. Probed working: =execute_action("teleport", ("npc_red",
 "spyder_paper_town", 10, 10))= put the player on
-=spyder_paper_town.tmx= at tile (10, 10) with a party. Note that the
-resulting save's =current_map= is extension-less, which is exactly why
-Task 1 comes first.
+=spyder_paper_town.tmx= at tile (10, 10) with a party.
+
+*Pass the map name WITH its =.tmx= extension* (=MAP= below). The probe
+passed a bare name and produced a save whose =current_map= was
+extension-less — which is a form the engine boots but which no real map
+script produces (all 252 teleport targets in the shipped mods carry
+=.tmx=). The fixture should look like a save the game itself would write,
+so the harness is not the only consumer of an otherwise-unseen form.
 
 *Files:*
 - Create: =tests/fixtures/make_paper_town_save.py= (committed generator)
@@ -682,7 +702,7 @@ from tuxghost.loop import install_schedule, run_steps  # noqa: E402
 
 EPOCH = 1787659200  # 2026-08-25T12:00:00 UTC -- daytime, as elsewhere
 SEED = 1234
-MAP = "spyder_paper_town"
+MAP = "spyder_paper_town.tmx"
 TILE = (10, 10)
 OUT = ROOT / "tests" / "fixtures" / "paper_town.save"
 
@@ -720,8 +740,9 @@ import json; d=json.load(open('tests/fixtures/paper_town.save'))
 n=d['npc_state']; print(n['current_map'], n.get('tile_pos'), [m['slug'] for m in n['monsters']])"
 #+end_src
 
-Expected: =current_map='spyder_paper_town'= (extension-less — Task 1 is
-what makes it bootable) and a two-monster party.
+Expected: =current_map='spyder_paper_town.tmx'= and a two-monster party.
+If it comes out extension-less, =MAP= lost its suffix somewhere — fix
+that rather than relying on Task 1's leniency to paper over it.
 
 - [ ] *Step 3: Write the fixture's test, including WALKABILITY*
 
