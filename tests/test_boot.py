@@ -49,6 +49,27 @@ def test_boot_from_save_restores_position_and_party() -> None:
     assert tuple(session2.player.tile_pos) == expected_tile_pos
 
 
+def test_build_client_resets_the_singleton_between_builds() -> None:
+    """`local_session` is a module-level singleton reused by every
+    `build_client` call in a process. Without an internal reset, a second
+    build starts from whatever the first build's session already
+    accumulated (its player, its added monsters, ...) instead of a
+    genuinely fresh session -- silent contamination, not an error. Add a
+    monster to the first build's session, build again with the same seed,
+    and require the second session's player to start with none: this can
+    only pass if `build_client` actually resets `local_session` before
+    creating the new player, not merely by both builds coincidentally
+    agreeing."""
+    from tuxghost.boot import build_client
+
+    _client1, session1 = build_client(seed=1234)
+    session1.client.event_engine.execute_action("add_monster", ("rockitten", 12))
+    assert [m.slug for m in session1.player.monsters] == ["rockitten"]
+
+    _client2, session2 = build_client(seed=1234)
+    assert [m.slug for m in session2.player.monsters] == []
+
+
 def test_build_client_does_not_leak_the_network_port() -> None:
     """Two headless clients built in the same process must not fight over
     the websocket server's fixed port (40081/0.0.0.0). Upstream starts a

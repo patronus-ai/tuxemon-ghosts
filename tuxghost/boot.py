@@ -36,6 +36,16 @@ def build_client(seed: int) -> tuple[Any, Any]:
     from tuxemon.session import local_session
     from tuxemon.user_config import CONFIG
 
+    # `local_session` is a module-level singleton shared across every
+    # `build_client` call in this process. Without resetting it first, a
+    # second build in the same process starts from whatever the previous
+    # build's session already accumulated (its player, its leftover state
+    # stack, ...) instead of a genuinely fresh session -- silent
+    # contamination, not an error. `boot_from_save` already resets for the
+    # same reason; do it here too instead of leaving every caller (tests,
+    # the executor, later tasks) to rediscover the hazard for themselves.
+    local_session.reset()
+
     client = headless_world(CONFIG.copy(), context)
 
     random.seed(seed)

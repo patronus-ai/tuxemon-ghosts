@@ -1,5 +1,8 @@
+import json
+import re
+from typing import Any
+
 from tuxemon.platform.const import buttons
-from tuxemon.session import local_session
 
 from tuxghost.boot import build_client
 from tuxghost.digest import EXEMPTIONS, digest_of, state_of
@@ -7,16 +10,11 @@ from tuxghost.loop import InputSchedule, install_schedule, run_steps
 
 
 def _run(seed: int, steps: int = 900) -> str:
-    # `local_session` is a module-level singleton (see the note on
-    # `test_digest_discriminates_between_seeds`). Calling `build_client`
-    # twice in one process WITHOUT resetting first leaves the previous
-    # run's state stack (e.g. `DialogState`/`ImageState` from the intro)
-    # on the new client, so the second run's gameplay genuinely diverges
-    # from the first -- measured: `player_steps` came back 1.0 on the
-    # first in-process call and 3.0 on the second, for byte-identical
-    # seed and schedule, purely from that leftover contamination. Reset
-    # before every build, exactly as `boot_from_save` already does.
-    local_session.reset()
+    # `build_client` resets the `local_session` singleton internally before
+    # building, so two in-process calls here do not contaminate each other
+    # (see `tuxghost/boot.py`; previously that reset had to be done here by
+    # hand, three times over, which is exactly the kind of workaround a
+    # forgotten call turns into silent contamination rather than an error).
     client, session = build_client(seed=seed)
     schedule: InputSchedule = {}
     for i in range(40):
@@ -29,6 +27,26 @@ def _run(seed: int, steps: int = 900) -> str:
 
 def test_digest_is_stable_for_one_seed() -> None:
     assert _run(1234) == _run(1234)
+
+
+def test_digest_is_stable_for_one_seed_on_a_route_that_adds_a_monster() -> None:
+    """Companion control the brief's own suite lacked: `_run`'s A-mash route
+    never calls `add_monster`, so it never exercises `game_variables`
+    (where `add_monster` stashes a uuid4 -- see EXEMPTIONS). Without this
+    test, nothing in the suite ever asked "is the discriminating route
+    itself stable across two runs of the SAME seed?" -- which is exactly
+    how a fix-round-1 defect (a raw, unexempted uuid4 nonce making the
+    digest unstable even for one seed) went undetected: the stability test
+    used a route that couldn't see it, and the discrimination test used a
+    route where two different seeds happening to look identical would
+    still pass."""
+
+    def run_with_monster() -> str:
+        _client, session = build_client(seed=1234)
+        session.client.event_engine.execute_action("add_monster", ("rockitten", 12))
+        return digest_of(session)
+
+    assert run_with_monster() == run_with_monster()
 
 
 def test_digest_discriminates_between_seeds() -> None:
@@ -45,12 +63,10 @@ def test_digest_discriminates_between_seeds() -> None:
     state, which reads as "discrimination" but proves nothing). Digest A is
     therefore captured as a string BEFORE the second client is built.
     """
-    local_session.reset()
     _client_a, session_a = build_client(seed=1234)
     session_a.client.event_engine.execute_action("add_monster", ("rockitten", 12))
     digest_a = digest_of(session_a)
 
-    local_session.reset()
     _client_b, session_b = build_client(seed=99)
     session_b.client.event_engine.execute_action("add_monster", ("rockitten", 12))
     digest_b = digest_of(session_b)
@@ -68,10 +84,56 @@ def test_digest_sees_gameplay_state() -> None:
 def test_exemptions_each_name_a_defect() -> None:
     for field, reason in EXEMPTIONS.items():
         assert reason.strip(), f"exemption {field!r} has no stated reason"
+        # "because" or similar hand-waving must not pass: every reason has
+        # to name the specific patch that closes the defect, so the
+        # register stays auditable and each entry is deletable on its own
+        # schedule rather than by vibes.
+        assert re.search(r"patch \d{4}", reason), (
+            f"exemption {field!r} reason {reason!r} does not name a "
+            "specific patch that closes it"
+        )
     assert "timestamp" not in EXEMPTIONS, (
         "Battle.timestamp becomes deterministic under patch 0004; exempting "
         "it would re-hide the bug the spike spent a bisect finding"
     )
+    assert not any(
+        field == "timestamp" or field.endswith(".timestamp") for field in EXEMPTIONS
+    ), "no path may exempt a timestamp field, under any nesting"
+
+
+def test_exemptions_are_all_reachable_in_the_digested_tree() -> None:
+    """An EXEMPTIONS entry that never appears anywhere `state_of()` looks is
+    a dead entry: it cannot be masking any defect, and because paths are
+    matched exactly, it also cannot accidentally swallow an unrelated
+    future field. Walk the real (pre-filter) `npc_state`/`world_state`
+    trees for a representative session and require every registered path
+    to actually occur in them."""
+    _client, session = build_client(seed=1234)
+    session.client.event_engine.execute_action("add_monster", ("rockitten", 12))
+    player = session.player
+    npc_raw = json.loads(player.get_state(session).model_dump_json())
+    world_raw = json.loads(session.world.get_state(session).model_dump_json())
+
+    paths: set[str] = set()
+
+    def collect(obj: Any, path: str) -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                child_path = f"{path}.{k}" if path else k
+                paths.add(child_path)
+                collect(v, child_path)
+        elif isinstance(obj, list):
+            for item in obj:
+                collect(item, path)
+
+    collect(npc_raw, "npc_state")
+    collect(world_raw, "world_state")
+
+    for field in EXEMPTIONS:
+        assert field in paths, (
+            f"exemption {field!r} is unreachable (dead) in the tree "
+            "state_of() actually digests -- delete it or fix its path"
+        )
 
 
 def test_state_of_is_not_blind_to_the_state_stack() -> None:
