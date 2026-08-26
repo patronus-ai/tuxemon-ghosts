@@ -1,0 +1,36 @@
+diff --git a/tuxemon/base_client.py b/tuxemon/base_client.py
+index 9ab518e..084712d 100644
+--- a/tuxemon/base_client.py
++++ b/tuxemon/base_client.py
+@@ -202,7 +202,9 @@ class BaseClient(ABC):
+         self.environment_manager = EnvironmentManager(self.context)
+         self.encounter_manager = EncounterManager()
+         self.park_session = ParkSession()
+-        self.weather_manager = WorldWeatherManager()
++        self.weather_manager = WorldWeatherManager(
++            seed=config.deterministic_seed
++        )
+         self.cipher_processor: CipherProcessor | None = None
+         self.alert_manager = AlertManager(self.event_bus)
+         self.shop_manager = ShopManager()
+diff --git a/tuxemon/config.py b/tuxemon/config.py
+index 7d7a321..d2cd74f 100644
+--- a/tuxemon/config.py
++++ b/tuxemon/config.py
+@@ -176,6 +176,8 @@ class TuxemonConfig:
+         self.locale = LocaleConfig(self.config_model)
+         self.controller = ControllerConfig(self.config_model)
+         self.mods = ["tuxemon"]
++        # None keeps upstream behaviour: weather seeds from OS entropy.
++        self.deterministic_seed: int | None = None
+ 
+     @property
+     def resolution(self) -> tuple[int, int]:
+@@ -336,6 +338,7 @@ class TuxemonConfig:
+         new.controller = ControllerConfig(new.config_model)
+ 
+         new.mods = list(self.mods)
++        new.deterministic_seed = self.deterministic_seed
+         return new
+ 
+     def save_config(self) -> None:

@@ -46,7 +46,21 @@ def build_client(seed: int) -> tuple[Any, Any]:
     # the executor, later tasks) to rediscover the hazard for themselves.
     local_session.reset()
 
-    client = headless_world(CONFIG.copy(), context)
+    # `config.deterministic_seed` is what patch 0002 threads into
+    # `WorldWeatherManager`, the only instance-RNG in the codebase (see
+    # `tuxghost/determinism.py`). It is set here, directly on this build's
+    # own config copy, rather than left to whatever `tuxghost.determinism
+    # .seed_all` last wrote onto the process-wide `CONFIG` singleton:
+    # `CONFIG` persists across every `build_client` call in a process, so a
+    # test (or caller) that never calls `seed_all` would otherwise silently
+    # inherit whichever seed a *previous, unrelated* call happened to leave
+    # behind -- a disagreement between this build's explicit `seed`
+    # argument and its weather RNG. Setting it here makes `build_client`'s
+    # `seed` parameter authoritative for everything it constructs,
+    # matching the `random.seed(seed)` call below.
+    config = CONFIG.copy()
+    config.deterministic_seed = seed
+    client = headless_world(config, context)
 
     random.seed(seed)
 
@@ -84,7 +98,13 @@ def boot_from_save(save_data: Any, seed: int) -> tuple[Any, Any]:
     # anything.
     local_session.reset()
 
-    client = headless_world(CONFIG.copy(), context)
+    # See the matching comment in `build_client`: set the seed directly on
+    # this build's own config copy so it is authoritative for the weather
+    # RNG, independent of whatever `tuxghost.determinism.seed_all` last
+    # left on the process-wide `CONFIG` singleton.
+    config = CONFIG.copy()
+    config.deterministic_seed = seed
+    client = headless_world(config, context)
     random.seed(seed)
 
     npc_state = save_data.npc_state
