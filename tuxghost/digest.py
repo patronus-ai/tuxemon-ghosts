@@ -86,7 +86,7 @@ def _canonical(obj: Any, path: str = "") -> Any:
 def state_of(session: Any) -> dict[str, Any]:
     """Snapshot the comparable game state via the game's own serialisation.
 
-    Covers `npc_state` (the player) and `world_state`, plus
+    Covers `npc_state` (the player), `world_state`, and
     `persistent_npc_state` -- every OTHER npc the save system considers
     persistent (`NPCManager.get_persistent_npc_states`, the same call
     `save_system.save.get_save_data` makes to populate
@@ -97,10 +97,27 @@ def state_of(session: Any) -> dict[str, Any]:
     the pre-widening digest not move (`tests/test_digest.py
     ::test_widened_digest_discriminates_persistent_npc_state`, which pins
     the old, blind behaviour as a regression test against reintroducing
-    it). Not left as a documented limit: the fix is a direct parallel of
-    the existing `npc_state`/`world_state` pattern (call the game's own
-    `get_state`, canonicalize, hash) rather than new introspection, and
-    the fix DOES discriminate -- see that test.
+    it). The fix is a direct parallel of the existing `npc_state`/
+    `world_state` pattern (call the game's own `get_state`, canonicalize,
+    hash) rather than new introspection, and IS proven to discriminate --
+    see that test.
+
+    IMPORTANT CAVEAT, found by fix round 1's review (task 12): no NPC in
+    this project's shipped mod data sets `persistence: true`
+    (`persistence` defaults to `False` -- `tuxemon/db.py`'s `NpcModel`,
+    confirmed against every file in `mods/tuxemon/db/npc/*.yaml`). That
+    means `get_persistent_npc_states` returns `[]` on every trace this
+    project can currently record, from boot through a full battle, and
+    `persistent_npc_state` is therefore a constant empty list on all of
+    them -- the two `tests/test_combat_determinism.py` battle-digest tests
+    pass with this field present *because it is empty there*, not because
+    they exercise it. The discrimination test above only reaches a
+    non-empty value by flipping `npc.persistence` on a spawned NPC BY
+    HAND. So: the plumbing is real, tested, and correct for whenever a map
+    or mod does place a persistent NPC -- but today, for every trace this
+    project can actually record, it adds no practical coverage. A
+    `verify() == 0` result does NOT currently certify anything about
+    persistent-NPC state simply because there is none to diverge on.
 
     `state_stack` remains a KNOWN, DOCUMENTED gap, deliberately not
     widened here: it records only state NAMES

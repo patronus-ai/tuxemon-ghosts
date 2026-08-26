@@ -49,6 +49,31 @@ def test_first_divergent_step_finds_the_earliest_checkpoint() -> None:
     assert first_divergent_step(a, a) is None
 
 
+def test_first_divergent_step_reports_a_length_mismatch_not_none() -> None:
+    """Fix round 1, finding 3: a naive `zip(a, b)` silently truncates to
+    the shorter list, so two runs that plainly diverge by one having
+    checkpoints the other never reached used to report `None` -- 'no
+    divergence' -- instead of a real divergence at the point they stopped
+    agreeing on length. `b` here shares every checkpoint `a` has and then
+    keeps going; the extra checkpoint is the divergence, reported at its
+    own step (400), not swallowed."""
+    a = [(100, "x"), (200, "y")]
+    b = [(100, "x"), (200, "y"), (300, "z"), (400, "w")]
+    assert first_divergent_step(a, b) == 300
+    assert first_divergent_step(b, a) == 300
+
+
+def test_first_divergent_step_rejects_mismatched_cadences() -> None:
+    """Same fix round: mismatched STEP NUMBERS at the same list position
+    (as opposed to mismatched lengths) must raise rather than silently
+    compare unrelated checkpoints -- was a bare `assert`, which `python
+    -O` discards; now a real, caller-triggerable `ValueError`."""
+    a = [(100, "x")]
+    b = [(150, "x")]
+    with pytest.raises(ValueError, match="cadences"):
+        first_divergent_step(a, b)
+
+
 def test_describe_divergence_names_step_field_and_both_values() -> None:
     """The target output shape from the task-12 brief: which step, which
     field, which two values -- not just 'the hash differs'."""
@@ -59,6 +84,18 @@ def test_describe_divergence_names_step_field_and_both_values() -> None:
         "diverged at step 10000\n"
         "  npc_state.battles[0].timestamp: 1787694198.869361 != 1787694387.998919"
     )
+
+
+def test_value_at_rejects_a_malformed_path_segment() -> None:
+    """Fix round 1, finding 4: `_value_at`'s path-segment parser used a
+    bare `assert` for a segment `first_difference` itself would never
+    produce but a caller resolving a hand-built path could still pass in
+    -- now a real `ValueError`, checked directly rather than only via the
+    happy path `describe_divergence` exercises."""
+    from tuxghost.compare import _value_at
+
+    with pytest.raises(ValueError, match="malformed path segment"):
+        _value_at({"a": 1}, "a[not-a-number]")
 
 
 def test_verify_returns_zero_for_a_self_consistent_trace() -> None:
@@ -379,54 +416,22 @@ def test_bisect_traces_finds_nothing_between_a_trace_and_itself() -> None:
     assert bisect_traces(trace, trace, checkpoint=10) is None
 
 
-def test_cli_exit_codes_are_distinguishable(tmp_path: Path) -> None:
-    """Exit codes are a real PROCESS-level contract (`python -m
-    tuxghost.execute <trace>`), not just `verify`'s Python-level return
-    value -- confirm all three are reachable and distinct at the process
-    boundary, not only inside this same interpreter where a stray shared
-    module-level state could paper over a wrong exit() call."""
-    import json
-    import subprocess
-    import sys
-
+def test_bisect_traces_rejects_a_non_positive_checkpoint_interval() -> None:
+    """Fix round 1, finding 4: `bisect_traces` used to guard `checkpoint >
+    0` with a bare `assert`, which `python -O` silently discards and which
+    is not the right tool for a contract a caller can violate. Pin the
+    real exception type directly rather than only the happy path."""
     from tuxghost.boot import build_client
     from tuxghost.determinism import pin_clock, seed_all
-    from tuxghost.loop import run_steps
+    from tuxghost.execute import bisect_traces
     from tuxghost.record import Recorder
-    from tuxghost.trace import write
-
-    repo_root = Path(__file__).resolve().parent.parent
 
     seed_all(1234)
     pin_clock(1787694000)
-    client, session = build_client(seed=1234, clock_epoch=1787694000)
-    recorder = Recorder(
+    _client, session = build_client(seed=1234, clock_epoch=1787694000)
+    trace = Recorder(
         session, seed=1234, clock_epoch=1787694000, recorder="offline-agent"
-    )
-    run_steps(client, 20)
-    trace = recorder.finish(step_count=20)
+    ).finish(step_count=10)
 
-    ok_path = tmp_path / "ok.tuxghost"
-    write(trace, ok_path)
-
-    diverged_path = tmp_path / "diverged.tuxghost"
-    raw = json.loads(ok_path.read_text())
-    raw["header"]["final_digest"] = "0" * 64
-    diverged_path.write_text(json.dumps(raw))
-
-    refused_path = tmp_path / "refused.tuxghost"
-    refused_path.write_text(json.dumps({"format_version": 99}))
-
-    def run_cli(path: Path) -> int:
-        result = subprocess.run(
-            [sys.executable, "-m", "tuxghost.execute", str(path)],
-            cwd=repo_root,
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
-        return result.returncode
-
-    assert run_cli(ok_path) == 0
-    assert run_cli(diverged_path) == 1
-    assert run_cli(refused_path) == 2
+    with pytest.raises(ValueError, match="checkpoint"):
+        bisect_traces(trace, trace, checkpoint=0)

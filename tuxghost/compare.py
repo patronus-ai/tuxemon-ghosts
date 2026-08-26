@@ -68,23 +68,44 @@ def first_divergent_step(
     """Earliest checkpoint step at which two runs' digests differ, or
     `None` if every checkpoint they share matches. `a`/`b` come from
     `tuxghost.execute.ExecutionResult.checkpoints`; both must have been
-    produced with the same checkpoint interval, or the zip below silently
-    compares mismatched steps against each other -- the assert catches
-    that rather than returning a wrong step number."""
+    produced with the same checkpoint interval, or step numbers won't line
+    up pairwise -- checked directly (raising `ValueError`) rather than
+    silently zipping mismatched steps against each other.
+
+    Fix round 1, finding 3: a naive `zip(a, b)` also silently truncates to
+    the SHORTER list when the two runs have different `step_count`s (e.g.
+    one run stopped early), reporting `None` -- "no divergence" -- for two
+    runs that plainly diverge in length. That is checked for explicitly
+    below, mirroring how `_first_difference` already reports a `[len]`
+    divergence for mismatched list lengths rather than comparing only the
+    shared prefix: the extra tail is real divergence too, reported at the
+    first step only the longer run reached."""
     for (step_a, digest_a), (step_b, digest_b) in zip(a, b):
-        assert step_a == step_b, "checkpoint cadences must match"
+        if step_a != step_b:
+            raise ValueError(
+                f"checkpoint cadences differ: step {step_a} != step {step_b}"
+            )
         if digest_a != digest_b:
             return step_a
+    if len(a) != len(b):
+        longer = a if len(a) > len(b) else b
+        return longer[min(len(a), len(b))][0]
     return None
 
 
 def _value_at(obj: Any, path: str) -> Any:
     """Resolve a dotted/bracketed path from `first_difference` back to the
-    value it names in `obj`, e.g. `npc_state.battles[0].timestamp`."""
+    value it names in `obj`, e.g. `npc_state.battles[0].timestamp`.
+
+    Raises `ValueError` on a malformed segment rather than asserting: a
+    hand-constructed `path` (not one `first_difference` itself produced)
+    is a real, caller-triggerable contract violation, not an internal
+    invariant -- and `python -O` silently discards a bare `assert`."""
     node = obj
     for part in path.split("."):
         match = _SEGMENT.match(part)
-        assert match is not None, f"malformed path segment: {part!r}"
+        if match is None:
+            raise ValueError(f"malformed path segment: {part!r}")
         name, brackets = match.group(1), match.group(2)
         if name:
             node = node[name]

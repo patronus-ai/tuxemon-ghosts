@@ -1,7 +1,6 @@
 """Offline executor: replays a trace and verifies it reached the same state.
 
-Exit codes (both the module CLI's process exit code and `verify`'s return
-value):
+`verify`'s return value:
   * 0 -- every compared field matched.
   * 1 -- at least one differed.
   * 2 -- refused: a precondition failed (`tuxghost.trace.read`'s refusal
@@ -9,6 +8,20 @@ value):
     `initial_state`), or the trace is unrunnable here (its `initial_state`
     does not validate as a `SaveData`, or lacks what `boot_from_save`
     needs to restore a session -- see `execute`).
+
+No CLI lives in this module. Fix round 1 (task 12 review) found a real
+exit-code collision in an earlier `python -m tuxghost.execute` entry point
+here (`FileNotFoundError` on a missing path exited 1, colliding "diverged"
+with "unrunnable") and a broken-by-construction relative-path bug
+(`_bootstrap_vendored_tuxemon`'s `os.chdir` ran before argument parsing,
+so every relative trace path resolved against the wrong directory). The
+next task's deliverable is `tuxghost/cli.py` with `execute`/`verify`/
+`compare`/`record`/`info` subcommands, the same `--allow-mismatch` flag,
+and the same `Refused` -> 2 mapping, built with path resolution BEFORE
+`_bootstrap_vendored_tuxemon`'s chdir and I/O errors mapped to exit 2.
+Fixing the old defects in place here would have meant fixing them twice.
+`_bootstrap_vendored_tuxemon` itself is kept (below): any non-pytest entry
+point needs it.
 
 `verify` executes a trace EXACTLY ONCE and compares the digest it reaches
 against `trace.header.final_digest` -- the state the recorded run actually
@@ -21,12 +34,17 @@ reached, which is what verification means.
 ### What a `verify() == 0` result certifies, and what it does not
 
 `digest_of`/`state_of` (`tuxghost.digest`) cover the player's own
-`npc_state`, `world_state`, and (as of task 12)
-`persistent_npc_state` -- every other NPC the save system considers
-persistent. A `verify() == 0` result certifies the replay reached
-byte-identical values across ALL of that: player position/party/items/
-battles/game_variables, world flags, and every persistent NPC's own
-saved state.
+`npc_state`, `world_state`, and (as of task 12) `persistent_npc_state` --
+every other NPC the save system considers persistent. A `verify() == 0`
+result certifies the replay reached byte-identical values across ALL of
+that: player position/party/items/battles/game_variables, world flags,
+and (when any exist) every persistent NPC's own saved state. In practice
+that last part currently certifies nothing extra: no NPC in this
+project's shipped mod data sets `persistence: true` (see
+`tuxghost.digest.state_of`'s own docstring), so `persistent_npc_state` is
+`[]` on every trace this project can currently record -- the plumbing is
+real and proven to discriminate once a persistent NPC exists, but adds no
+practical coverage today.
 
 It does NOT certify combat internals beyond their effect on the player's
 own party: `state_stack` records only state NAMES
@@ -39,10 +57,7 @@ covered). This is a known, documented gap -- see `tuxghost.digest
 
 from __future__ import annotations
 
-import argparse
-import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -52,7 +67,7 @@ from tuxghost.compare import describe_divergence, first_divergent_step
 from tuxghost.determinism import pin_clock, seed_all
 from tuxghost.digest import digest_of, state_of
 from tuxghost.loop import InputSchedule, install_schedule, run_steps
-from tuxghost.trace import Refused, Trace, read
+from tuxghost.trace import Refused, Trace
 
 
 @dataclass
@@ -99,6 +114,19 @@ def execute(
     (currently: `npc_state.current_map`) -- both are preconditions that
     can only be checked once execution actually starts, unlike
     `tuxghost.trace.read`'s refusal matrix, which is checked on load.
+
+    The second check is done directly here (mirroring `boot_from_save`'s
+    own `assert npc_state is not None and npc_state.current_map is not
+    None`), rather than by calling `boot_from_save` inside a `try:
+    ... except AssertionError`. Fix round 1 flagged that catching bare
+    `AssertionError` around `boot_from_save` would ALSO catch a genuine
+    internal engine assertion failure -- unrelated to whether this
+    particular trace is well-formed -- and silently report it as exit code
+    2 ("this trace is unrunnable"), conflating an engine bug with a bad
+    trace. Checking the precondition ourselves, before ever calling
+    `boot_from_save`, means the only `AssertionError`s that function could
+    still raise are real internal invariants, which are left to propagate
+    uncaught.
     """
     from tuxemon.save_system.save_state import SaveData
 
@@ -112,12 +140,16 @@ def execute(
             f"trace.initial_state does not validate as a SaveData: {exc}"
         ) from exc
 
-    try:
-        _client, session = boot_from_save(
-            save_data, seed=trace.header.seed, clock_epoch=trace.header.clock_epoch
+    if save_data.npc_state is None or save_data.npc_state.current_map is None:
+        raise Refused(
+            "trace is unrunnable here: initial_state.npc_state.current_map "
+            "is required to restore a session (see tuxghost.boot"
+            ".boot_from_save)"
         )
-    except AssertionError as exc:
-        raise Refused(f"trace is unrunnable here: {exc}") from exc
+
+    _client, session = boot_from_save(
+        save_data, seed=trace.header.seed, clock_epoch=trace.header.clock_epoch
+    )
 
     client = session.client
     install_schedule(client, _schedule_of(trace))
@@ -162,9 +194,15 @@ def bisect_traces(a: Trace, b: Trace, checkpoint: int) -> str | None:
 
     `checkpoint` must be > 0 and `a`/`b` should share a step_count (or at
     least the same checkpoint cadence up to the point they diverge) --
-    `first_divergent_step` asserts the two checkpoint lists it is
-    comparing report the same step numbers pairwise."""
-    assert checkpoint > 0, "bisect_traces needs a checkpoint interval to bisect against"
+    `first_divergent_step` raises `ValueError` if the two checkpoint lists
+    it is comparing report different step numbers pairwise.
+
+    Raises `ValueError` if `checkpoint <= 0` -- a real, caller-triggerable
+    contract violation (not an internal invariant), so it is checked with
+    a real exception rather than a bare `assert`, which `python -O` would
+    silently discard."""
+    if checkpoint <= 0:
+        raise ValueError("bisect_traces needs a checkpoint interval to bisect against")
     result_a = execute(a, checkpoint=checkpoint, capture_states=True)
     result_b = execute(b, checkpoint=checkpoint, capture_states=True)
     step = first_divergent_step(result_a.checkpoints, result_b.checkpoints)
@@ -195,40 +233,6 @@ def _bootstrap_vendored_tuxemon() -> None:
     os.chdir(tuxemon_dir)
 
 
-def _main(argv: list[str] | None = None) -> int:
-    """CLI entry point: read a trace from disk and verify it, translating
-    `tuxghost.trace.read`'s `Refused` (an unknown format, a missing
-    seed/clock_epoch, or a tampered `initial_state`) into exit code 2, the
-    same code `verify` itself returns for a trace that refuses once
-    execution starts. Run as `python -m tuxghost.execute <path>`."""
-    _bootstrap_vendored_tuxemon()
-    parser = argparse.ArgumentParser(
-        prog="tuxghost.execute",
-        description="Replay a trace and verify it reaches the same state.",
-    )
-    parser.add_argument("trace_path", type=Path)
-    parser.add_argument(
-        "--allow-mismatch",
-        action="store_true",
-        help="downgrade mod_version/step_rate mismatches instead of refusing",
-    )
-    args = parser.parse_args(argv)
-
-    try:
-        trace = read(args.trace_path, allow_mismatch=args.allow_mismatch)
-    except Refused as exc:
-        print(f"refused: {exc}", file=sys.stderr)
-        return 2
-
-    code = verify(trace)
-    if code == 0:
-        print(f"verify: OK ({trace.header.final_digest})")
-    elif code == 1:
-        print("verify: DIVERGED", file=sys.stderr)
-    else:
-        print("verify: REFUSED", file=sys.stderr)
-    return code
-
-
-if __name__ == "__main__":
-    sys.exit(_main())
+# No `_main`/CLI here -- see the module docstring. `tuxghost/cli.py` (a
+# later task) is where a real entry point belongs; `_bootstrap_vendored_
+# tuxemon` above is kept for it to reuse.
