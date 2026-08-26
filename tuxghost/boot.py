@@ -24,6 +24,52 @@ def headless_context() -> Any:
     return headless_init()
 
 
+def _assert_fps_matches_step_rate(client: Any) -> None:
+    """Refuse to boot a client whose configured frame rate disagrees with
+    this harness's step rate.
+
+    Patch 0005 gives EventAction.run()'s synchronous first update() call
+    `dt = 1.0 / client.config.fps` -- correct in the real (non-headless)
+    game loop, where every later frame's dt comes from that exact same
+    config value (`tuxemon/client.py`: `frame_length = 1.0 /
+    self.config.fps`). This harness's `run_steps` (`tuxghost/loop.py`)
+    does not go through that: it always ticks `client.update(FIXED_DT)`
+    directly, bypassing `config.fps` entirely. So a deferred action's
+    first update() (routed through `config.fps`) and every update() after
+    it (routed through `run_steps`' `FIXED_DT`) only ever see the same dt
+    because the two happen to agree by default -- nothing enforces it.
+    `config.fps` is read from `~/.tuxemon/tuxemon.yaml`'s `display.fps`,
+    outside this repo: on a machine where that file sets a different fps
+    (or 0, which would otherwise surface as a bare ZeroDivisionError deep
+    inside an unrelated action's error handling instead of here), a
+    deferred action would silently see a different dt on its first frame
+    than on every frame after it, and every trace recorded on that
+    machine would silently encode a value nothing in this repo controls.
+    Checked once at boot, not on every `EventAction.run()` call.
+    """
+    from tuxghost.loop import FIXED_DT
+
+    fps = client.config.fps
+    if fps <= 0:
+        raise ValueError(
+            f"client.config.fps={fps!r} must be a positive number of "
+            "frames per second (from ~/.tuxemon/tuxemon.yaml's "
+            "display.fps)."
+        )
+    actual_dt = 1.0 / fps
+    if actual_dt != FIXED_DT:
+        raise ValueError(
+            f"client.config.fps={fps!r} implies a frame duration of "
+            f"{actual_dt!r}s, which does not match this harness's "
+            f"FIXED_DT={FIXED_DT!r}s (tuxghost/loop.py). fps is read "
+            "from ~/.tuxemon/tuxemon.yaml's display.fps, outside this "
+            "repo -- fix that file's fps, or FIXED_DT, so the two agree; "
+            "a mismatch here would silently give deferred EventActions a "
+            "different dt on their first frame than on every frame after "
+            "it, on this machine only."
+        )
+
+
 def build_client(seed: int, clock_epoch: int | None = None) -> tuple[Any, Any]:
     """Build a headless client on a fresh game at the given seed.
 
@@ -107,6 +153,7 @@ def build_client(seed: int, clock_epoch: int | None = None) -> tuple[Any, Any]:
     config = CONFIG.copy()
     config.deterministic_seed = seed
     client = headless_world(config, context)
+    _assert_fps_matches_step_rate(client)
 
     random.seed(seed)
 
@@ -203,6 +250,7 @@ def boot_from_save(
     config = CONFIG.copy()
     config.deterministic_seed = seed
     client = headless_world(config, context)
+    _assert_fps_matches_step_rate(client)
     random.seed(seed)
 
     npc_state = save_data.npc_state

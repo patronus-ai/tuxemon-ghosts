@@ -1,5 +1,5 @@
 diff --git a/tuxemon/event/eventaction.py b/tuxemon/event/eventaction.py
-index c7ee213..7f043e6 100644
+index c7ee213..03f8913 100644
 --- a/tuxemon/event/eventaction.py
 +++ b/tuxemon/event/eventaction.py
 @@ -3,7 +3,6 @@
@@ -27,7 +27,40 @@ index c7ee213..7f043e6 100644
  
  
  @dataclass
-@@ -158,28 +164,33 @@ class EventAction(ABC):
+@@ -84,9 +90,12 @@ class EventAction(ABC):
+     stop the action during update.
+ 
+     The EventAction class supports the context protocol, and you may
+-    also use them outside of the EventEngine, but can only be run
+-    in a blocking manner.  Do not execute EventActions outside the Engine
+-    if the action will block forever, as it will freeze the game.
++    also use them outside of the EventEngine. An action that does not
++    finish on its first update() is handed to the EventEngine's own
++    per-frame deferred queue (see EventEngine.defer()/update()) rather
++    than blocking the caller, so `action.execute(session)` returns as
++    soon as the action's first update() call returns, whether or not
++    the action itself is done yet.
+ 
+ 
+     **Parameters**
+@@ -141,10 +150,13 @@ class EventAction(ABC):
+ 
+     def execute(self, session: Session) -> None:
+         """
+-        Blocking call to run the action. Will setup and cleanup action.
++        Run the action. Will setup and cleanup action.
+ 
+-        This may cause the game to hang if an action is waiting on game
+-        changes.
++        Returns as soon as the action's first update() call returns --
++        see EventAction.run(). An action still running at that point is
++        handed to the EventEngine's deferred queue and finishes cleanup()
++        itself once a later frame's update() call marks it done or
++        cancelled; this call does not wait for that.
+         """
+         if self.cancelled:
+             logger.debug("Action is cancelled, not executing")
+@@ -158,28 +170,33 @@ class EventAction(ABC):
  
      def run(self, session: Session) -> None:
          """
@@ -76,7 +109,7 @@ index c7ee213..7f043e6 100644
              logger.error(f"Error running action: {e}")
              raise
 diff --git a/tuxemon/event/eventengine.py b/tuxemon/event/eventengine.py
-index 7f8147b..98c8ff1 100644
+index 7f8147b..0e528be 100644
 --- a/tuxemon/event/eventengine.py
 +++ b/tuxemon/event/eventengine.py
 @@ -12,7 +12,7 @@ from tuxemon.user_config import CONFIG
@@ -101,7 +134,19 @@ index 7f8147b..98c8ff1 100644
          self.global_events: list[EventObject] = []
          self.triggered_global_events: set[int] = set()
          self._behavior_cache: dict[
-@@ -130,6 +136,36 @@ class EventEngine:
+@@ -103,7 +109,10 @@ class EventEngine:
+         """
+         Load and execute an action.
+ 
+-        This will cause the game to hang if an action waits on game changes.
++        Returns as soon as the action's first update() call returns; an
++        action still running at that point is advanced by later frames
++        from EventEngine's own deferred queue instead of blocking here --
++        see EventAction.run().
+ 
+         Parameters:
+             action_name: Name of the action.
+@@ -130,6 +139,66 @@ class EventEngine:
              logger.error(f"Error executing action '{action_name}': {e}")
              raise
  
@@ -123,22 +168,52 @@ index 7f8147b..98c8ff1 100644
 +        cancelled) this frame gets cleanup() called once, here, since
 +        ActionContextManager.__exit__ skips cleanup() for an action that
 +        was still running when EventAction.run() returned.
++
++        A failing update() is caught per-action rather than left to
++        propagate straight out of the for loop: self._deferred is only
++        reassigned after the loop, so an uncaught exception here would
++        leave the failing action (and every action still unprocessed
++        this frame) exactly where they were before this call, unremoved
++        -- the failing action would then retry, and re-raise, on every
++        subsequent frame, starving every other queued action behind it.
++        Instead, a failing action is dropped from the queue and its
++        cleanup() still runs, every other queued action still gets its
++        update() this frame, and the first failure seen this frame is
++        re-raised once, after the loop, matching the old spin loop's
++        raise-once-to-the-caller contract without the old code's
++        forever-clogged-queue failure mode.
 +        """
 +        still_running: list[EventAction] = []
++        first_error: Exception | None = None
 +        for action in self._deferred:
 +            if action.done or action.cancelled:
 +                continue
-+            action.update(self.session, dt)
++            try:
++                action.update(self.session, dt)
++            except Exception as e:
++                logger.error(f"Error updating deferred action: {e}")
++                if first_error is None:
++                    first_error = e
++                try:
++                    action.cleanup(self.session)
++                except Exception as cleanup_error:
++                    logger.error(
++                        "Error cleaning up deferred action after update "
++                        f"failure: {cleanup_error}"
++                    )
++                continue
 +            if action.done or action.cancelled:
 +                action.cleanup(self.session)
 +            else:
 +                still_running.append(action)
 +        self._deferred = still_running
++        if first_error is not None:
++            raise first_error
 +
      def start_event(self, map_event: EventObject) -> None:
          """
          Begins execution of action list. Conditions are not checked.
-@@ -173,6 +209,8 @@ class EventEngine:
+@@ -173,6 +242,8 @@ class EventEngine:
          """
          Check all the MapEvents and start their actions if conditions are met.
          """

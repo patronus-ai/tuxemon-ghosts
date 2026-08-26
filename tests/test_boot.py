@@ -1,3 +1,6 @@
+import pytest
+
+
 def test_headless_context_can_convert_surfaces() -> None:
     """A converted surface is what sprite loading needs; without set_mode
     pygame raises 'No convert format has been set'."""
@@ -296,3 +299,53 @@ def test_null_renderer_survives_map_and_tile_animations() -> None:
     execute("play_tile_animation", (0, 0, "grass", 0.1, "noloop"), True)
 
     assert "grass" in session.client.map_renderer.map_animations._cache
+
+
+
+def test_assert_fps_matches_step_rate_accepts_the_harness_default() -> None:
+    """`build_client`'s default config (`display.fps: 60.0`) must not be
+    rejected -- every other test in this suite already exercises this
+    path implicitly (they'd all be failing at `build_client()` otherwise),
+    but this pins the guard's accept branch directly against the values
+    it actually compares."""
+    from types import SimpleNamespace
+
+    from tuxghost.boot import _assert_fps_matches_step_rate
+
+    client = SimpleNamespace(config=SimpleNamespace(fps=60.0))
+    _assert_fps_matches_step_rate(client)  # must not raise
+
+
+def test_assert_fps_matches_step_rate_rejects_a_mismatched_fps() -> None:
+    """Fix round 1: `EventAction.run()`'s synchronous first update() call
+    takes `dt` from `client.config.fps` -- read from
+    `~/.tuxemon/tuxemon.yaml`, outside this repo -- while every later,
+    deferred frame comes from `run_steps`' `FIXED_DT`
+    (`tuxghost/loop.py`), which never reads `config.fps` at all. Nothing
+    enforced the two agreeing; on a machine where `display.fps` was set
+    to, say, 30, a deferred action would silently see a different dt on
+    its first frame than on every frame after it, and traces recorded on
+    that machine would silently encode a value nothing in this repo
+    controls. `build_client`/`boot_from_save` must refuse to boot instead
+    of letting that happen quietly."""
+    from types import SimpleNamespace
+
+    from tuxghost.boot import _assert_fps_matches_step_rate
+
+    client = SimpleNamespace(config=SimpleNamespace(fps=30.0))
+    with pytest.raises(ValueError, match="FIXED_DT"):
+        _assert_fps_matches_step_rate(client)
+
+
+def test_assert_fps_matches_step_rate_rejects_non_positive_fps() -> None:
+    """`display.fps: 0` must not be left to blow up as a bare
+    `ZeroDivisionError` deep inside an unrelated deferred action's error
+    handling (`eventaction.py`'s `1.0 / session.client.config.fps`) --
+    caught here, at boot, with a message that says why."""
+    from types import SimpleNamespace
+
+    from tuxghost.boot import _assert_fps_matches_step_rate
+
+    client = SimpleNamespace(config=SimpleNamespace(fps=0.0))
+    with pytest.raises(ValueError, match="positive"):
+        _assert_fps_matches_step_rate(client)

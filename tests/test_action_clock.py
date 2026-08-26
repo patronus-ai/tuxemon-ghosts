@@ -40,6 +40,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from tuxghost.boot import build_client
 from tuxghost.loop import FIXED_DT, run_steps
 
@@ -135,3 +137,81 @@ def test_deferred_action_cleanup_runs_once_and_only_after_completion() -> None:
     assert cleanup_calls == [True], (
         f"cleanup() should run exactly once, after completion: {cleanup_calls}"
     )
+
+
+
+def test_deferred_action_error_does_not_wedge_the_queue() -> None:
+    """Fix round 1: a previous version of `_update_deferred` let an
+    exception from one queued action's update() propagate straight out
+    of the for loop. Because `self._deferred` was only reassigned after
+    the loop finished, an uncaught exception left it completely
+    unchanged -- the failing action stayed at the front of the queue and
+    every action queued behind it in that same frame never got updated
+    at all. Next frame, the same failing action was retried first, raised
+    again, and the cycle repeated: the failing action re-raised on every
+    subsequent frame and starved every action behind it, forever.
+
+    A failing action must instead: (a) raise exactly once -- on the frame
+    it actually failed, not on every frame after -- (b) still get its
+    cleanup() called, and (c) not stop any other queued action from
+    advancing, including in the very same frame it failed on."""
+    _client, session = build_client(seed=1234)
+
+    bad = _wait_action(session, seconds=100 * FIXED_DT)
+    good = _wait_action(session, seconds=5 * FIXED_DT)
+
+    cleanup_calls: list[None] = []
+    original_cleanup = bad.cleanup
+
+    def spy_cleanup(sess: Any) -> None:
+        cleanup_calls.append(None)
+        original_cleanup(sess)
+
+    bad.cleanup = spy_cleanup
+
+    call_count = {"n": 0}
+    original_bad_update = bad.update
+
+    def failing_update(sess: Any, dt: float) -> None:
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise RuntimeError("boom")
+        original_bad_update(sess, dt)
+
+    bad.update = failing_update
+
+    good_updates: list[float] = []
+    original_good_update = good.update
+
+    def spy_good_update(sess: Any, dt: float) -> None:
+        good_updates.append(dt)
+        original_good_update(sess, dt)
+
+    good.update = spy_good_update
+
+    # First (synchronous) update happens inside execute() itself --
+    # call_count -> 1 for bad, does not raise. Both actions are still
+    # running afterwards, so both get deferred; bad is queued first.
+    bad.execute(session)
+    good.execute(session)
+    assert not bad.done and not good.done
+    assert good_updates == [FIXED_DT]
+
+    # This frame's deferred pass calls bad.update() a second time (raises)
+    # -- (c): good must still get its update in this exact frame, despite
+    # coming after bad in the queue.
+    with pytest.raises(RuntimeError, match="boom"):
+        run_steps(session.client, 1)
+
+    assert call_count["n"] == 2
+    assert len(good_updates) == 2, (
+        "the action queued behind the failing one must still advance on "
+        "the frame the failure happened"
+    )
+    assert cleanup_calls == [None], "cleanup() must still run on the failing action"
+
+    # (a): no more raises on later frames -- the failing action must not
+    # be retried, only removed.
+    run_steps(session.client, 10)
+    assert call_count["n"] == 2, "the failing action must not be retried"
+    assert good.done, "the other queued action must finish normally"
