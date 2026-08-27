@@ -1,0 +1,243 @@
+#+TITLE: Handoff — two parallel streams from S3's merge
+#+DATE: 2026-08-27
+
+Read =CLAUDE.md= and =docs/STATUS.org= first, as always. This file says
+only what a *next* session needs that those two do not: what is done, what
+is next, how to run two sessions at once without corrupting each other,
+and what in the existing documents should not be trusted.
+
+* State at handoff
+
+=main= is at *8086220*. S1 (trace core), S2 (CU-agent harness) and S3
+(offline optimizer) are all merged. Verified on that exact tree, at load
+average 4.6 with nothing else running:
+
+#+begin_src text
+make check -> EXIT=0
+  fast: 356 passed, 4 skipped, 11 warnings   in 218.00s (3m38s)
+  slow: 4 passed, 356 deselected, 1 warning  in  53.53s
+  ruff + lint-patched + mypy --strict: green
+#+end_src
+
+=patches/= is still *6 files*; =git -C tuxemon diff --stat= is still
+=18 files changed, 265 insertions(+), 63 deletions(-)= plus 2 untracked;
+=EXEMPTIONS= is still =={}=. S3 added no seventh patch and no format
+change, exactly as its spec required.
+
+*Nothing has ever been pushed.* There is no git remote at all — no
+=origin=, no remote-tracking refs, no upstream on any branch. "Push to the
+repo" therefore means *creating* one. If that happens, note that
+=58a2a36= still carries a *3.5 MB* blob (an early =walk_1234.tuxghost=
+with embedded screenshots, since stripped to 12 KB) — about 75% of the
+4.7 MB history. Squashing or rewriting that one commit keeps it out, and
+nothing depends on the history because nothing has been pushed.
+
+* The two streams, and why they can run at once
+
+*Stream A — finish S3* so that "CU harness + offline optimizer" is a
+working pair. Four items, in dependency order; roughly one session.
+
+*Stream B — S4, ghost rendering.* A new subsystem. **It needs its own
+brainstorming pass before any implementation** — this handoff records the
+constraints and the open questions so that conversation is short, not so
+that it can be skipped.
+
+They are genuinely independent: A touches =tuxghost/optimize/= and its
+tests; B touches rendering and will likely add =tuxghost/ghost.py= or
+similar. See "Running two sessions at once" for the three real collision
+points.
+
+* Stream A — the four remaining S3 items
+
+Do them in this order. Items 2 and 3 are cheap and must precede 4.
+
+** A1. Commit a parent fixture that is not stuck mid-dialogue
+
+*The single biggest functional gap, and it is small.* The only committed
+optimizer parent (=tests/golden/claude_town_1234.tuxghost=) ends with
+=state_stack == ['DialogState', 'WorldState']=, and that trailing dialogue
+swallows every input — measured: UP/DOWN/LEFT/RIGHT, A-then-DOWN and
+B-then-DOWN all leave the tile at =[11, 14]=. So =ReachTile='s =distance=
+term is dead against it, and "optimize" can only mean *shorten*, never
+*re-route*.
+
+A suitable trace already exists and was verified during this session, but
+lives in a scratch directory rather than the repo:
+
+#+begin_src text
+scripted walk: 176 steps, ends map spyder_paper_town.tmx tile [16, 14],
+               state_stack == ['WorldState']   <- usable as a parent
+#+end_src
+
+It was produced by =tuxghost agent --policy scripted= from
+=tests/fixtures/paper_town.save= with four DOWN then four RIGHT actions
+(=hold 16, settle 6=), seed 1234, epoch 1787659200. Re-record it, commit
+it under =tests/golden/=, and give it a =verify() == 0= test plus a
+=_TRACKED_FILES= entry (it will warn zero times, like the other
+current-patches fixtures).
+
+** A2. Fix =ReachTile.TERMS[0]='s sign label
+
+=objective.py= exposes =TERMS = ("on_target_map", "-distance_to_target",
+"-steps")=, but term 0 is =0.0= when the candidate *is* on the target map
+and =-1.0= when it is not. A model shown =[0.0, -2.0, -442.0]= and told
+term 0 is =on_target_map= reads =0.0= as *false* — the opposite of the
+truth. Use =-off_target_map= or =on_target_map (0=yes, -1=no)=. Note
+=tests/test_optimize_objective.py= currently *pins the ambiguous form*, so
+that assertion moves too.
+
+** A3. Record the goal in =optimize='s =run.json=
+
+=agent='s =run.json= carries =goal=; =optimize='s does not. A
+=--editor claude= run's *explicit* goal therefore survives nowhere — a
+derived goal is reconstructible from =objective= + =target=, an explicit
+=--goal= is not. One line. S2's own final fix wave added =run.json= to
+=agent= for exactly this reason (=docs/STATUS.org=, the run-directory
+section).
+
+** A4. The live =ClaudeEditor= capture and the baseline comparison
+
+This is S3's equivalent of the S2 live capture done earlier today. *Every
+=ClaudeEditor= test is stubbed*; there is no live-model evidence at all.
+And the spec states that the *only* permitted claim about =ClaudeEditor=
+is a comparison against =MutationEditor= at the same parent, budget and
+objective — which has never been run.
+
+*Do A1-A3 first.* Against the current parent both editors would compete on
+step-count alone, and the model would be misinformed about its own score.
+Budget is small (text-only prompts, no images). Commit the transcript as a
+real =ReplayEditor= fixture, the way S2's capture was committed.
+
+Also unmeasured, worth folding in: =rounds= has *no measured ceiling* —
+all nine tuning runs peaked at or near their cap and stopped "rounds
+exhausted" — =patience >= 10= is *derived*, not measured, and
+=max_rejections= is unmeasured (zero rejections in 168 proposals). See
+=docs/2026-08-27-optimizer-tuning.org=.
+
+* Stream B — S4, ghost rendering
+
+*Brainstorm before implementing.* What follows is what is already known, so
+that conversation starts from facts.
+
+** What already exists that S4 needs
+
+- *The rendering seam is public and proven.* S2 established that a real
+  =MapRenderer= installs through =BaseClient.set_renderer= and composites
+  via upstream's =StateDrawer=, with *no engine patch*. The measurement
+  that justified it: a stock =NullRenderer= frame sampled to *1* colour
+  (pure black); the same call with a real =MapRenderer= sampled to *48*.
+- *A ghost's path is derivable, though not stored.* A trace holds only
+  =(step, button, value)= inputs — no positions. But replay is
+  deterministic, so the track is recoverable by running it:
+  =execute(trace, checkpoint=N, capture_states=True)= already samples
+  =state_of=, which carries =map=, =tile_pos= and =facing=.
+- =provenance.recorder= already distinguishes ="cu-agent"=,
+  ="offline-agent"= and ="human"=, so a ghost can be labelled by origin.
+
+** The two real obstacles
+
+1. *There is no live mode to host a ghost.* Nothing in this project ever
+   opens a window; every boot is headless with dummy SDL drivers, and
+   =CLAUDE.md= requires that of *every* invocation that touches the
+   client. Windowed play is a deliberate exception to that rule and is the
+   human's call, not the implementer's.
+2. *Step-indexed format meets a wall-clock player.* The format is
+   step-indexed on purpose — =PlayerInput.timestamp= deliberately never
+   enters it, and anything reading real time to decide what happens next
+   is a determinism bug by this project's own rules. A human playing in
+   real time is the one consumer that reintroduces wall clock. "Which
+   trace step is the ghost on right now" needs an explicit, stated
+   mapping; =step_rate= 60 makes one step ≈ one frame at 60 fps, but a
+   machine that drops frames changes the ghost's apparent speed.
+
+** Open questions for the brainstorm
+
+- Does a ghost render *in a live windowed session* (needs obstacle 1
+  resolved), or *into recorded frames* — a filmstrip or video of one trace
+  with another overlaid? The second needs no windowed mode at all and may
+  be the cheaper first cut.
+- Translucency: does drawing a second, alpha-blended entity need a seventh
+  patch, or does =npc_manager= plus =set_renderer= reach it the way S2's
+  frame did? *Unmeasured.* Probe before designing.
+- Does the ghost's position come from a pre-computed track (replay once,
+  store positions) or from a second engine instance stepped alongside?
+  The first is far cheaper and matches the deterministic-replay guarantee.
+- What identifies a ghost to a viewer — the =model= field, the
+  =recorder= kind, a name in =taints=?
+
+* Running two sessions at once
+
+Three real collision points, and one verified fix.
+
+** The shared-state hazard, and how to defuse it
+
+=CLAUDE.md= warns that the suite depends on =~/.tuxemon/cache/l18n/*.mo=,
+which *two concurrent runs have corrupted before*. That is a
+=$HOME=-level path, so it is shared even between two separate clones —
+which would normally make parallel work unsafe.
+
+*Verified this session*: Tuxemon's user directory follows =$HOME=.
+
+#+begin_src bash
+HOME=/tmp/tux-home-b python -c "from tuxemon.constants import paths; print(paths.USER_STORAGE_DIR)"
+# -> /tmp/tux-home-b/.tuxemon
+#+end_src
+
+So give each parallel session its own =HOME= for engine runs. *Caveats,
+both unverified end to end*: copy the real =~/.tuxemon/tuxemon.yaml= into
+it first — =tuxghost.boot= asserts =display.fps= against =STEP_RATE= at
+boot and raises a =ValueError= if it disagrees — and be aware that
+overriding =HOME= wholesale also moves git config, ssh and tool caches, so
+scope it to the gate command rather than exporting it globally. Only path
+resolution was verified; a full suite under a redirected =HOME= was not.
+
+The simplest alternative, if that proves fiddly: *serialise the gates.*
+Each stream runs =make check-fast= only at task boundaries and the two
+sessions agree not to overlap. The fast tier is under 4 minutes on a quiet
+host, so this costs little.
+
+** The two file-level collisions
+
+- =docs/STATUS.org= — both streams will want to add a section. Agree up
+  front that each appends its own top-level section and neither edits the
+  other's, or serialise the close-outs.
+- =tests/conftest.py= — both may add a =_TRACKED_FILES= entry. *Append to
+  the tuple; never replace it.* It currently holds entries from S1, S2 and
+  four S3 tasks, plus pinned per-nodeid warning counts.
+
+* Four residuals parked at S3's close-out
+
+Raised by the final whole-branch review, adjudicated rather than fixed
+(the process allows one fix wave, and it had run). None blocks anything;
+the first is the one the reviewer would genuinely ask for.
+
+1. =optimize='s =run.json= records no goal — this is Stream A's A3.
+2. =ReachTile.TERMS[0]= mislabels a sign — this is A2.
+3. =assert "spyder_paper_town.tmx" in prompt= (in the CLI tests) is
+   *vacuous*: the map name already appears in the prompt's "Ended on map"
+   line, so it passes against the defect it was written for. The tile half
+   of that pin is real. One line.
+4. A real pin *does* exist for the button-remap hazard, contrary to what
+   the fix wave concluded: =mock.patch.object(buttons, "UP", 4)= +
+   =mock.patch.object(buttons, "LEFT", 1)= + =importlib.reload=, swapping
+   two *valid* values so the existing subset assertion stays green. Fails
+   on the pre-fix literals, passes on the imported constants. ~9 lines.
+
+* What in the existing documents should not be trusted
+
+- *The S3 implementation plan is not authority.* Nine of its defects would
+  have shipped green. Three separate times it specified a mutation
+  demonstration nothing could have caught; twice measurement inverted its
+  assumptions outright (its "improving" edit made scores worse and its
+  "worsening" edit made them better). Its projected test counts were wrong
+  seven times. It has been corrected in place where execution disproved
+  it, but treat every step as a proposal to verify.
+- *Any wall-clock timing taken this session other than the 218 s above.*
+  Figures of 10:52 and 41:54 both appear in task reports; both were
+  measured under load average 15-35 from unrelated suites in other repos.
+  Check =uptime= before quoting a timing.
+- The =.superpowers/sdd/2026-08-27-offline-optimizer.org/= workspace still
+  exists on disk (git-ignored) and holds the full execution ledger, all
+  task reports, and the review packages. It is the only written record of
+  the four parked residuals beyond this file. Delete it once this handoff
+  is believed complete.
