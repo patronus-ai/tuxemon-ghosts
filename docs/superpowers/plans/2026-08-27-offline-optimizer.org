@@ -546,15 +546,31 @@ def test_lower_places_the_first_press_at_lead_in() -> None:
 
 def test_lower_keeps_a_zero_settle_collision_intact() -> None:
     """A `settle=0` action releases on exactly the step the next action
-    presses. Both edges must survive -- the defect `add_edge` exists to
-    prevent, re-checked from this side of the boundary."""
+    presses. Both edges must survive, in `add_edge`'s canonical order --
+    the defect `add_edge` exists to prevent, re-checked from this side of
+    the boundary.
+
+    RIGHT first, then DOWN, and the direction is the whole point.
+    `add_edge` sorts each step's edges by `(button, value)`, so with
+    RIGHT(8) releasing and DOWN(2) pressing on the same step, naive
+    append order `[(8, RELEASED), (2, PRESSED)]` and sorted order
+    `[(2, PRESSED), (8, RELEASED)]` DIVERGE -- which is what lets this
+    test fail against a `lower` that hand-builds the dict instead of
+    calling `add_edge`.
+
+    Do not "simplify" this to DOWN-then-RIGHT. That pair is already
+    ascending, so naive append and sorted order coincide and the
+    assertion cannot fail. An earlier draft of this plan specified
+    exactly that, and it is the SAME pitfall with the SAME button pair
+    that `tuxghost/loop.py`'s `add_edge` docstring records as already
+    caught once in this codebase."""
     script = ActionScript(
         lead_in=0,
-        actions=(Action(buttons.DOWN, 4, 0), Action(buttons.RIGHT, 4, 0)),
+        actions=(Action(buttons.RIGHT, 4, 0), Action(buttons.DOWN, 4, 0)),
     )
     assert lower(script)[4] == [
-        (buttons.DOWN, RELEASED),
-        (buttons.RIGHT, PRESSED),
+        (buttons.DOWN, PRESSED),
+        (buttons.RIGHT, RELEASED),
     ]
 
 
