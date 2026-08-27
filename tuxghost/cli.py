@@ -1,4 +1,5 @@
-"""`tuxghost` command line: `execute`, `verify`, `compare`, `record`, `info`.
+"""`tuxghost` command line: `execute`, `verify`, `compare`, `record`, `info`,
+`agent`, `optimize`.
 
 Two proven defects from an earlier, deleted CLI (`tuxghost/execute.py`'s
 `_main`, removed in task-12 fix round 1 -- see that module's docstring)
@@ -80,6 +81,57 @@ failure -- anything that is not one of the specific, anticipated
 precondition failures above -- must stay a visible crash rather than
 being laundered into a tidy refusal. "0 or 2 only" describes every path
 this module checks for, not a guarantee that nothing else can go wrong.
+
+`optimize` (edits a recorded trace offline, re-runs every candidate
+through `tuxghost.optimize.seal.seal`, and writes the winner --
+`tuxghost.optimize.runner.optimize`) has the SAME contract as `agent`,
+for the same reason: a candidate search has nothing to diverge FROM, so
+exit 1 must never mean "a precondition was wrong". What it refuses, all
+mapped to exit 2 before the engine boots:
+
+  * `--rounds`, `--patience`, `--max-rejections`, `--max-cost` below 1.
+    `--checkpoint` is checked separately, as `>= 0`: 0 is a LEGAL value
+    meaning "do not sample", so folding it into the `>= 1` loop by adding
+    one would be a lie about what the bound is.
+  * a `--target` that is not `MAP:X,Y`.
+  * `--editor scripted`/`replay` without `--edits`; `--editor replay`
+    without `--model` (a transcript carries no model of its own, so
+    recording a default would misattribute provenance -- the same M8
+    reasoning `--policy replay` above already follows); `--editor
+    mutation` without `--seed` (a default would make an unreproducible
+    run look reproducible).
+  * an unreadable/malformed `--trace`, or a malformed `--edits` file.
+    The parent goes through `_read_trace_or_refuse`, not a bare `read`:
+    `tuxghost.trace.read` starts with an unguarded `json.loads` and ends
+    with `Trace.model_validate`, so a non-JSON or structurally malformed
+    trace raises `json.JSONDecodeError`/`pydantic.ValidationError` --
+    neither an `OSError` nor a `Refused` -- and would otherwise exit 1
+    for what is plainly a bad input file.
+  * anything `ValueError`/`TypeError` out of `optimize(...)`: an
+    unliftable parent (two buttons held at once -- `optimize.schedule
+    .lift` refuses rather than reinterprets) and a malformed
+    `parent.initial_state` (`pydantic.ValidationError` IS a `ValueError`
+    subclass) are both statements about the PARENT, and both are refusals
+    about input. Note what is NOT here: a bad EDITOR proposal never
+    reaches this boundary at all -- `tuxghost.optimize.runner` contains
+    it as a rejected round and the run continues.
+  * a re-seal of the winning script that reaches a different digest than
+    the loop scored (see `_optimize`: the winner is re-sealed through
+    `Recorder`, this project's one trace writer, rather than having its
+    sealed provenance patched).
+
+That `optimize(...)` boundary is `except (ValueError, TypeError)` and
+deliberately not `except Exception`: measured during task 11, widening it
+laundered a real `AttributeError` engine-invariant failure into
+`refused: ...` + exit 2 while every other CLI test stayed green
+(`tests/test_optimize_cli.py
+::test_a_real_engine_bug_out_of_the_loop_is_not_laundered_into_a_refusal`
+pins it). And the `anthropic` import is gated on `args.editor ==
+"claude"`, not import-guarded at module scope, for exactly the reason
+commit 61f63aa gives for `_agent`: `make check` does not install the SDK,
+and an unconditional import on a path all four editors reach replaces a
+genuine crash's traceback with `ModuleNotFoundError` raised while
+handling it. `optimize` renders nothing -- no frames directory, ever.
 """
 
 from __future__ import annotations
@@ -120,13 +172,14 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
     "compare": ("a", "b"),
     "record": ("out", "from_save"),
     "agent": ("actions", "from_save", "out", "run_dir"),
+    "optimize": ("trace", "edits", "out", "run_dir"),
 }
 
 #: Subcommands that need the vendored `tuxemon/` package importable and
 #: cwd-relative asset loading working -- i.e. anything that actually boots
 #: a session. `info` and `compare` are pure trace-file inspection and need
 #: neither.
-_NEEDS_BOOTSTRAP = frozenset({"execute", "verify", "record", "agent"})
+_NEEDS_BOOTSTRAP = frozenset({"execute", "verify", "record", "agent", "optimize"})
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -208,6 +261,34 @@ def _build_parser() -> argparse.ArgumentParser:
     p_agent.add_argument("--upscale", type=int, default=4)
     p_agent.add_argument("--out", type=Path, required=True)
     p_agent.add_argument("--run-dir", type=Path, required=True, dest="run_dir")
+
+    p_opt = sub.add_parser(
+        "optimize",
+        help="edit a trace offline, re-run each candidate, keep the best",
+    )
+    p_opt.add_argument("--trace", type=Path, required=True)
+    p_opt.add_argument(
+        "--editor",
+        choices=("scripted", "mutation", "replay", "claude"),
+        required=True,
+    )
+    # No argparse default for --seed: `mutation` REQUIRES one (a default
+    # would make an unreproducible run look reproducible) and the other
+    # three editors have no use for one.
+    p_opt.add_argument("--seed", type=int, default=None)
+    p_opt.add_argument("--edits", type=Path, default=None)
+    p_opt.add_argument("--model", default=None)
+    p_opt.add_argument("--objective", choices=("reach-tile",), required=True)
+    p_opt.add_argument("--target", required=True)
+    p_opt.add_argument("--rounds", type=int, required=True)
+    p_opt.add_argument("--patience", type=int, required=True)
+    p_opt.add_argument(
+        "--max-rejections", type=int, required=True, dest="max_rejections"
+    )
+    p_opt.add_argument("--max-cost", type=int, required=True, dest="max_cost")
+    p_opt.add_argument("--checkpoint", type=int, default=64)
+    p_opt.add_argument("--out", type=Path, required=True)
+    p_opt.add_argument("--run-dir", type=Path, required=True, dest="run_dir")
 
     return parser
 
@@ -794,6 +875,261 @@ def _agent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_target(raw: str) -> tuple[str, tuple[int, int]] | None:
+    """`MAP:X,Y` -> `(map, (x, y))`, or None if it does not parse."""
+    map_name, _, coords = raw.partition(":")
+    x, _, y = coords.partition(",")
+    if not map_name or not x or not y:
+        return None
+    try:
+        return map_name, (int(x), int(y))
+    except ValueError:
+        return None
+
+
+def _optimize(args: argparse.Namespace) -> int:
+    """Optimize a trace offline. Exits 0 or 2 for everything it can
+    anticipate; 1 is reserved for a genuine engine bug, exactly as
+    `_agent` documents -- there is nothing here to diverge FROM."""
+    import dataclasses
+
+    from tuxghost.optimize.editors.mutation import MutationEditor
+    from tuxghost.optimize.editors.replay import ReplayEditor, edits_from_json
+    from tuxghost.optimize.editors.scripted import ScriptedEditor
+    from tuxghost.optimize.objective import ReachTile
+    from tuxghost.optimize.runner import Editor, optimize
+    from tuxghost.optimize.seal import seal
+    from tuxghost.trace import write
+
+    for name, value in (
+        ("--rounds", args.rounds),
+        ("--patience", args.patience),
+        ("--max-rejections", args.max_rejections),
+        ("--max-cost", args.max_cost),
+    ):
+        if value < 1:
+            print(f"refused: {name} must be >= 1, got {value!r}", file=sys.stderr)
+            return 2
+    # Checked separately, not folded into the loop above with an
+    # `args.checkpoint + 1` trick: 0 is a legal checkpoint (it means "do
+    # not sample"), so this bound is >= 0 and saying so plainly beats
+    # reusing a >= 1 loop by adding one.
+    if args.checkpoint < 0:
+        print(
+            f"refused: --checkpoint must be >= 0, got {args.checkpoint!r} "
+            "(0 means do not sample)",
+            file=sys.stderr,
+        )
+        return 2
+
+    target = _parse_target(args.target)
+    if target is None:
+        print(
+            f"refused: --target {args.target!r} does not parse; expected "
+            "MAP:X,Y (e.g. spyder_paper_town.tmx:11,16)",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.editor in ("scripted", "replay") and args.edits is None:
+        print(
+            f"refused: --editor {args.editor} requires --edits "
+            "(a JSONL file, one round of edits per line)",
+            file=sys.stderr,
+        )
+        return 2
+    if args.editor == "mutation" and args.seed is None:
+        print(
+            "refused: --editor mutation requires --seed; without one the "
+            "run is unreproducible and would still look reproducible",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Task 11 review of the plan's own code: the plan read the parent with
+    # a bare `read(args.trace)` under `except (OSError, Refused)`, which
+    # leaves a real hole in this subcommand's whole reason for existing.
+    # `tuxghost.trace.read`'s FIRST statement is an unguarded
+    # `json.loads(...)`, and its last is `Trace.model_validate(...)`: a
+    # trace file that is not valid JSON raises `json.JSONDecodeError` and
+    # a structurally malformed one raises `pydantic.ValidationError`,
+    # neither of them `OSError` or `Refused`. Both would have propagated
+    # uncaught and exited 1 = "diverged" for what is plainly a bad input
+    # file. `_read_trace_or_refuse` is this module's existing, single
+    # trace-reading boundary and already maps all four failure modes to
+    # one refusal (see its docstring), so `optimize` uses it rather than
+    # growing a second, weaker copy. `allow_mismatch=False`: `optimize`
+    # exposes no `--allow-mismatch` flag, and silently downgrading a
+    # header mismatch on the trace every candidate is derived FROM is not
+    # a decision this subcommand should make on the caller's behalf.
+    parent = _read_trace_or_refuse(args.trace, False)
+    if parent is None:
+        return 2
+
+    editor: Editor
+    model: str | None = None
+    if args.editor == "mutation":
+        editor = MutationEditor(seed=args.seed)
+    elif args.editor == "replay":
+        if args.model is None:
+            print(
+                "refused: --editor replay requires --model; a transcript "
+                "carries no model of its own and recording a default "
+                "would misattribute provenance",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            editor = ReplayEditor(args.edits)
+        except OSError as exc:
+            print(f"refused: cannot read {args.edits}: {exc}", file=sys.stderr)
+            return 2
+        except (ValueError, TypeError) as exc:
+            print(f"refused: {args.edits} is malformed: {exc}", file=sys.stderr)
+            return 2
+        model = args.model
+    elif args.editor == "scripted":
+        try:
+            rounds_of_edits = [
+                edits_from_json(json.loads(line))
+                for line in args.edits.read_text().splitlines()
+                if line.strip()
+            ]
+        except OSError as exc:
+            print(f"refused: cannot read {args.edits}: {exc}", file=sys.stderr)
+            return 2
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            print(f"refused: {args.edits} is malformed: {exc}", file=sys.stderr)
+            return 2
+        editor = ScriptedEditor(rounds_of_edits)
+    elif args.editor == "claude":
+        # Gated on the policy, NOT import-guarded: this arm is reachable
+        # only for `--editor claude`, so the other three never touch an
+        # optional dependency `make check` does not install (the 61f63aa
+        # residual fix, same reasoning).
+        #
+        # Spelled as an explicit `elif args.editor == "claude"` rather
+        # than the plan's bare `else` (Task 11: the plan's own code and
+        # its own test contradicted each other here). The plan's `else`
+        # arm never mentions `claude`, so its
+        # `test_the_claude_editor_is_the_only_one_that_touches_anthropic`
+        # -- which greps this file for exactly `args.editor == "claude"`
+        # -- failed against the plan's implementation. Naming the branch
+        # is also the honest form: the gate IS a policy check, and the
+        # unreachable fourth case below says so instead of quietly
+        # treating "anything else" as claude.
+        try:
+            # The suppression below carries its reason, per CLAUDE.md
+            # (and is written on the import line itself: quoting the
+            # directive inside a comment makes ruff parse it as a real,
+            # malformed one -- measured). Unlike
+            # `_agent`'s identical import (which is genuinely used again
+            # in its `except Exception` arm's `isinstance` check), this
+            # binding is a PRECONDITION CHECK and nothing else --
+            # importing it here is the whole point, so ruff's
+            # unused-import finding is correct about the binding and
+            # wrong about the intent. `ClaudeEditor` imports `anthropic`
+            # lazily inside `_ensure_client`, deep inside the loop, so
+            # without this check a missing SDK would raise there,
+            # uncaught, and exit 1 = "diverged".
+            import anthropic  # noqa: F401
+        except ImportError as exc:
+            print(
+                f"refused: --editor claude needs the anthropic SDK "
+                f"(pip install -e '.[agent]'): {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        from tuxghost.agent.claude import DEFAULT_MODEL
+        from tuxghost.optimize.editors.claude import ClaudeEditor
+
+        model = args.model if args.model is not None else DEFAULT_MODEL
+        editor = ClaudeEditor(model=model)
+    else:  # pragma: no cover -- argparse `choices` already refuses this
+        raise AssertionError(f"unhandled editor {args.editor!r}")
+
+    try:
+        result = optimize(
+            parent,
+            editor,
+            ReachTile(target[0], target[1]),
+            rounds=args.rounds,
+            patience=args.patience,
+            max_rejections=args.max_rejections,
+            max_cost=args.max_cost,
+            checkpoint=args.checkpoint,
+            model=model,
+        )
+    except (ValueError, TypeError) as exc:
+        # Deliberately narrow, like `_agent`'s boundary: these are the two
+        # exceptions this project's own input validation raises (an
+        # unliftable parent among them, via `lift`, and a malformed
+        # `parent.initial_state` via `SaveData.model_validate` inside
+        # `seal` -- `pydantic.ValidationError` IS a `ValueError`
+        # subclass). An AttributeError here is a programming error and
+        # must stay a visible crash.
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+
+    lineage = (
+        f"derived by offline-agent ({args.editor}"
+        + (f", seed {args.seed}" if args.seed is not None else "")
+        + f") from parent {parent.header.final_digest} over "
+        f"{len(result.rounds) - 1} round(s)"
+    )
+    # RE-SEAL the winner with its lineage rather than rewriting the trace
+    # the loop already sealed. The round count is only known now, and
+    # `Recorder` is this project's one trace writer -- editing a sealed
+    # `Provenance` here would make this a second one. The extra engine
+    # run is also a free re-confirmation that the winning script still
+    # reaches the score it won with; the check below is that
+    # confirmation.
+    final = seal(
+        result.best_script,
+        parent,
+        checkpoint=args.checkpoint,
+        taints=(lineage,),
+        model=model,
+        max_cost=args.max_cost,
+    )
+    if final.trace.header.final_digest != result.best.trace.header.final_digest:
+        print(
+            "refused: re-sealing the winning script reached a different "
+            f"digest ({final.trace.header.final_digest}) than the loop "
+            f"recorded ({result.best.trace.header.final_digest}); this is "
+            "a determinism failure, not a bad edit",
+            file=sys.stderr,
+        )
+        return 2
+    write(final.trace, args.out)
+
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    with (args.run_dir / "optimize.jsonl").open("w") as handle:
+        for entry in result.rounds:
+            handle.write(json.dumps(dataclasses.asdict(entry), default=str) + "\n")
+    (args.run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "parent_digest": parent.header.final_digest,
+                "objective": args.objective,
+                "target": args.target,
+                "editor": args.editor,
+                "seed": args.seed,
+                "model": model,
+                "rounds": args.rounds,
+                "patience": args.patience,
+                "max_rejections": args.max_rejections,
+                "max_cost": args.max_cost,
+                "best_round": result.best_round,
+                "stop_reason": result.stop_reason,
+            },
+            indent=2,
+        )
+    )
+    print(f"wrote {args.out} (best round {result.best_round}) and {args.run_dir}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -828,6 +1164,8 @@ def main(argv: list[str] | None = None) -> int:
         return _record(args)
     if command == "agent":
         return _agent(args)
+    if command == "optimize":
+        return _optimize(args)
     if command == "verify":
         return _verify(args.trace, args.allow_mismatch)
     if command == "execute":
