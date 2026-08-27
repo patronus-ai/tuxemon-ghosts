@@ -30,6 +30,26 @@ from tuxghost.record import Recorder
 from tuxghost.trace import Trace
 
 
+class OverBudget(ValueError):
+    """A script's cost exceeds the caller's `max_cost`.
+
+    A `ValueError` subclass, not a bare `ValueError`, deliberately: `seal`
+    also raises plain `ValueError` from `SaveData.model_validate` (a
+    malformed `parent.initial_state` -- `pydantic.ValidationError` IS a
+    `ValueError` subclass, measured) and, inside `boot_from_save`, from an
+    unresolvable `current_map`. Task 7 treats an over-budget candidate as
+    a REJECTED ROUND, distinct from an unrunnable parent -- a caller that
+    only ever sees `ValueError` cannot tell "this candidate was too
+    expensive" from "this parent trace itself does not boot", and since a
+    malformed parent fails identically on every round, conflating the two
+    would report a whole run as "the editor kept proposing rubbish"
+    instead of the real defect. Existing broad `except ValueError`
+    handlers keep working unchanged; this type exists so a caller that
+    wants precision can have it (see `tuxghost/execute.py`'s own
+    reasoning for not conflating distinct refusal causes).
+    """
+
+
 @dataclass
 class CandidateResult:
     """One candidate, run. This is everything an `Objective` and an
@@ -70,7 +90,7 @@ def seal(
 
     cost = script.cost()
     if max_cost is not None and cost > max_cost:
-        raise ValueError(
+        raise OverBudget(
             f"script costs {cost} steps, over the max_cost of {max_cost}; "
             "refusing before booting rather than running it"
         )

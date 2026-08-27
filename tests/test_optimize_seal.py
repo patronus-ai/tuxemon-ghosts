@@ -17,7 +17,7 @@ import pytest
 from tuxghost.execute import execute
 from tuxghost.optimize.edits import Delete, apply_edits
 from tuxghost.optimize.schedule import lift
-from tuxghost.optimize.seal import seal
+from tuxghost.optimize.seal import OverBudget, seal
 from tuxghost.trace import read
 
 GOLDEN = Path(__file__).parent / "golden"
@@ -33,6 +33,14 @@ def test_sealing_an_unedited_script_reproduces_its_parent_exactly() -> None:
     assert result.trace.header.step_count == parent.header.step_count
     assert result.steps == parent.header.step_count
     assert result.trace.header.final_digest == parent.header.final_digest
+    # `Recorder.__init__` re-snapshots from the LIVE session
+    # (`tuxghost/record.py`'s `snapshot_save(session)`) rather than
+    # copying `parent.initial_state` verbatim -- `seal`'s own docstring
+    # claim that `parent` supplies `initial_state` "verbatim" is an
+    # invariant about a lossless boot -> snapshot round-trip, and
+    # nothing above this line asserted it. `header.initial_state_digest`
+    # is derived from exactly this field.
+    assert result.trace.initial_state == parent.initial_state
 
 
 def test_a_sealed_candidate_is_an_offline_agent_trace_that_verifies() -> None:
@@ -89,8 +97,26 @@ def test_seal_runs_exactly_the_scripts_cost() -> None:
 def test_seal_refuses_a_script_that_would_outlive_its_budget() -> None:
     parent = read(LIVE)
     script = lift(parent.inputs, parent.header.step_count)
-    with pytest.raises(ValueError, match="max_cost"):
+    with pytest.raises(OverBudget, match="max_cost"):
         seal(script, parent, max_cost=10)
+
+
+def test_a_malformed_parent_does_not_raise_over_budget() -> None:
+    """`OverBudget` must mean exactly one thing: the script itself is too
+    expensive. `seal` also raises plain `ValueError` from
+    `SaveData.model_validate` on a malformed `parent.initial_state` --
+    `pydantic.ValidationError` IS a `ValueError` subclass -- and Task 7
+    depends on being able to tell the two apart: a malformed parent fails
+    on every round regardless of the script, so scoring it as `OverBudget`
+    would misreport "the editor kept proposing rubbish" instead of "this
+    parent trace does not boot"."""
+    parent = read(LIVE)
+    script = lift(parent.inputs, parent.header.step_count)
+    broken = parent.model_copy(update={"initial_state": {"npc_state": "nonsense"}})
+
+    with pytest.raises(ValueError) as excinfo:
+        seal(script, broken, max_cost=10_000)
+    assert not isinstance(excinfo.value, OverBudget)
 
 
 def test_an_action_free_script_still_runs_its_lead_in() -> None:
