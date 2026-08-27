@@ -772,12 +772,38 @@ Expected: (a) fails for BOTH traces on =script.cost() == step_count=
 measured justification for parametrizing over both traces rather than
 using the newer one alone. Capture both runs.
 
-- [ ] *Step 6: Gate and commit*
+- [ ] *Step 6: Pin the two new =patch_series_id= warnings*
 
-Run: =make check-fast= — expect *235 passed, 3 skipped, 9 warnings*.
+This file reads =walk_1234.tuxghost=, whose =patch_series_id= differs
+from the current build, so each of the two parametrized tests that read
+it emits ONE =UserWarning=. That is expected, but it must be *pinned*
+rather than absorbed into ambient noise. In =tests/conftest.py=: add
+="tests/test_optimize_schedule.py::"= to =_TRACKED_FILES= and add both
+nodeids to =_EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS= with a count of
+*1* each:
+
+#+begin_src python
+    "tests/test_optimize_schedule.py::test_lift_recovers_the_measured_shape[walk_1234-900-30-400-40]": 1,
+    "tests/test_optimize_schedule.py::test_lower_lift_round_trips_to_the_same_schedule[walk_1234-900-30-400-40]": 1,
+#+end_src
+
+Take the exact parametrized nodeids from
+=./.venv/bin/python -m pytest --collect-only -q tests/test_optimize_schedule.py=
+rather than typing them from this plan — pytest builds the id from the
+parameter values and a mismatch makes the tripwire's own reachability
+gate fail.
+
+The =claude_town_1234= rows do NOT warn (that fixture was recorded
+against the current =patches/=), so they get no entry, and the tripwire
+flags them if they ever start warning.
+
+- [ ] *Step 7: Gate and commit*
+
+Run: =make check-fast= — expect *235 passed, 3 skipped, 11 warnings*
+(9 + the two pinned above).
 
 #+begin_src bash
-git add tuxghost/optimize/ tests/test_optimize_schedule.py
+git add tuxghost/optimize/ tests/test_optimize_schedule.py tests/conftest.py
 git commit -m "feat: ActionScript, lift and lower -- the edit unit"
 #+end_src
 
@@ -1017,7 +1043,7 @@ succeeds and removes the last action.
 
 - [ ] *Step 6: Gate and commit*
 
-Run: =make check-fast= — expect *248 passed, 3 skipped, 9 warnings*.
+Run: =make check-fast= — expect *248 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/edits.py tests/test_optimize_edits.py
@@ -1045,7 +1071,8 @@ parents for reasons that have nothing to do with the edit.
 - Create: =tests/test_optimize_seal.py=
 
 *Interfaces:*
-- Consumes: =lift=/=lower=/=ActionScript= (Task 3),
+- Consumes: =lift=/=lower=/=ActionScript= (Task 3), =apply_edits=/=Delete=
+  (Task 4 -- used by this task's TESTS only, not by =seal= itself),
   =tuxghost.boot.boot_from_save=, =tuxghost.loop.install_schedule=/=run_steps=,
   =tuxghost.record.Recorder=, =tuxghost.digest.digest_of=/=state_of=,
   =tuxghost.determinism.seed_all=/=pin_clock=, =tuxghost.trace.Trace=.
@@ -1053,7 +1080,7 @@ parents for reasons that have nothing to do with the edit.
   - =CandidateResult= — dataclass with =trace: Trace=, =steps: int=,
     =final_state: dict[str, Any]=, =checkpoints: list[tuple[int, str]]=,
     =checkpoint_states: dict[int, dict[str, Any]]=.
-  - =seal(script: ActionScript, parent: Trace, *, checkpoint: int = 0, taints: Sequence[str] = (), model: str | None = None) -> CandidateResult=
+  - =seal(script: ActionScript, parent: Trace, *, checkpoint: int = 0, taints: Sequence[str] = (), model: str | None = None, max_cost: int | None = None) -> CandidateResult=
 
 - [ ] *Step 1: Write the failing tests*
 
@@ -1331,7 +1358,7 @@ a demonstration that did not occur.
 
 - [ ] *Step 6: Gate and commit*
 
-Run: =make check-fast= — expect *256 passed, 3 skipped, 9 warnings*.
+Run: =make check-fast= — expect *256 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/seal.py tests/test_optimize_seal.py
@@ -1528,7 +1555,7 @@ candidates tie, which is exactly the no-gradient failure. (b)
 
 - [ ] *Step 6: Gate and commit*
 
-Run: =make check-fast= — expect *263 passed, 3 skipped, 9 warnings*.
+Run: =make check-fast= — expect *263 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/objective.py tests/test_optimize_objective.py
@@ -1642,7 +1669,11 @@ def test_an_empty_proposal_stops_the_run() -> None:
         rounds=10, patience=10, max_rejections=1, max_cost=10_000,
     )
     assert result.stop_reason == "editor returned STOP"
-    assert len(result.rounds) == 2
+    # round 0 (parent) + round 1 (the accepted edit) + round 2 (the STOP,
+    # which IS appended before the break so the log records why it ended)
+    assert len(result.rounds) == 3
+    assert result.rounds[-1].index == 2
+    assert result.rounds[-1].rejected_reason == "STOP"
 
 
 def test_patience_stops_a_run_that_stops_improving() -> None:
@@ -1990,7 +2021,7 @@ Capture each.
 
 - [ ] *Step 7: Gate and commit*
 
-Run: =make check-fast= — expect *274 passed, 3 skipped, 9 warnings*.
+Run: =make check-fast= — expect *274 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/editors/ tuxghost/optimize/runner.py tests/test_optimize_runner.py
@@ -2262,7 +2293,7 @@ Also demonstrate the global-RNG test by changing =self._rng= to the
 
 - [ ] *Step 6: Gate and commit*
 
-Run: =make check-fast= — expect *280 passed, 3 skipped, 9 warnings*.
+Run: =make check-fast= — expect *280 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/editors/mutation.py tests/test_optimize_mutation.py
@@ -2512,7 +2543,7 @@ exception at construction.
 
 - [ ] *Step 6: Gate and commit*
 
-Run: =make check-fast= — expect *290 passed, 3 skipped, 9 warnings*.
+Run: =make check-fast= — expect *290 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/editors/replay.py tests/test_optimize_replay.py
@@ -2706,16 +2737,55 @@ def test_the_goal_reaches_the_prompt() -> None:
     assert "reach the shop" in str(client.calls[0]["messages"])
 
 
-def test_constructing_the_editor_does_not_import_anthropic() -> None:
+def test_construction_and_propose_never_reach_the_lazy_import() -> None:
     """`make check` installs no network SDK. The import is lazy, inside
-    `_ensure_client`, reached only from a real `propose` with no injected
-    client."""
-    import sys
+    `_ensure_client`, reached only from a real `propose` with NO injected
+    client -- so both of these must work with `anthropic` unavailable.
 
-    ClaudeEditor()
-    assert "anthropic" not in sys.modules or True  # see Step 6's real check
-    editor = ClaudeEditor(client=_StubClient(ANSWER))
-    editor.propose(SCRIPT, _candidate(), (0.0,))
+    Asserted by BLOCKING the import for the duration, not by inspecting
+    `sys.modules`: an earlier draft of this test wrote
+    `assert "anthropic" not in sys.modules or True`, which can never
+    fail. Step 6 runs the same block across the whole suite."""
+    import sys
+    from importlib.abc import MetaPathFinder
+
+    class Block(MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):  # type: ignore[no-untyped-def]
+            if fullname == "anthropic" or fullname.startswith("anthropic."):
+                raise ModuleNotFoundError(f"blocked: {fullname}")
+            return None
+
+    blocker = Block()
+    sys.meta_path.insert(0, blocker)
+    try:
+        ClaudeEditor()
+        ClaudeEditor(client=_StubClient(ANSWER)).propose(
+            SCRIPT, _candidate(), (0.0,)
+        )
+    finally:
+        sys.meta_path.remove(blocker)
+
+
+def test_a_missing_client_reaches_the_lazy_import_and_says_so() -> None:
+    """The companion control: with no client injected, `propose` MUST
+    reach the import. If it did not, the test above would pass for the
+    wrong reason -- because nothing ever tried."""
+    import sys
+    from importlib.abc import MetaPathFinder
+
+    class Block(MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):  # type: ignore[no-untyped-def]
+            if fullname == "anthropic" or fullname.startswith("anthropic."):
+                raise ModuleNotFoundError(f"blocked: {fullname}")
+            return None
+
+    blocker = Block()
+    sys.meta_path.insert(0, blocker)
+    try:
+        with pytest.raises(ModuleNotFoundError, match="anthropic"):
+            ClaudeEditor().propose(SCRIPT, _candidate(), (0.0,))
+    finally:
+        sys.meta_path.remove(blocker)
 
 
 def test_an_insert_index_beyond_the_script_is_the_loops_problem() -> None:
@@ -2960,7 +3030,7 @@ Expected: all pass. Record the count in the report.
 
 - [ ] *Step 7: Gate and commit*
 
-Run: =make check-fast= — expect *303 passed, 3 skipped, 9 warnings*.
+Run: =make check-fast= — expect *306 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/editors/claude.py tests/test_optimize_claude.py
@@ -3097,25 +3167,8 @@ def test_a_relative_trace_path_works(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
 
 
-@pytest.mark.parametrize(
-    "args,needle",
-    [
-        (["--trace", "/nonexistent.tuxghost"], "cannot read"),
-        (["--editor", "replay"], "requires --edits"),
-        (["--editor", "scripted"], "requires --edits"),
-        (["--target", "nonsense"], "--target"),
-        (["--target", "map.tmx:a,b"], "--target"),
-        (["--rounds", "0"], "--rounds"),
-        (["--patience", "0"], "--patience"),
-        (["--max-rejections", "0"], "--max-rejections"),
-        (["--max-cost", "0"], "--max-cost"),
-        (["--editor", "mutation"], "--seed"),
-    ],
-)
-def test_every_anticipated_precondition_exits_2(
-    tmp_path: Path, args: list[str], needle: str
-) -> None:
-    base = {
+def _base(tmp_path: Path) -> dict[str, str]:
+    return {
         "--trace": str(GOLDEN), "--editor": "mutation", "--seed": "7",
         "--objective": "reach-tile",
         "--target": "spyder_paper_town.tmx:11,16", "--rounds": "1",
@@ -3123,15 +3176,37 @@ def test_every_anticipated_precondition_exits_2(
         "--out": str(tmp_path / "o.tuxghost"),
         "--run-dir": str(tmp_path / "run"),
     }
-    for i in range(0, len(args), 2):
-        if args[i] == "--editor" and len(args) == 2:
-            base["--editor"] = args[i + 1] if i + 1 < len(args) else base["--editor"]
-        elif i + 1 < len(args):
-            base[args[i]] = args[i + 1]
-    if args == ["--editor", "mutation"]:
-        del base["--seed"]
-    flat = [x for k, v in base.items() for x in (k, v)]
-    proc = _run(*flat)
+
+
+#: (override, drop, expected stderr fragment). `override` replaces one
+#: flag's value; `drop` removes a flag entirely. Deliberately explicit --
+#: an earlier draft merged these with index arithmetic that was harder to
+#: read than the cases it covered, and a test whose own logic needs
+#: working out can pass for the wrong reason.
+REFUSALS = [
+    ({"--trace": "/nonexistent.tuxghost"}, None, "cannot read"),
+    ({"--editor": "replay"}, None, "requires --edits"),
+    ({"--editor": "scripted"}, None, "requires --edits"),
+    ({"--target": "nonsense"}, None, "--target"),
+    ({"--target": "map.tmx:a,b"}, None, "--target"),
+    ({"--rounds": "0"}, None, "--rounds"),
+    ({"--patience": "0"}, None, "--patience"),
+    ({"--max-rejections": "0"}, None, "--max-rejections"),
+    ({"--max-cost": "0"}, None, "--max-cost"),
+    ({"--checkpoint": "-1"}, None, "--checkpoint"),
+    ({}, "--seed", "--seed"),
+]
+
+
+@pytest.mark.parametrize("override,drop,needle", REFUSALS)
+def test_every_anticipated_precondition_exits_2(
+    tmp_path: Path, override: dict[str, str], drop: str | None, needle: str
+) -> None:
+    flags = _base(tmp_path)
+    flags.update(override)
+    if drop is not None:
+        del flags[drop]
+    proc = _run(*[x for k, v in flags.items() for x in (k, v)])
     assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
     assert needle in proc.stderr
 
@@ -3244,11 +3319,21 @@ def _optimize(args: argparse.Namespace) -> int:
         ("--patience", args.patience),
         ("--max-rejections", args.max_rejections),
         ("--max-cost", args.max_cost),
-        ("--checkpoint", args.checkpoint + 1),
     ):
         if value < 1:
             print(f"refused: {name} must be >= 1, got {value!r}", file=sys.stderr)
             return 2
+    # Checked separately, not folded into the loop above with an
+    # `args.checkpoint + 1` trick: 0 is a legal checkpoint (it means "do
+    # not sample"), so this bound is >= 0 and saying so plainly beats
+    # reusing a >= 1 loop by adding one.
+    if args.checkpoint < 0:
+        print(
+            f"refused: --checkpoint must be >= 0, got {args.checkpoint!r} "
+            "(0 means do not sample)",
+            file=sys.stderr,
+        )
+        return 2
 
     target = _parse_target(args.target)
     if target is None:
