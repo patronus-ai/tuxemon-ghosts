@@ -78,6 +78,13 @@ _TRACKED_FILES = (
     # gets no entry below -- the same asymmetry `test_golden.py` already
     # relies on.
     "tests/test_optimize_schedule.py::",
+    # No pinned entries below for this file either: it reads
+    # `claude_town_1234.tuxghost`, recorded against the current
+    # `patches/`, so it must warn ZERO times. Tracking it means a future
+    # seventh patch fails loudly here instead of the stale read joining
+    # ambient noise -- the `test_live_capture.py` precedent (task 5, S3
+    # plan).
+    "tests/test_optimize_seal.py::",
 )
 _EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS: dict[str, int] = {
     "tests/test_golden.py::test_golden_trace_still_reaches_its_recorded_digest": 1,
