@@ -58,10 +58,11 @@ divergences: only a difference in `initial_state` or `inputs` moves the
 exit code to 1.
 
 `agent` (drives a policy against a live session and records what it did,
-via `tuxghost.agent.runner.run_agent`) returns 0 or 2 ONLY, like `execute`
-above and for the identical reason: a recording has nothing to diverge
-FROM. Conflating "refused" with "diverged" here would be exactly the same
-defect the old CLI shipped -- an uncaught exception (e.g. a missing
+via `tuxghost.agent.runner.run_agent`) maps every precondition it can
+anticipate to 0 or 2, like `execute` above and for the identical reason:
+a recording has nothing to diverge FROM, so "refused" and "diverged" must
+never collide on the same exit code. Conflating them would be exactly the
+same defect the old CLI shipped -- an uncaught exception (e.g. a missing
 `--from-save` file) reports exit 1, indistinguishable from a real
 divergence, so every precondition `_agent`/`_agent_save_or_refuse` can
 detect is checked explicitly and mapped to exit 2 before anything can
@@ -71,10 +72,14 @@ every error that call can raise (`RateLimitError`, `APIConnectionError`,
 `AuthenticationError`, a missing/invalid API key, ...) derives from
 `anthropic.AnthropicError(Exception)`, not `ValueError`/`TypeError` --
 `_agent`'s `except (ValueError, TypeError)` boundary alone does NOT catch
-any of them. A second, import-guarded `except Exception` arm around the
-same `run_agent(...)` call re-raises anything that is not actually an
-`AnthropicError` (a genuine engine bug must stay a visible crash), and
-maps a real one to exit 2 with its own distinct message.
+any of them. A second `except Exception` arm, reachable only when
+`--policy claude` (final residuals, item 1), maps a real `AnthropicError`
+to exit 2 with its own distinct message and re-raises anything else. Exit
+1 remains possible, deliberately: a genuine internal engine invariant
+failure -- anything that is not one of the specific, anticipated
+precondition failures above -- must stay a visible crash rather than
+being laundered into a tidy refusal. "0 or 2 only" describes every path
+this module checks for, not a guarantee that nothing else can go wrong.
 """
 
 from __future__ import annotations
@@ -468,9 +473,13 @@ def _agent_save_or_refuse(args: argparse.Namespace) -> SaveData | None:
 def _agent(args: argparse.Namespace) -> int:
     """Record a trace by driving a policy against a live session.
 
-    Returns 0 or 2 only. Exit 1 means "diverged", and a recording has
-    nothing to diverge FROM -- see this module's docstring, which records
-    the earlier CLI defect that conflated the two.
+    Maps every anticipated precondition to 0 or 2. Exit 1 means
+    "diverged", and a recording has nothing to diverge FROM, so no
+    anticipated precondition failure may report it -- see this module's
+    docstring, which records the earlier CLI defect that conflated the
+    two. A genuine internal engine invariant failure still exits 1,
+    deliberately: that is a visible crash, not a precondition this
+    function can refuse.
     """
     import dataclasses
 
@@ -709,30 +718,36 @@ def _agent(args: argparse.Namespace) -> int:
         # the one code this module's docstring says `agent` must never
         # produce.
         #
-        # `anthropic` is imported LAZILY here, inside the handler, rather
-        # than unconditionally in `_agent` or at module scope: `make
-        # check` installs no network SDK, and `--policy scripted`/
-        # `replay` (everything the gate runs) never raise an
-        # `AnthropicError`, so this whole arm must stay reachable, and
-        # inert, without the package present.
-        #
-        # Deliberately NOT a bare `except Exception: return 2` in effect
-        # either: anything that is not, in fact, an `AnthropicError` is
-        # RE-RAISED immediately, as the visible crash a genuine internal
-        # engine invariant failure must stay -- the identical tradeoff
-        # the `except (ValueError, TypeError)` arm above already makes.
-        # No `except ImportError` guard around this import: `anthropic`
-        # cannot fail to import here in practice (constructing
-        # `ClaudePolicy` above already required it, and it is now cached
-        # in `sys.modules`), and catching-then-immediately-re-raising an
-        # exception that cannot occur would only be a no-op.
+        # Gated on `args.policy == "claude"` (final residuals, item 1):
+        # this `try` is shared by all three policies, but
+        # `anthropic.AnthropicError` can only ever originate from
+        # `ClaudePolicy.decide`, reachable only when `--policy claude`. An
+        # earlier version imported `anthropic` unconditionally inside this
+        # arm (to build the `isinstance` check below) with a comment
+        # claiming that import "cannot fail in practice" -- true only on
+        # the claude branch, but the arm is reachable from ALL three
+        # policies, and `make check`'s environment deliberately does not
+        # install `anthropic` at all. The result: any genuine, non-
+        # `ValueError`/`TypeError` crash out of `run_agent` on
+        # `--policy scripted`/`replay` (e.g. a real `AttributeError`
+        # engine-invariant failure, the same class this branch hit for
+        # real during Task 8) got its bare `raise` immediately superseded
+        # by `ModuleNotFoundError: No module named 'anthropic'` raised
+        # while handling it -- the wrong headline exception on exactly the
+        # path whose whole design intent is "a genuine engine invariant
+        # failure must stay a visible crash". Gating on the policy means
+        # `--policy scripted`/`replay` never enter this arm at all, so
+        # `anthropic` need not be importable for them, and the real
+        # exception re-raises unmodified via the bare `raise` below.
+        if args.policy != "claude":
+            raise
         import anthropic
 
         if not isinstance(exc, anthropic.AnthropicError):
             raise
         print(
-            f"refused: --policy claude call to the Anthropic API failed: "
-            f"{exc}",
+            f"refused: --policy {args.policy} call to the Anthropic API "
+            f"failed: {exc}",
             file=sys.stderr,
         )
         return 2

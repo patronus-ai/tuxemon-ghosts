@@ -345,10 +345,18 @@ first real run against a real teleport: the installed renderer does
 survive a map change, and =reset_renderer()= does not clobber it. The
 spec has been corrected to say so (Step 4 of this close-out).
 
-** The CLI's exit codes: 0 or 2 only, never 1
+** The CLI's exit codes: 0 or 2 for every anticipated precondition, 1 only for a genuine engine bug
 
-=tuxghost agent= never returns exit 1 — there is nothing for a recording
-to diverge *from*. Four separate exit-1 paths were found and closed
+=tuxghost agent= never returns exit 1 for anything it can anticipate —
+there is nothing for a recording to diverge *from*, so no precondition
+failure may report that code. A genuine internal engine invariant
+failure is deliberately the one exception: it still exits 1, a visible
+crash, rather than being laundered into a tidy "refused". (An earlier
+version of this heading claimed "0 or 2 only, never 1" outright, which
+its own next paragraph — "a genuine engine invariant failure stays a
+visible crash" — already contradicted; reworded so the headline matches
+the documented exception instead of being corrected by it two sentences
+later.) Four separate exit-1 paths were found and closed
 during Task 8: a dead =except ImportError= around =ClaudePolicy=
 construction (the import is lazy, so a missing =anthropic= would have
 escaped from deep inside =run_agent=); a =--policy replay= transcript
@@ -367,16 +375,62 @@ that call can raise (=RateLimitError=, =APIConnectionError=,
 =AuthenticationError=, a missing/invalid API key, ...) derives from
 =anthropic.AnthropicError(Exception)=, not =ValueError=/=TypeError= — the
 boundary above never caught any of them, so =--policy claude= alone
-among the three policies could still exit 1. A second, import-guarded
-=except Exception= arm around the same =run_agent(...)= call now
-re-raises anything that is not actually an =AnthropicError= (a genuine
-engine bug still crashes) and maps a real one to exit 2 with its own
-message. No committed test exercises =--policy claude= (it would require
-a live API call), so this was verified BY HAND: a fake =anthropic= module
-injected into =sys.modules= plus a stubbed =run_agent= that raises the
-fake =AnthropicError= — =_agent= returned 2 with the expected message; the
+among the three policies could still exit 1. A second =except Exception=
+arm around the same =run_agent(...)= call re-raises anything that is not
+actually an =AnthropicError= (a genuine engine bug still crashes) and
+maps a real one to exit 2 with its own message. No committed test
+exercises =--policy claude= (it would require a live API call), so this
+was verified BY HAND: a fake =anthropic= module injected into
+=sys.modules= plus a stubbed =run_agent= that raises the fake
+=AnthropicError= — =_agent= returned 2 with the expected message; the
 same stub raising a plain =RuntimeError= instead propagated uncaught, as
 a real bug should.
+
+*Final residuals fix (item 1)*: that arm originally imported =anthropic=
+UNCONDITIONALLY inside itself, on the claim that the import "cannot fail
+... in practice" — true only on the =--policy claude= branch, but the
+arm itself is reachable from all three policies, and =make check='s
+environment deliberately never installs =anthropic= at all. The real
+consequence: any genuine, non-=ValueError=/=TypeError= crash out of
+=run_agent= on =--policy scripted=/=replay= (e.g. a real
+=AttributeError= engine-invariant failure — the same class this branch
+hit for real during Task 8) had its bare =raise= immediately superseded
+by =ModuleNotFoundError: No module named 'anthropic'= raised while
+handling it — reproduced BY HAND with a stubbed =run_agent= raising
+=AttributeError= under =--policy scripted=, exit code still 1 and the
+original exception chained as the cause, but the headline exception
+wrong on exactly the path whose whole design intent is "a genuine engine
+invariant failure must stay a visible crash". Fixed by gating the whole
+arm on =args.policy == "claude"= instead of import-guarding it: the
+=isinstance(exc, anthropic.AnthropicError)= check, and the =import
+anthropic= it needs, is now only ever reached on the one policy that can
+actually raise one, so =--policy scripted=/=replay= never touch
+=anthropic= and the real exception re-raises unmodified. The refusal
+message and the false "cannot fail to import ... in practice" comment
+were corrected in the same pass. Re-verified BY HAND after the fix: the
+stubbed =AttributeError= under =--policy scripted= now propagates as
+itself, with no =ModuleNotFoundError= in the traceback.
+
+** The run directory, and one more refusal (final residuals, item 4)
+
+=tuxghost agent='s =--run-dir= holds three artifacts, not two: alongside
+=frames/NNNNN.png= and =decisions.jsonl= (one record per decision), the
+final whole-branch fix wave (M2+M3) added =run.json= — a single object
+with ~goal~, ~seed~, ~clock_epoch~, ~step_budget~, ~policy~, ~model~,
+~steps~, and ~stop_reason~. Nothing else in the run directory carries
+these: the goal is never IN any decision, seed/clock_epoch/policy/model
+are process arguments rather than part of any per-step record, and
+neither =break= path in ~run_agent~'s loop otherwise surfaces WHY a run
+ended. The spec and this doc previously inventoried only =frames/= and
+=decisions.jsonl=; both are now corrected to name =run.json= too.
+
+The same wave (M8) also added a fourth refusal to =agent='s exit-2 list:
+=--policy replay= given no =--model=. A replayed transcript carries no
+~model~ field of its own to read back (see =tuxghost/agent/replay.py='s
+record shape), so recording =ClaudePolicy='s unrelated default as
+=model= would misattribute provenance the trace format claims to be
+honest about; the CLI requires the caller to say which model the
+transcript actually is of instead of guessing.
 
 ** New test counts
 
@@ -397,6 +451,28 @@ green in the same run. The 9-warning count is unchanged from before the
 wave — parked minor 7's fix pins that count as a tripwire rather than
 reducing it (=tests/conftest.py=), so a future divergence in it fails
 the suite instead of hiding in "expected" noise.
+
+*Final residuals close-out*: a full, sequential =make check= (items 1-3
+above, plus item 4's doc-only changes) reconfirms *208 passed, 3
+skipped, 9 warnings* on the fast tier and *3 passed, 208 deselected, 1
+warning* on the slow tier — the baseline a contributor gets from a plain
+=make check-fast=/=make check=. This close-out's own gate run happened
+to export =TUXGHOST_RUN_SLOW=1= for the WHOLE invocation rather than
+scoping it to the =slow= target alone, which is a different, valid
+configuration, not a different result: with the three slow-marked tests
+no longer skipped in the fast =pytest= invocation, that run reports
+*211 passed, 10 warnings* (208 + 3, 9 + 1) instead of 208/3-skipped/9 —
+both numbers describe the same green tree. All gates (=ruff=,
+=lint-patched=, =mypy --strict= over 41 source files) green in the same
+run.
+
+This is also the first time the pinned tripwire's slow-tier entry
+(=tests/test_golden.py::test_long_horizon_trace_is_stable= — behind
+=TUXGHOST_RUN_SLOW=, never reached by =make check-fast=) has ever
+actually been evaluated: it ran, emitted exactly its pinned *1*
+=patch_series_id= warning, and the =pytest_sessionfinish= tripwire
+reported no mismatch. The pinned count for that entry is confirmed
+correct, not just assumed.
 
 ** Honest limits
 

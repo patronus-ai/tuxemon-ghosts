@@ -331,17 +331,30 @@ tuxghost agent --policy {scripted,replay,claude} --seed S --clock-epoch E
                --out trace.tuxghost --run-dir DIR
 #+end_example
 
-The run directory holds =frames/NNNNN.png= and =decisions.jsonl= (one
-record per decision: observation metadata, actions returned, agent notes,
-raw model response). A run is auditable afterwards without re-running it.
+The run directory holds =frames/NNNNN.png=, =decisions.jsonl= (one record
+per decision: observation metadata, actions returned, agent notes, raw
+model response), and =run.json= (final whole-branch fix wave, M2+M3): a
+single object with ~goal~, ~seed~, ~clock_epoch~, ~step_budget~,
+~policy~, ~model~, ~steps~, and ~stop_reason~ — the run-level facts
+=decisions.jsonl= has nowhere to carry (the goal is never IN any
+decision; seed/clock_epoch/policy/model are process arguments, not part
+of any per-step record) and the reason the run ended, which neither
+=break= path in ~run_agent~'s loop otherwise surfaces. A run is auditable
+afterwards without re-running it.
 
 *Exit codes follow the existing contract exactly* (=tuxghost/cli.py='s
 module docstring): 0 ran to completion, 2 refused — an unreadable or
 non-validating =--from-save=, a save missing ~npc_state.current_map~, a
-policy configuration that cannot be built. 1 is *never* returned by
-=agent=: there is nothing for a recording to diverge *from*, and
-conflating "refused" with "diverged" is a defect this CLI already fixed
-once and must not reintroduce. Path arguments are ~.resolve()~d
+policy configuration that cannot be built, or (final whole-branch fix
+wave, M8) =--policy replay= given no =--model=, since a transcript
+carries no ~model~ field of its own and recording an unrelated default
+would misattribute provenance. 1 is *never* returned by =agent= for any
+of these anticipated preconditions: there is nothing for a recording to
+diverge *from*, and conflating "refused" with "diverged" is a defect
+this CLI already fixed once and must not reintroduce. A genuine internal
+engine invariant failure is the deliberate exception — it still exits 1,
+a visible crash, not a precondition this command can refuse. Path
+arguments are ~.resolve()~d
 immediately after ~parse_args~, before any vendored-tuxemon bootstrap
 chdirs — the relative-path defect the old CLI shipped with, and the
 vacuous test that missed it, are both on the record in =CLAUDE.md=.

@@ -68,6 +68,24 @@ _EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS: dict[str, int] = {
 
 _patch_series_id_warning_counts: dict[str, int] = {}
 _executed_nodeids: set[str] = set()
+# All nodeids pytest actually COLLECTED this session, regardless of any
+# `-k`/`-m` deselection applied afterward -- collection happens before
+# that filtering, so an item deselected by `-k` still lands here, but an
+# item that no longer EXISTS (deleted or renamed) never does. This is
+# what lets the reachability check below (final residuals, item 3)
+# distinguish "this pinned test wasn't selected this run" from "this
+# pinned test is gone", the same distinction `tests/test_digest.py`'s
+# `test_exemptions_are_all_reachable_in_the_digested_tree` makes for
+# `EXEMPTIONS`.
+_collected_nodeids: set[str] = set()
+
+
+def pytest_itemcollected(item: pytest.Item) -> None:
+    _collected_nodeids.add(item.nodeid)
+
+
+def _file_of(nodeid: str) -> str:
+    return nodeid.split("::", 1)[0]
 
 
 def pytest_warning_recorded(
@@ -102,7 +120,6 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     fixture's own teardown had already run and asserted. `pytest_session
     finish` fires once, strictly after every item's `pytest_runtest_
     protocol` -- and therefore every warning flush -- has completed."""
-    del exitstatus
     mismatches = []
     seen = dict(_patch_series_id_warning_counts)
     for nodeid, expected in _EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS.items():
@@ -121,6 +138,25 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             f"{nodeid}: {got} unexpected patch_series_id warning(s) -- "
             f"not in the pinned list; a new stale-fixture read appeared"
         )
+    # Reachability gate (final residuals, item 3): unlike `EXEMPTIONS`
+    # (guarded by `tests/test_digest.py`'s
+    # `test_exemptions_are_all_reachable_in_the_digested_tree`), the
+    # pinned table above had no check that each entry still names a real
+    # test. Deleting or renaming a pinned test would silently leave a
+    # dead entry that `nodeid not in _executed_nodeids` reads as "not
+    # selected this run" forever -- nothing would ever flag it. A pinned
+    # nodeid whose FILE was collected this session but which itself was
+    # not is a dead entry, not a deselection; a pinned nodeid whose file
+    # was never collected at all (e.g. a narrow `pytest tests/test_x.py`
+    # invocation) is a genuinely out-of-scope run and must not be flagged.
+    collected_files = {_file_of(nodeid) for nodeid in _collected_nodeids}
+    for nodeid in _EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS:
+        if _file_of(nodeid) in collected_files and nodeid not in _collected_nodeids:
+            mismatches.append(
+                f"{nodeid}: pinned but was not collected at all this "
+                "session -- the test was deleted or renamed; update or "
+                "remove this pinned entry"
+            )
     if mismatches:
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         message = (
@@ -133,4 +169,13 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             reporter.write_line(message, red=True, bold=True)
         else:  # pragma: no cover -- always present under a normal pytest run
             print(message, file=sys.stderr)
-        session.exitstatus = 1
+        # Only overwrite a SUCCESSFUL incoming status (final residuals,
+        # item 3): this tripwire must never launder a real interrupt or
+        # pytest-internal error (a nonzero `exitstatus` already reported)
+        # into "this tripwire's failure" by clobbering it with a flat 1.
+        # The mismatch message above still prints either way, so a real
+        # crash during a run that ALSO happens to have a warning
+        # mismatch loses nothing -- only the exit code that a more
+        # serious status already claimed is left alone.
+        if not exitstatus:
+            session.exitstatus = 1
