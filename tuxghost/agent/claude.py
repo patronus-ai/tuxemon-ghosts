@@ -66,7 +66,20 @@ short sentence only when you believe you are done. An empty `actions` list
 ends the run.
 """
 
-_JSON_BLOCK = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+#: Deliberately captures ANY fenced content, not `\{.*?\}` -- a regex
+#: requiring the capture to itself start with `{` and end with `}` would
+#: make `parse_response`'s "the json block must be an object" check below
+#: unreachable dead code: any string of the form `{...}` that survives
+#: `json.loads` is, by JSON's own grammar, guaranteed to decode to a
+#: `dict`, so that branch could never fire (found while writing
+#: `tests/test_agent_claude.py::test_parse_response_raises_type_error_for_a_non_object_json_block`,
+#: which failed against the narrower regex with "no fenced json block"
+#: rather than the intended `TypeError` -- the regex, not the test, was
+#: wrong). This form still requires a model to answer with a bare
+#: `[...]`/`"..."`/number etc. inside the fence for that branch to fire,
+#: which the system prompt never asks for, but a wrong-shaped answer is
+#: exactly the case this check exists to refuse rather than crash on.
+_JSON_BLOCK = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 
 
 @dataclass
@@ -81,6 +94,19 @@ class ClaudePolicy:
         model: str = DEFAULT_MODEL,
         goal: str = "",
         window: int = 4,
+        # `client` is the injected `anthropic.Anthropic` instance (real or
+        # test stub, see `tests/test_agent_claude.py`'s `_StubClient`).
+        # `anthropic` is an optional dependency imported lazily inside
+        # `_ensure_client`, never at module scope (see the module
+        # docstring), so this type cannot be named as `anthropic.Anthropic`
+        # without either importing it unconditionally (defeats the point
+        # of the optional extra) or a `TYPE_CHECKING`-only import -- and
+        # even that would resolve to `Any` anyway under this project's
+        # `[[tool.mypy.overrides]] module = "anthropic.*"
+        # ignore_missing_imports = true` (pyproject.toml), which is what
+        # lets the gate typecheck this module without the package
+        # installed. Bare `Any` here is that deliberate tradeoff, not an
+        # omission.
         client: Any | None = None,
     ) -> None:
         if window < 1:
@@ -98,6 +124,9 @@ class ClaudePolicy:
     # -- prompt construction (pure) ------------------------------------
 
     def _image_block(self, png: bytes) -> dict[str, Any]:
+        # Returns one `anthropic` SDK message-content block: an untyped
+        # JSON dict, not a class -- see the constructor's `client`
+        # comment for why `anthropic`'s own types are not named here.
         return {
             "type": "image",
             "source": {
@@ -129,6 +158,10 @@ class ClaudePolicy:
         return "\n\n".join(parts)
 
     def build_messages(self, obs: Observation) -> list[dict[str, Any]]:
+        # `list[dict[str, Any]]` throughout this method is the `anthropic`
+        # SDK's untyped message-list wire shape (same `Any` as
+        # `_image_block`'s return type), not a shortcut around a type we
+        # could otherwise have named.
         messages: list[dict[str, Any]] = []
         for turn in self._turns[-self._window :]:
             content: list[dict[str, Any]] = (
@@ -199,10 +232,15 @@ class ClaudePolicy:
         self._turns.append(_Turn(frame_png=frame_png, raw=raw))
         del actions  # kept in the signature for callers/tests; history is
         # the raw answer, which already contains them verbatim.
+        del notes  # same: kept for callers/tests (`decide()` already
+        # applies `notes` to `self.notes` before calling this), but turn
+        # HISTORY only ever stores the raw answer, never notes on its own.
 
     # -- the policy ----------------------------------------------------
 
     def _ensure_client(self) -> Any:
+        # Returns the untyped injected/lazily-constructed `anthropic`
+        # client -- see the constructor's `client` comment for why `Any`.
         if self._client is None:
             import anthropic
 
