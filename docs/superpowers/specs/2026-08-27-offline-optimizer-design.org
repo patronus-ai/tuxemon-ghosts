@@ -1,0 +1,457 @@
+#+TITLE: S3 — offline trajectory optimizer for Tuxemon
+#+DATE: 2026-08-27
+#+STATUS: draft
+
+* What this is
+
+S3 gives an agent *hands but no eyes, and time to think*: it hands an
+editor an existing =.tuxghost= trace, lets it propose named edits to that
+trace's action list, recompiles and replays each candidate offline, and
+scores the state the candidate reached. The deliverable is a derived
+=.tuxghost= trace whose =provenance.recorder= is ~"offline-agent"~ — the
+format value S2 deliberately left unused — which =tuxghost verify=
+replays to the digest it recorded, using the S1 executor unchanged.
+
+Where S2 asks "what should I press *now*, given this frame", S3 asks "what
+was wrong with the *whole run*, given where it ended up". No game is
+running while the editor thinks; no frame is rendered at any point.
+
+What S3 is *not*: it does not decide whether the game was *completed*
+(that is S5, and it does not exist — see "The objective" for the proxy
+that stands in), it does not render ghosts (S4), it does not change the
+trace format, and it adds no seventh patch.
+
+* Evidence base
+
+Everything below was measured on this tree at =95912aa= (=make check=
+green, 213 passed / 3 skipped fast, 3 slow), not inferred.
+
+- *Both committed traces lift cleanly into press/release pairs.*
+  =walk_1234=: 80 edges → 40 pairs. =claude_town_1234=: 36 edges → 18
+  pairs. Zero unreleased buttons, zero releases without a press, zero
+  overlapping holds in either. The action-list edit unit is therefore not
+  hypothetical for the traces that exist — but see the two lossy cases
+  below, and "Known limitations" for what it refuses.
+- *A recompiled trace is byte-identical to its parent.* Lifting
+  =claude_town_1234= to 18 actions and replaying them through a fresh
+  recording run reproduced =trace.inputs= *exactly* and reached
+  =final_digest=
+  =bc717075d0ba16b8731ae89ddf92f8aa9ff3201429f6766c480f02cded5faf1f= —
+  the digest the live model's run recorded. This is the load-bearing
+  claim of the whole design and it was probed before this spec was
+  written, not after.
+- *=lift= needs =step_count=, not just the edges.* Two quantities leave no
+  edge behind at all:
+
+  | trace | =step_count= | lead-in before first press | tail after last release |
+  |-------+--------------+----------------------------+-------------------------|
+  | =claude_town_1234= | 442 | 0 | 10 |
+  | =walk_1234= | 900 | *30* | *400* |
+
+  400 of =walk_1234='s 900 steps are trailing settle, and 30 more precede
+  its first press. A naive =lift= over the edge list alone produced an
+  action list costing *432* steps for a *442*-step trace — and the
+  replay's digest matched anyway, because the ten dropped steps changed
+  nothing that had not already settled. That near-miss is this project's
+  own attractor lesson (see =docs/STATUS.org=, "Settled end states cannot
+  detect a perturbation in this game") landing on S3 directly: *the digest
+  cannot be trusted to catch a dropped tail*. Hence the =ActionScript=
+  shape below and the identity control in Validation.
+- *=read()= neither sorts nor validates input ordering.* Canonical
+  same-step edge order is a WRITER-side convention held by
+  =Recorder.finish= (=inputs=sorted(self._inputs)=) and
+  =tuxghost.agent.runner._add_edge='s per-step sort; =tuxghost/trace.py='s
+  reader does neither. A hand-edited trace with unsorted same-step inputs
+  would replay in file order, whatever that is. *S3 therefore never writes
+  a trace file directly* — every candidate is compiled through those two
+  writers.
+- *=run_steps= exposes a per-step hook*, called with the step index
+  *before* =client.update=, and =tuxghost.execute.execute= uses it for
+  checkpoint digests while deliberately skipping =i == 0=
+  (=if checkpoint and i and i % checkpoint == 0=). S3 seals candidates
+  through the same hook, so its telemetry and =verify='s share one
+  convention by construction.
+- *=state_of= exposes position directly.* Its top-level keys are =map=,
+  =tile_pos=, =facing=, =state_stack=, plus the three digested subtrees
+  (=npc_state=, =world_state=, =persistent_npc_state=). A positional
+  objective reads recorded fields; it needs no new introspection.
+- *=run_agent= cannot express a lead-in.* Its scripted path starts the
+  first action at step 0, so =walk_1234='s 30-step lead-in has no
+  representation there. This is why S3 composes its own =seal()= rather
+  than calling =run_agent= — see the next section.
+
+* Architecture: no new stepping loop, no new format code, no seventh patch
+
+Five units below, each independently testable, plus the editors — which
+get their own section because there are four of them.
+
+** =tuxghost/optimize/schedule.py= — =ActionScript=, =lift=, =lower=
+
+#+begin_src python
+@dataclass(frozen=True)
+class ActionScript:
+    """A trace's inputs as editable actions.
+
+    Invariant: `lead_in + sum(a.hold + a.settle for a in actions) ==
+    step_count`. Both ends matter: `lead_in` is the wait before the first
+    press and the last action's `settle` carries the trailing steps, and
+    NEITHER appears in `Trace.inputs` (measured: walk_1234 has 30 and
+    400 of them).
+    """
+    lead_in: int
+    actions: tuple[Action, ...]
+#+end_src
+
+- =lift(inputs, step_count) -> ActionScript= pairs press/release edges,
+  assigns each inter-action gap to the preceding action's =settle=, the
+  leading gap to =lead_in=, and the remainder to the last action's
+  =settle=. It *refuses loudly* — never reinterprets — on an unreleased
+  button, a release without a press, or overlapping holds.
+- =lower(script) -> InputSchedule= walks the actions from =lead_in=,
+  inserting each press and release through
+  =tuxghost.agent.runner._add_edge=, which is already the canonical
+  writer (append-not-assign, per-step sort). Not a reimplementation:
+  =_add_edge= moves to =tuxghost/optimize/schedule.py= and the runner
+  imports it from there, so there stays exactly one edge writer in the
+  project.
+
+Step indices are *recomputed* by =lower=, never edited by an editor. That
+structurally removes the off-by-one class this project keeps finding: an
+insert cannot corrupt everything after it, because nothing after it holds
+an absolute index in the first place.
+
+** =tuxghost/optimize/edits.py= — the edit vocabulary
+
+Three operations over the action list, each carrying an index and
+validated against the list it is applied to:
+
+| =Insert(index, action)= | insert before =index=; =index == len= appends |
+| =Delete(index)= | remove one action |
+| =Replace(index, action)= | swap one action |
+
+An out-of-range index, or an =Action= that fails
+=tuxghost.agent.types.validate_actions=, is a =ValueError=/=TypeError= —
+the same two-exception taxonomy =actions_from_json= and
+=validate_actions= already use, so the loop's boundary can be as narrow
+as =tuxghost.cli._agent='s. =lead_in= is *not* editable in v1; see "Open
+questions".
+
+** =tuxghost/optimize/seal.py= — compile, run, record
+
+=seal(script, parent, *, checkpoint, taints) -> CandidateResult= composes
+four existing primitives and adds nothing:
+
+1. =boot_from_save(parent.initial_state, seed=…, clock_epoch=…)= — the
+   candidate inherits the parent's start, seed and epoch verbatim. A
+   candidate that changed any of them would not be a candidate for the
+   same problem.
+2. =install_schedule(client, lower(script))=.
+3. =run_steps(client, script.cost(), hook=…)= with =execute='s checkpoint
+   hook, and every edge fed to =Recorder.observe=.
+4. =Recorder(...).finish(step_count=script.cost())=.
+
+=CandidateResult= carries the sealed =Trace=, =steps=, =final_state=, the
+=(step, digest)= checkpoint sequence, and the =state_of= snapshots at
+those steps. Nothing else. No frames.
+
+*Why not =run_agent=.* An earlier draft of this design called a candidate
+"exactly =run_agent= with a =ScriptedPolicy= holding every action". That
+is wrong for any trace with a nonzero =lead_in= — =run_agent= starts its
+first action at step 0 — which is 1 of the 2 traces this project has
+committed. =seal()= is a ~20-line composition of primitives that already
+exist and are already tested; the pattern is the one
+=tests/test_golden.py::test_golden_trace_round_trips_through_record_execute_record=
+already assembles by hand. It is not a second stepping loop: =run_steps=
+is *the* loop, and =Recorder= is *the* writer.
+
+A hazard =seal()= owns: =run_agent='s truncation guard (which declines to
+*start* an action that would overrun the budget) does not apply here
+because =seal()= sets the budget to the script's exact cost — but it must
+=assert result.steps == script.cost()= anyway, because a silent clip
+would be scored as if it were the edit.
+
+** =tuxghost/optimize/objective.py=
+
+#+begin_src python
+class Objective(Protocol):
+    def score(self, candidate: CandidateResult) -> tuple[float, ...]: ...
+#+end_src
+
+*A tuple, compared lexicographically, higher is better.* Not a bare
+=float=: any objective mixing "did it get there" with "how fast" into one
+number needs an invented weighting constant, and this project has no
+business inventing one. Tuple comparison gives lexicographic priority for
+free and a single-criterion objective returns a 1-tuple. The loop
+validates that the tuple length is stable across rounds — a length that
+changes mid-run is a bug, not a tie-break.
+
+*The one built-in: =ReachTile(map_name, tile)=*, scoring
+
+#+begin_src python
+(0.0 if state["map"] == map_name else -1.0,   # on the right map at all
+ -manhattan(state["tile_pos"], tile),          # how close
+ -float(candidate.steps))                      # tie-break: fewer is better
+#+end_src
+
+The middle term earns its place: a binary reached/didn't objective gives
+=MutationEditor= *nothing to climb*, every failing candidate scores
+identically, the search degenerates to a random walk, and a "the
+optimizer converges" test would be measuring luck. Distance is a
+gradient.
+
+=ReachTile= is openly a proxy. It says nothing about whether the *game*
+progressed, which is exactly where S5 takes over; S5 supplies its own
+=Objective= and nothing above changes.
+
+** =tuxghost/optimize/runner.py= — the loop
+
+#+begin_src python
+def optimize(
+    parent: Trace, editor: Editor, objective: Objective, *,
+    rounds: int, patience: int, checkpoint: int,
+) -> OptimizeResult: ...
+#+end_src
+
+Round /n/: the editor proposes edits from the current best script and its
+=CandidateResult= and score → apply → =seal= → score → keep if strictly
+better. Stops on the =rounds= cap, on =patience= (K rounds with no
+improvement), or when the editor returns an empty edit list, which means
+STOP — reusing S2's =STOP= convention rather than inventing a second one.
+
+Round 0 is the *parent itself*, sealed and scored, so "did anything
+improve" is answered against a measured baseline rather than the parent's
+own recorded header.
+
+An editor is untrusted input. A proposal that fails validation is a
+*rejected round*: logged with its reason, patience incremented, loop
+continues — one malformed answer must not kill a 20-round run.
+=max_rejections= consecutive rejected rounds stops the run with
+=stop_reason = "editor rejected N rounds consecutively"= rather than
+burning the whole budget silently. It is a required argument in v1, like
+=rounds= and =patience=; no default is invented here.
+
+* Editors
+
+#+begin_src python
+class Editor(Protocol):
+    def propose(
+        self, script: ActionScript, candidate: CandidateResult,
+        score: tuple[float, ...],
+    ) -> Sequence[Edit]: ...
+#+end_src
+
+- *=ScriptedEditor(rounds_of_edits)=* — a fixed list of edit-lists, one
+  per round. Drives every loop test in the gate: no network, no model, no
+  key. Straight from =ScriptedPolicy='s precedent.
+- *=MutationEditor(seed)=* — deliberately dumb: pick an index, apply one
+  of {nudge =hold=, nudge =settle=, swap =button=, insert, delete},
+  generating only in-range values by construction so =validate_actions=
+  never has to catch it. *It draws from its own =random.Random(seed)=
+  instance, never the global module RNG.* =tuxghost.determinism.seed_all=
+  pins the global RNG *for the game*; an editor drawing from it would
+  perturb the engine's own random stream and change the very thing being
+  scored. This project already replaced the engine's only
+  =random.Random= INSTANCE in patch 0002 because instance-vs-global is
+  exactly the distinction that bites here.
+- *=ReplayEditor(transcript)=* — replays a recorded optimization's edits
+  round by round and, like =ReplayPolicy=, refuses to loop when
+  exhausted. This is what makes an LLM-driven optimization auditable
+  after the fact.
+- *=ClaudeEditor(model)=* — gets the telemetry as text and returns edits
+  as one fenced JSON block, reusing =ClaudePolicy='s fence discipline and
+  exception taxonomy. Two differences pinned now: *no images at all*, so
+  a round is cheap; and =MAX_TOKENS= must go well above =ClaudePolicy='s
+  1024, because an edit list plus reasoning is much larger than a single
+  action. The live capture measured 1024 sufficient *for one action*,
+  which is not evidence for this.
+
+*Determinism, bounded.* Scripted, Mutation and Replay are fully
+reproducible: same seed and same parent ⟹ byte-identical winning trace,
+and that is a gate test rather than a claim. =ClaudeEditor= is not
+reproducible — model sampling is not determinism — which is the entire
+reason =ReplayEditor= exists, the same pairing S2 has for
+=ClaudePolicy=/=ReplayPolicy=.
+
+*The baseline rule.* No claim that =ClaudeEditor= optimizes well may be
+made except against =MutationEditor= at the same round budget, the same
+parent and the same objective. An LLM editor with no control to beat is
+precisely the "green but proves nothing" trap this project has already
+been burned by six times.
+
+* Provenance and the derived trace
+
+The derived trace is a normal v1 trace. *No format change.*
+
+- =provenance.recorder = "offline-agent"= — the value S2's spec
+  explicitly reserved for "S3's offline optimizer, which is the thing
+  that name describes".
+- =provenance.model= — the model id for =ClaudeEditor=, =None= otherwise.
+- =provenance.taints= carries the lineage as one entry naming the parent
+  by =final_digest=, the editor, and the round count, e.g.
+  ~"derived by offline-agent (mutation, seed 7) from parent bc717075… over 12 rounds"~.
+
+Lineage lives in =taints= rather than a new header field because
+=taints= already exists, =Recorder= already writes it, and
+=tuxghost/cli.py='s =compare= already surfaces taints as findings. It
+also follows this project's own precedent: the =walk_1234.digest= sidecar
+was deleted for being "a second committed artifact that could only ever
+drift OUT of sync". The cost is accepted and stated: lineage is a string,
+so nothing can mechanically walk a chain of derived traces, and S4 would
+have to parse prose to render a lineage tree. If that becomes real, it is
+a v2 header field, argued then.
+
+* CLI
+
+#+begin_src bash
+tuxghost optimize --trace PARENT \
+  --editor {scripted,mutation,replay,claude} \
+  [--seed N] [--edits FILE] [--model M] \
+  --objective reach-tile --target MAP:X,Y \
+  --rounds N [--patience K] [--checkpoint N] \
+  --out OUT --run-dir DIR
+#+end_src
+
+Same exit-code contract as =agent=: *0 or 2 for every anticipated
+precondition; 1 is reserved for a genuine engine bug.* Like =agent=,
+=optimize= has nothing to diverge *from*, so no precondition failure may
+report 1. Anticipated refusals (exit 2): a parent trace that will not
+=lift=; =--editor scripted/replay= without =--edits=; =--editor replay=
+without =--model= (the same misattribution argument as =agent='s); a
+=--target= that does not parse; =rounds < 1=; a missing =anthropic= SDK.
+
+The =anthropic= import stays *gated on =--editor claude=*, exactly the
+residual fix that landed in =61f63aa= — the other three editors never
+touch it, so a genuine engine crash on =--editor mutation= cannot have
+its traceback replaced by =ModuleNotFoundError=.
+
+*Artifacts.* The winning trace at =--out=. The run dir gets
+=optimize.jsonl= (one record per round: edits, score tuple, steps,
+digest, accepted/rejected and why) and =run.json= (parent digest,
+objective and target, editor, *editor* seed — the game seed is the
+parent's and is not S3's to choose — rounds, patience, max_rejections,
+best round, stop reason). No frames — S3 renders nothing.
+
+=--objective reach-tile= is the only accepted value in v1; there is
+exactly one built-in objective and the flag exists so a second one does
+not have to change the CLI's shape. =--edits FILE= is JSONL, one line per
+round, each line a JSON list of edit objects
+(=[{"op": "replace", "index": 3, "action": {...}}]=) — the same
+line-per-decision shape =--policy scripted= and =--policy replay= already
+use.
+
+* Validation
+
+*The trap named first.* S2 measured that grid movement makes a settled
+tile an attractor: a change to *when* something happens but not *where*
+it ends is invisible to a final-digest comparison. For S3 this is
+sharper, because it means *"the optimizer improved the trace" can never
+be measured by the final digest* — two different routes ending on the
+same tile hash identically. The burden falls on =steps= and the
+per-checkpoint digest *sequence*, and every convergence test compares
+round-by-round score sequences rather than only the final best. The
+432-vs-442 near-miss in "Evidence base" is this exact failure caught
+before implementation started.
+
+Each test below is to be *demonstrated to fail* against the defect it
+pins, with real before/after output in its task report — per =CLAUDE.md=,
+an assertion that happens to be true today is not a regression test.
+
+1. *The alignment test, first, before any other S3 code.*
+   =run_agent(digest_every=N)= and =execute(checkpoint=N)= over the same
+   trace must produce identical =(step, digest)= sequences. Their step
+   conventions were aligned by hand and *nothing asserts they agree*.
+   S3 does not depend on this as heavily as an earlier draft assumed
+   (=seal()= uses =execute='s hook directly), but S2's =run_agent= traces
+   are S3's *parents*, so a disagreement would still mean S3 optimizes
+   against telemetry nobody else reproduces. Shown to fail by shifting
+   one convention a step.
+2. *=lower(lift(inputs, step_count))= reproduces =inputs=*, and
+   =lead_in + cost == step_count=, *for both committed traces*. Both,
+   not one: the live capture has =lead_in == 0=, so a test using only it
+   would pass against a =lift= that drops lead-ins entirely — which is
+   the bug the first probe actually had.
+3. *=lift= refusals* — unreleased button, release without press,
+   overlapping holds. Three constructed traces, three loud refusals, no
+   silent reinterpretation.
+4. *No-op identity control* — an empty edit list must reproduce the
+   parent's =inputs=, =final_digest= *and* =step_count=. All three: the
+   first probe matched inputs and digest while silently dropping 10 real
+   steps.
+5. *Derived-trace validity* — =verify(derived) == 0=, =recorder ==
+   "offline-agent"=, and a taint naming the parent digest and round
+   count.
+6. *=seal()= refuses a clipped candidate.* Note the input cannot be
+   made inconsistent from outside — =seal()= derives the budget FROM the
+   script, so =cost= and =step_count= agree by construction. The
+   demonstration is therefore a mutation of =seal()= itself (pass
+   =script.cost() - 1=): the assertion must fire rather than a
+   one-step-short run being scored as if it were the edit. Stated this
+   way deliberately, because "construct a disagreeing script" — an
+   earlier draft of this item — describes a test nobody can write.
+7. *Convergence and reproducibility* — =MutationEditor= at a fixed seed
+   improves the score *sequence* on a fixed parent and =ReachTile=, and
+   two runs at the same seed produce byte-identical winners.
+   Demonstrated to fail against a *no-op editor*: if the test passes
+   with an editor that proposes nothing, it was measuring the harness.
+8. *Rejection path* — an invalid proposal is a logged rejected round,
+   not a crash; K consecutive rejections stops with the documented
+   reason.
+9. *=ReachTile= discrimination* — closer beats farther, wrong map loses
+   to any same-map candidate, fewer steps breaks ties.
+10. *=ClaudeEditor= parse path* — stub-client tests only; no live call in
+    the gate, and =make check= must still pass with =anthropic= absent
+    (verifiable the way the live-capture tests were: a =sys.meta_path=
+    finder that raises for it).
+11. *CLI exit codes* — every anticipated refusal above returns 2, driven
+    as a real subprocess, since the in-process suite cannot satisfy
+    =scaled_context()='s first-context precondition.
+
+Anything long-running goes behind the existing =slow= marker. =mypy
+--strict=, =ruff= at zero warnings and =make lint-patched= all block, as
+today.
+
+* Known limitations, stated up front
+
+- *The objective is a proxy.* =ReachTile= measures position, not
+  progress. Nothing in S3 knows what "finishing Tuxemon" means; that is
+  S5's whole job, and a half-scorer here would be worse than none.
+- *=manhattan= across maps is meaningless*, which is why the map term
+  leads. A candidate that wanders onto a neighbouring map scores below
+  every same-map candidate however physically close it ends. Deliberate
+  — a trace that left the map has broken the thing being optimized — but
+  it does mean =ReachTile= cannot reward a route that legitimately passes
+  *through* another map. Such a target needs a state predicate, not a
+  tile.
+- *Traces with overlapping button holds are refused, not supported.*
+  Neither committed trace has any, but a future human-recorded one could,
+  and S3 will refuse it loudly rather than pick an interpretation.
+- *=lead_in= is not editable in v1.* It is preserved exactly; no edit
+  operation touches it. A run whose only problem is starting too early
+  cannot be fixed by S3 as specified.
+- *=state_stack= is names only*, so an optimizer cannot tell a won battle
+  from a lost one except indirectly through =npc_state.monsters= HP.
+  Combat internals have no serializer seam (see =docs/STATUS.org=).
+- *=world_state= is still exactly two fields*
+  (=factions_manager=, =menu_flags=), so a world-state objective would
+  have almost nothing to read. S1's widening commitment never shipped.
+- *=ClaudeEditor= is unreproducible by construction.* =ReplayEditor= is
+  the mitigation, not a fix.
+- *One machine.* Same caveat S1 and S2 carry: macOS 26.6.1 arm64, one
+  Python, one SDL build.
+
+* Open questions
+
+- *Should =lead_in= become editable?* Keeping it fixed is simpler and
+  covers the traces that exist. A future "start sooner" objective would
+  need it, and adding it later is a new =Edit= variant, not a
+  restructuring — so v1 leaves it out.
+- *Should =_add_edge= really move to =tuxghost/optimize/schedule.py=?*
+  The alternative is S3 importing it from =tuxghost.agent.runner=, which
+  puts an optimizer dependency on the agent harness for one function.
+  Moving it keeps one edge writer with no cross-subsystem import; the
+  cost is touching an S2 file. Decide during planning, with the
+  =lint-patched=/=mypy= gates as the check either way.
+- *How many rounds is a realistic default?* Unmeasured. =rounds= and
+  =patience= are required arguments in v1 rather than defaults invented
+  here; the implementation measures a sensible pair on =ReachTile= and
+  records the number in =docs/=.
