@@ -67,6 +67,30 @@ def test_edits_from_json_refuses_an_insert_without_an_action() -> None:
         edits_from_json([{"op": "insert", "index": 0}])
 
 
+def test_edits_from_json_refuses_a_non_object_edit_item() -> None:
+    """A JSON-list item that is not itself an object (e.g. a bare int)
+    is a shape error, not a value error -- and the message names WHICH
+    item, so a future change that drops the position is caught too."""
+    with pytest.raises(TypeError, match=r"edit 0 must be an object"):
+        edits_from_json([1, 2, 3])
+
+
+def test_edits_from_json_refuses_a_malformed_nested_action() -> None:
+    """`insert`/`replace`'s nested `action` is validated by
+    `actions_from_json` -- the same function a live model's answer goes
+    through (Task 10's `ClaudeEditor` reuses this same `edits_from_json`)
+    -- so a non-object action (a bare string, here) is refused with a
+    `TypeError`, not silently accepted or misparsed.
+
+    `actions_from_json` reports the malformed action's position relative
+    to the single-item list `_one` hands it, not the edit's position in
+    the round, so this deliberately matches only on the part of the
+    message that is actually correct ("must be an object"), not on the
+    index -- see the task-9 review's Minor, left unfixed on purpose."""
+    with pytest.raises(TypeError, match=r"must be an object"):
+        edits_from_json([{"op": "insert", "index": 0, "action": "nope"}])
+
+
 def test_replay_returns_each_round_in_order(tmp_path: Path) -> None:
     path = _write(tmp_path, [
         [{"op": "delete", "index": 0}],
