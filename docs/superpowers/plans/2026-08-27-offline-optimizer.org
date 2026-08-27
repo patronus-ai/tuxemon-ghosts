@@ -57,6 +57,12 @@ Every task's requirements implicitly include this section.
   re-converged and a final-digest check read them as identical.
 - *Do not run two full test suites concurrently* — they race on
   =~/.tuxemon/cache/l18n/*.mo=, which has been corrupted this way before.
+- *Every projected test count in this plan is a PROJECTION, recomputed from
+  Task 3's measured 232.* They are derived by counting test functions in this
+  plan's own prose, and Task 3 proved that counting unreliable (16 predicted,
+  13 real — the prose miscounted, no test was missing). Count the tests you
+  actually add, report the measured number, and treat a mismatch as
+  information to investigate — never as a number to quietly overwrite.
 - Python is =./.venv/bin/python=. The =anthropic= extra IS currently
   installed in this venv (the live capture needed it); the gate must
   still pass with it absent, verified the way Task 10 describes.
@@ -624,6 +630,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from itertools import pairwise
 
 from tuxghost.agent.types import Action
 from tuxghost.loop import PRESSED, RELEASED, InputSchedule, add_edge
@@ -692,7 +699,10 @@ def lift(
         )
 
     pairs.sort()
-    for (p1, b1, r1), (p2, b2, _r2) in zip(pairs, pairs[1:]):
+    # `itertools.pairwise`, not `zip(pairs, pairs[1:])`: ruff's RUF007
+    # forbids the zip form, and this project's lint gate blocks at zero
+    # warnings. Same successive pairs either way.
+    for (p1, b1, r1), (p2, b2, _r2) in pairwise(pairs):
         if p2 < r1:
             raise ValueError(
                 f"overlapping holds: button {b1} is held [{p1}, {r1}] "
@@ -767,7 +777,9 @@ git status --short tuxghost/optimize/schedule.py
 #+end_src
 
 Expected: (a) fails for BOTH traces on =script.cost() == step_count=
-(=432 != 442= and =870 != 900=). (b) fails for =walk_1234= ONLY
+(measured =432 != 442= and =500 != 900=; the =870= figure belongs to
+mutation (b), not (a) — an earlier draft of this line misattributed it).
+(b) fails for =walk_1234= ONLY
 (=lead_in== =0 != 30=) and *passes* for =claude_town_1234= — which is the
 measured justification for parametrizing over both traces rather than
 using the newer one alone. Capture both runs.
@@ -799,7 +811,7 @@ flags them if they ever start warning.
 
 - [ ] *Step 7: Gate and commit*
 
-Run: =make check-fast= — expect *235 passed, 3 skipped, 11 warnings*
+Run: =make check-fast= — expect *232 passed, 3 skipped, 11 warnings*
 (9 + the two pinned above).
 
 #+begin_src bash
@@ -1043,7 +1055,7 @@ succeeds and removes the last action.
 
 - [ ] *Step 6: Gate and commit*
 
-Run: =make check-fast= — expect *248 passed, 3 skipped, 11 warnings*.
+Run: =make check-fast= — expect *245 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/edits.py tests/test_optimize_edits.py
@@ -1358,7 +1370,7 @@ a demonstration that did not occur.
 
 - [ ] *Step 6: Gate and commit*
 
-Run: =make check-fast= — expect *256 passed, 3 skipped, 11 warnings*.
+Run: =make check-fast= — expect *253 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/seal.py tests/test_optimize_seal.py
@@ -1555,7 +1567,7 @@ candidates tie, which is exactly the no-gradient failure. (b)
 
 - [ ] *Step 6: Gate and commit*
 
-Run: =make check-fast= — expect *263 passed, 3 skipped, 11 warnings*.
+Run: =make check-fast= — expect *260 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/objective.py tests/test_optimize_objective.py
@@ -2021,7 +2033,7 @@ Capture each.
 
 - [ ] *Step 7: Gate and commit*
 
-Run: =make check-fast= — expect *274 passed, 3 skipped, 11 warnings*.
+Run: =make check-fast= — expect *271 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/editors/ tuxghost/optimize/runner.py tests/test_optimize_runner.py
@@ -2293,7 +2305,7 @@ Also demonstrate the global-RNG test by changing =self._rng= to the
 
 - [ ] *Step 6: Gate and commit*
 
-Run: =make check-fast= — expect *280 passed, 3 skipped, 11 warnings*.
+Run: =make check-fast= — expect *277 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/editors/mutation.py tests/test_optimize_mutation.py
@@ -2543,7 +2555,7 @@ exception at construction.
 
 - [ ] *Step 6: Gate and commit*
 
-Run: =make check-fast= — expect *290 passed, 3 skipped, 11 warnings*.
+Run: =make check-fast= — expect *287 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/editors/replay.py tests/test_optimize_replay.py
@@ -3030,7 +3042,7 @@ Expected: all pass. Record the count in the report.
 
 - [ ] *Step 7: Gate and commit*
 
-Run: =make check-fast= — expect *306 passed, 3 skipped, 11 warnings*.
+Run: =make check-fast= — expect *301 passed, 3 skipped, 11 warnings*.
 
 #+begin_src bash
 git add tuxghost/optimize/editors/claude.py tests/test_optimize_claude.py
