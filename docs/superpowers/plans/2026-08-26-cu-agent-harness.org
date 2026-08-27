@@ -2809,6 +2809,80 @@ limits — model sampling is not determinism, rendered pixels are an
 unmeasured cross-platform surface, and =--goal= has no evaluator because
 scoring is S5. Move S2 out of "Next subsystem" and leave S3/S4/S5 there.
 
+*Record these measured facts specifically.* Each was discovered during
+implementation, each cost real effort to establish, and each is the kind
+of thing the next person will otherwise rediscover the hard way. Do not
+paraphrase them into vagueness — the numbers are the point.
+
+1. *Two S1 defects were found and fixed by S2's work, neither reachable
+   by S1's own 131-test suite.*
+   - An unresolvable =npc_state.current_map= escaped as an uncaught
+     =OSError=, so =verify()= raised instead of returning its documented
+     exit 2, and the CLI would have reported exit 1 ("diverged") for a
+     refusal. Now =resolve_map_asset= mirrors the engine loader's own
+     leniency (=map/loader.py= stems the name and re-appends =.tmx=) and
+     requires an existing =.tmx= FILE, so =""=, ="."= and ="../db"= are
+     refusals rather than directory hits.
+   - A player restored by =boot_from_save= was never registered on
+     =client.npc_manager= and never movement-unlocked, so it *could not
+     move at all*. Upstream's own =load_game.py= re-teleports after
+     =load_state= precisely to trigger those side effects; =boot_from_save=
+     restores directly, so nothing did. The two calls must stay AFTER
+     =push_state=, because =change_map= runs =_clear_npcs()= synchronously
+     and would wipe an earlier registration.
+
+2. *Why S1's suite could not have caught the second one*: the committed
+   golden trace's 80 inputs are ALL button 64 (=A=). Despite its name,
+   =walk_1234.tuxghost= never presses a direction, so no existing test
+   could detect a movement regression. Worth stating plainly — it bounds
+   what "the suite is green" means for anything movement-related.
+
+3. *The digest's measured blind spot.* On the =paper_town= fixture, 600
+   idle ticks leave =state_of()= BYTE-IDENTICAL. =state_of= covers map,
+   tile_pos, facing, state_stack (NAMES only), npc_state, world_state and
+   persistent_npc_state; none advances on an idle =client.update(dt)=.
+   What an idle tick *does* change, all invisible: the harness's own
+   scheduled-input step cursor; the map renderer's per-step animation
+   clocks (=camera_manager.update= / =map_animations.update_all=); live
+   state internals beyond names; and event-engine timers in flight.
+   *Operational consequence*: any future "observation must not perturb
+   state" test needs a PENDING SCHEDULED INPUT, not an idle schedule, or
+   it proves nothing.
+
+4. *Settled end states cannot detect a perturbation in this game.* Grid
+   movement makes a tile an attractor, so a change to WHEN something
+   happens but not WHERE it ends is invisible to a final-digest
+   comparison. Measured: against an injected =client.update(1.0/60)= in
+   the render pass, per-step digest sequences diverged at step 1 and
+   stayed diverged through index 56 of 59 before re-converging — 56
+   differing steps a final-digest assertion read as identical. Three of
+   this plan's own gates had to be rewritten to compare SEQUENCES.
+
+5. *The agent's FRAMES are wall-clock dependent and =clock_epoch= does
+   not fix it.* =pyscroll/data.py:132= drives tile animation from
+   =time.time() * 1000=; =pin_clock= pins the engine's clock module, not
+   =time= inside a third-party package. Two back-to-back =png()= calls
+   differed about one run in three. This does NOT break trace replay
+   (nothing pyscroll touches enters =state_of()=, and inputs are ground
+   truth once recorded) but it does mean the same agent at the same seed
+   and epoch can be shown two different images of the same state — so a
+   live model run is unreproducible for a reason that would persist at
+   temperature zero. Cross-reference the spec, which carries the full
+   reasoning.
+
+6. *What has NO live-model evidence.* The entire Anthropic wire contract:
+   request-shape acceptance, the real model's JSON-fencing reliability,
+   the real response object's =.content=/=.type=/=.text= shape, and token
+   sufficiency. Every =ClaudePolicy= test uses an injected stub. State
+   this plainly — a reader must not mistake stub coverage for a real run.
+   If a live capture has since happened, say so with its model id instead.
+
+7. *Measured constants*, so nobody re-derives them: one tile of walking is
+   *16 steps* (raw deltas =[2, 16, 16, 16, 16]=; the leading 2 is a
+   start-position edge effect), corroborated by =STEP_RATE= 60 /
+   =player_walkrate= 3.75 = 16. The fixture's spawn (12, 12) is leavable
+   in =DOWN=, =UP= and =RIGHT= only; =LEFT= is blocked by collision.
+
 - [ ] *Step 4: Flip the spec's status line*
 
 Change =#+STATUS:= in
