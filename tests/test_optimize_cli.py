@@ -26,7 +26,11 @@ from tuxghost.optimize.edits import Insert, Replace
 from tuxghost.optimize.objective import ReachTile
 
 ROOT = Path(__file__).resolve().parent.parent
-GOLDEN = ROOT / "tests" / "golden" / "claude_town_1234.tuxghost"
+#: The optimizer's parent (handoff item A1). `claude_town_1234` ended
+#: inside a `DialogState` that swallowed appended input, so ReachTile's
+#: distance term was dead against it; this one ends on a bare
+#: `WorldState` at tile [16, 14] after 176 steps.
+GOLDEN = ROOT / "tests" / "golden" / "scripted_town_1234.tuxghost"
 
 
 def _run(
@@ -73,7 +77,7 @@ def test_a_mutation_run_succeeds_and_writes_its_artifacts(tmp_path: Path) -> Non
     proc = _run(
         "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
         "--objective", "reach-tile",
-        "--target", "spyder_paper_town.tmx:11,16",
+        "--target", "spyder_paper_town.tmx:19,14",
         "--rounds", "4", "--patience", "4", "--max-rejections", "3",
         "--max-cost", "4000", "--out", str(out), "--run-dir", str(run_dir),
     )
@@ -142,7 +146,7 @@ def test_the_written_trace_is_a_verifiable_offline_agent_trace(tmp_path: Path) -
     proc = _run(
         "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
         "--objective", "reach-tile",
-        "--target", "spyder_paper_town.tmx:11,16",
+        "--target", "spyder_paper_town.tmx:19,14",
         "--rounds", "2", "--patience", "2", "--max-rejections", "2",
         "--max-cost", "4000", "--out", str(out),
         "--run-dir", str(tmp_path / "run"),
@@ -168,9 +172,9 @@ def test_a_relative_trace_path_works(tmp_path: Path) -> None:
     path must resolve against the user's cwd -- the exact defect an
     earlier CLI shipped with, and one that only a relative path finds."""
     proc = _run(
-        "--trace", "tests/golden/claude_town_1234.tuxghost",
+        "--trace", "tests/golden/scripted_town_1234.tuxghost",
         "--editor", "mutation", "--seed", "7", "--objective", "reach-tile",
-        "--target", "spyder_paper_town.tmx:11,16",
+        "--target", "spyder_paper_town.tmx:19,14",
         "--rounds", "1", "--patience", "1", "--max-rejections", "1",
         "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
         "--run-dir", str(tmp_path / "run"),
@@ -182,7 +186,7 @@ def _base(tmp_path: Path) -> dict[str, str]:
     return {
         "--trace": str(GOLDEN), "--editor": "mutation", "--seed": "7",
         "--objective": "reach-tile",
-        "--target": "spyder_paper_town.tmx:11,16", "--rounds": "1",
+        "--target": "spyder_paper_town.tmx:19,14", "--rounds": "1",
         "--patience": "1", "--max-rejections": "1", "--max-cost": "4000",
         "--out": str(tmp_path / "o.tuxghost"),
         "--run-dir": str(tmp_path / "run"),
@@ -206,7 +210,7 @@ def _flags(
     flags = [
         "--trace", str(GOLDEN), "--editor", editor,
         "--objective", "reach-tile",
-        "--target", "spyder_paper_town.tmx:11,16",
+        "--target", "spyder_paper_town.tmx:19,14",
         "--rounds", "1", "--patience", "1", "--max-rejections", "1",
         "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
         "--run-dir", str(tmp_path / "run"),
@@ -302,7 +306,7 @@ def test_an_unliftable_parent_is_refused_not_crashed(tmp_path: Path) -> None:
     proc = _run(
         "--trace", str(bad), "--editor", "mutation", "--seed", "7",
         "--objective", "reach-tile",
-        "--target", "spyder_paper_town.tmx:11,16",
+        "--target", "spyder_paper_town.tmx:19,14",
         "--rounds", "1", "--patience", "1", "--max-rejections", "1",
         "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
         "--run-dir", str(tmp_path / "run"),
@@ -367,7 +371,7 @@ def test_a_real_engine_bug_out_of_the_loop_is_not_laundered_into_a_refusal(
             "optimize",
             "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
             "--objective", "reach-tile",
-            "--target", "spyder_paper_town.tmx:11,16",
+            "--target", "spyder_paper_town.tmx:19,14",
             "--rounds", "1", "--patience", "1", "--max-rejections", "1",
             "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
             "--run-dir", str(tmp_path / "run"),
@@ -455,7 +459,7 @@ def test_the_other_editors_run_with_anthropic_unimportable(tmp_path: Path) -> No
     proc = _run(
         "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
         "--objective", "reach-tile",
-        "--target", "spyder_paper_town.tmx:11,16",
+        "--target", "spyder_paper_town.tmx:19,14",
         "--rounds", "1", "--patience", "1", "--max-rejections", "1",
         "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
         "--run-dir", str(tmp_path / "run"),
@@ -478,7 +482,7 @@ def test_the_claude_editor_refuses_when_anthropic_is_unimportable(
     proc = _run(
         "--trace", str(GOLDEN), "--editor", "claude",
         "--objective", "reach-tile",
-        "--target", "spyder_paper_town.tmx:11,16",
+        "--target", "spyder_paper_town.tmx:19,14",
         "--rounds", "1", "--patience", "1", "--max-rejections", "1",
         "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
         "--run-dir", str(tmp_path / "run"),
@@ -504,22 +508,27 @@ def test_a_parent_over_the_max_cost_still_seals_the_winner(tmp_path: Path) -> No
     `max_cost` bounds what an EDITOR MAY PROPOSE, not what the parent
     already is; `_prepare` enforces it on every accepted candidate, which
     is where it means something.
+
+    `--max-cost 100` against the 176-step parent, NOT the 400 this test
+    used against the retired 442-step one: the whole scenario requires a
+    ceiling BELOW the parent's own cost, and 400 now sits above it, which
+    would leave the test passing while exercising nothing.
     """
     out = tmp_path / "best.tuxghost"
     proc = _run(
         "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
         "--objective", "reach-tile",
-        "--target", "spyder_paper_town.tmx:11,16",
+        "--target", "spyder_paper_town.tmx:19,14",
         "--rounds", "1", "--patience", "1", "--max-rejections", "1",
-        "--max-cost", "400", "--out", str(out),
+        "--max-cost", "100", "--out", str(out),
         "--run-dir", str(tmp_path / "run"),
     )
     assert proc.returncode == 0, proc.stderr
     assert out.exists()
     written = json.loads(out.read_text())
-    # The parent won: nothing cheaper than 442 steps was proposable under
-    # a 400-step ceiling, so every candidate was a rejected round.
-    assert written["header"]["step_count"] == 442
+    # The parent won: nothing was proposable under a 100-step ceiling, so
+    # every candidate was a rejected round and round 0 stood.
+    assert written["header"]["step_count"] == 176
     assert "Traceback" not in proc.stderr
 
     verify = subprocess.run(
@@ -567,7 +576,7 @@ def test_an_edits_file_drives_both_editors_that_read_one(
         "--trace", str(GOLDEN), "--editor", editor, *extra,
         "--edits", "edits.jsonl",
         "--objective", "reach-tile",
-        "--target", "spyder_paper_town.tmx:11,16",
+        "--target", "spyder_paper_town.tmx:19,14",
         "--rounds", "1", "--patience", "1", "--max-rejections", "1",
         "--max-cost", "4000", "--out", str(tmp_path / "best.tuxghost"),
         "--run-dir", str(run_dir),
@@ -586,7 +595,9 @@ def test_an_edits_file_drives_both_editors_that_read_one(
     assert len(rows) == 2, rows
     assert rows[1]["index"] == 1
     assert rows[1]["rejected_reason"] is None, rows[1]
-    assert rows[1]["digest"] and rows[1]["steps"] == 454, rows[1]
+    # 188 = the parent's own 176 steps plus the inserted action's cost
+    # (hold 8 + settle 4). It was 454 against the retired 442-step parent.
+    assert rows[1]["digest"] and rows[1]["steps"] == 188, rows[1]
     assert len(rows[1]["edits"]) == 1
 
     info = json.loads((run_dir / "run.json").read_text())
@@ -726,7 +737,7 @@ def _anthropic_arm(tmp_path: Path, raiser: str) -> subprocess.CompletedProcess[s
             "optimize",
             "--trace", str(GOLDEN), "--editor", "claude",
             "--objective", "reach-tile",
-            "--target", "spyder_paper_town.tmx:11,16",
+            "--target", "spyder_paper_town.tmx:19,14",
             "--rounds", "1", "--patience", "1", "--max-rejections", "1",
             "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
             "--run-dir", str(tmp_path / "run"),
@@ -817,7 +828,7 @@ def test_a_logged_round_round_trips_through_edits_from_json(
         "--trace", str(GOLDEN), "--editor", "scripted",
         "--edits", str(tmp_path / "edits.jsonl"),
         "--objective", "reach-tile",
-        "--target", "spyder_paper_town.tmx:11,16",
+        "--target", "spyder_paper_town.tmx:19,14",
         "--rounds", "1", "--patience", "1", "--max-rejections", "1",
         "--max-cost", "4000", "--out", str(tmp_path / "best.tuxghost"),
         "--run-dir", str(run_dir),
@@ -915,7 +926,7 @@ def _claude_prompt(
             "optimize",
             "--trace", str(GOLDEN), "--editor", "claude",
             "--objective", "reach-tile",
-            "--target", "spyder_paper_town.tmx:11,16",
+            "--target", "spyder_paper_town.tmx:19,14",
             "--rounds", "1", "--patience", "1", "--max-rejections", "1",
             "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
             "--run-dir", str(tmp_path / "run"),
@@ -989,7 +1000,7 @@ def test_editors_that_read_no_goal_record_none_rather_than_empty_string(
     proc = _run(
         "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
         "--objective", "reach-tile",
-        "--target", "spyder_paper_town.tmx:11,16",
+        "--target", "spyder_paper_town.tmx:19,14",
         "--rounds", "2", "--patience", "2", "--max-rejections", "2",
         "--max-cost", "4000", "--out", str(out), "--run-dir", str(run_dir),
     )
@@ -1006,7 +1017,7 @@ def test_the_target_reaches_the_claude_editors_prompt(tmp_path: Path) -> None:
     so `ClaudeEditor.goal` was `""`, `build_prompt` skipped the `Goal:`
     line entirely, and every real `--editor claude` run sent the action
     list, the end tile, the checkpoints and a bare
-    `Score (higher is better): [0.0, -2.0, -442.0]` -- no target, no
+    `Score (higher is better): [0.0, -3.0, -176.0]` -- no target, no
     legend for the three numbers.
 
     The mechanism (a goal that IS passed reaches the prompt) was already
@@ -1023,7 +1034,7 @@ def test_the_target_reaches_the_claude_editors_prompt(tmp_path: Path) -> None:
     prompt = str(calls[0]["messages"])
     # The derived goal names the objective's own target: map AND tile.
     assert "Goal:" in prompt, prompt
-    assert "(11, 16)" in prompt, prompt
+    assert "(19, 14)" in prompt, prompt
     assert "spyder_paper_town.tmx" in prompt, prompt
     # The legend for the score tuple, read from `ReachTile.TERMS` itself
     # rather than written out as literals: this assertion's job is that
@@ -1070,8 +1081,8 @@ def test_an_explicit_goal_overrides_the_derived_one(tmp_path: Path) -> None:
 
 
 def test_max_costs_help_states_that_the_parent_is_exempt(tmp_path: Path) -> None:
-    """Also-fix 5. `--max-cost 400` against the 442-step parent exits 0
-    and writes a 442-step trace -- deliberate (round 0 seals the parent
+    """Also-fix 5. `--max-cost 100` against the 176-step parent exits 0
+    and writes a 176-step trace -- deliberate (round 0 seals the parent
     without the budget, or the run would have nothing to compare
     against), pinned by
     `test_a_parent_over_the_max_cost_still_seals_the_winner`, and

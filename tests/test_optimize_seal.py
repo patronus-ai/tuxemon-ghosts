@@ -21,7 +21,10 @@ from tuxghost.optimize.seal import OverBudget, seal
 from tuxghost.trace import read
 
 GOLDEN = Path(__file__).parent / "golden"
-LIVE = GOLDEN / "claude_town_1234.tuxghost"
+#: The optimizer's parent (handoff item A1). This module's assertions are
+#: parent-agnostic -- an identity control holds for ANY trace -- so the
+#: swap from `claude_town_1234` is a fixture change, not a semantic one.
+LIVE = GOLDEN / "scripted_town_1234.tuxghost"
 
 
 def test_sealing_an_unedited_script_reproduces_its_parent_exactly() -> None:
@@ -74,14 +77,31 @@ def test_an_edited_script_changes_the_input_stream() -> None:
 
 
 def test_seal_samples_checkpoints_on_executes_convention() -> None:
+    """`checkpoint=16` against a 176-step parent, deliberately: 176 is an
+    exact multiple of 16, so this run DISCRIMINATES whether the final
+    step is itself sampled. It is not -- the convention is strictly
+    `< step_count`.
+
+    The retired parent could not establish that. At 442 steps and
+    `checkpoint=64` the next multiple (448) lay past the end regardless,
+    so "excluded because the convention excludes it" and "excluded
+    because it was out of range anyway" were indistinguishable, and a
+    `<=` implementation would have passed the old assertion untouched.
+    """
     parent = read(LIVE)
     script = lift(parent.inputs, parent.header.step_count)
-    result = seal(script, parent, checkpoint=64, taints=())
+    result = seal(script, parent, checkpoint=16, taints=())
 
-    assert [s for s, _ in result.checkpoints] == [64, 128, 192, 256, 320, 384]
-    assert result.checkpoints == execute(parent, checkpoint=64).checkpoints
-    assert sorted(result.checkpoint_states) == [s for s, _ in result.checkpoints]
-    assert "tile_pos" in result.checkpoint_states[64]
+    steps = [s for s, _ in result.checkpoints]
+    assert steps == [16, 32, 48, 64, 80, 96, 112, 128, 144, 160]
+    assert parent.header.step_count == 176, (
+        "this test's discriminating power depends on step_count being an "
+        "exact multiple of the checkpoint interval"
+    )
+    assert parent.header.step_count not in steps
+    assert result.checkpoints == execute(parent, checkpoint=16).checkpoints
+    assert sorted(result.checkpoint_states) == steps
+    assert "tile_pos" in result.checkpoint_states[16]
 
 
 def test_seal_captures_nothing_when_checkpoint_is_zero() -> None:

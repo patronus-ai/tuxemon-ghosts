@@ -9,32 +9,48 @@ the final best alone: a settled tile is an attractor in this game, so an
 endpoint comparison cannot distinguish a run that improved from one that
 wandered and came back.
 
-WHAT "IMPROVING" MEANS AGAINST THIS PARENT (measured 2026-08-27, and the
-reason the plan's own edits are inverted here). The live capture ends at
-tile (11, 14) on `spyder_paper_town.tmx` after 442 steps with
-`state_stack == ['DialogState', 'WorldState']`, and that trailing dialog
-swallows every input: one appended `UP`/`DOWN`/`LEFT`/`RIGHT`, and `A`
-then `DOWN`, and `B` then `DOWN`, ALL leave the tile at (11, 14). So no
-append-only edit to this parent can move the player, and every accepted
-round in this module is accepted on `ReachTile`'s `steps` term.
-`ReachTile`'s `distance` term is NOT frozen -- across the nine-run tuning
-sweep it varied from -2 (the parent's own) down to -9, from mid-script
-edits that change the route before the dialogue opens -- but no candidate
-ever scored BETTER than the parent on it, so it has never been the term
-that carried an acceptance. See docs/STATUS.org, "The consequence, and it
-is a limit not a feature", which measured the earlier "frozen" reading
-false.
+WHAT "IMPROVING" MEANS DEPENDS ON THE PARENT, and this module runs both.
+Neither pair of edits is assumed; both were measured, and the second
+INVERTS the first.
 
-That makes the improving edit a DELETE (442 -> 416 -> 390 -> 364 steps,
-same tile) and the worsening edit an APPEND (442 -> 642 -> 842). Fewer
-steps to the same place is a real improvement on a real term of the
-objective; the target is NOT moved to (11, 14) to make the distance term
-trivially satisfied, which would pass while proving nothing.
+`scripted_town_1234` (the default parent, 176 steps, ends tile (16, 14)
+on a bare `WorldState`). Appended input reaches the player here, so with
+the target three tiles east at (19, 14) the improving edit is an APPEND
+toward it and the worsening edit an APPEND away from it:
+
+    parent            (0.0, -3.0, -176.0)
+    +RIGHT            (0.0, -2.0, -198.0)   accepted, on DISTANCE
+    +RIGHT +RIGHT     (0.0, -1.0, -220.0)   accepted, on DISTANCE
+    +LEFT             (0.0, -4.0, -198.0)   worse on both terms
+    delete last       (0.0, -4.0, -154.0)   FEWER steps, but further
+
+Note the last line: against this parent a DELETE is a WORSENING edit. It
+buys steps at the cost of distance, and distance outranks steps.
+
+`claude_town_1234` (the retired parent, kept as a parametrized case, 442
+steps). It ends with `state_stack == ['DialogState', 'WorldState']` and
+that trailing dialog swallows every APPENDED input: `UP`/`DOWN`/`LEFT`/
+`RIGHT`, `A` then `DOWN`, and `B` then `DOWN` all leave the tile at
+(11, 14). So no append-only edit can move the player and every
+acceptance rides on `steps`, which makes the improving edit a DELETE
+(442 -> 416 -> 390, same tile) and the worsening edit an APPEND
+(442 -> 642). Exactly the reverse of the parent above.
+
+It is kept rather than deleted because an input-swallowing parent is a
+real adversarial case: a loop that quietly depended on edits always
+moving the player would pass against the new parent alone. (Its
+`distance` term is not frozen -- across the nine-run tuning sweep it
+varied from -2 down to -9, from MID-script edits that change the route
+before the dialogue opens -- but no candidate ever scored better than
+the parent on it. See docs/STATUS.org.)
+
+In neither case is the target moved onto the parent's own end tile,
+which would satisfy the distance term trivially and prove nothing.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -49,13 +65,28 @@ from tuxghost.optimize.schedule import ActionScript, lift
 from tuxghost.optimize.seal import CandidateResult, OverBudget
 from tuxghost.trace import Trace, read
 
-LIVE = Path(__file__).parent / "golden" / "claude_town_1234.tuxghost"
-#: The live capture ends at tile (11, 14) on this map, immovably (see the
-#: module docstring). The target is left two tiles away so the distance
-#: term is a real, unsatisfied term rather than one relocated onto the
-#: parent's own end position.
-TARGET = ReachTile("spyder_paper_town.tmx", (11, 16))
-#: A worsening append: +200 steps (hold 100 + settle 100), same tile.
+_GOLDEN = Path(__file__).parent / "golden"
+#: The default parent: 176 steps, ends tile (16, 14) on a bare
+#: `WorldState`, so appended input reaches the player.
+LIVE = _GOLDEN / "scripted_town_1234.tuxghost"
+#: The retired parent, kept as a parametrized case (see module docstring).
+RETIRED = _GOLDEN / "claude_town_1234.tuxghost"
+
+#: Three tiles east of where `LIVE` ends, so the distance term is a real
+#: unsatisfied term rather than one relocated onto the parent's own end
+#: position.
+TARGET = ReachTile("spyder_paper_town.tmx", (19, 14))
+#: Two tiles from where `RETIRED` ends, for the same reason.
+RETIRED_TARGET = ReachTile("spyder_paper_town.tmx", (11, 16))
+
+#: Improving against `LIVE`: one tile toward the target, +22 steps.
+RIGHT_STEP = Action(buttons.RIGHT, 16, 6)
+#: Worsening against `LIVE`: one tile away from it, also +22 steps -- so
+#: the two differ in DIRECTION alone and a loop that accepted on step
+#: count could not tell them apart.
+LEFT_STEP = Action(buttons.LEFT, 16, 6)
+#: A worsening append against `RETIRED`: +200 steps (hold 100 + settle
+#: 100), same tile.
 BIG = Action(buttons.DOWN, 100, 100)
 DOWN = Action(buttons.DOWN, 16, 8)
 
@@ -72,10 +103,18 @@ def _n_actions(parent: Trace) -> int:
     return len(_script_of(parent).actions)
 
 
-def _delete_last(n: int, times: int) -> list[list[Delete]]:
+def _delete_last(n: int, times: int) -> list[list[Edit]]:
     """`times` rounds of "delete the last action", against a script that
-    shrinks by one each accepted round."""
+    SHRINKS by one each accepted round. Improving against `RETIRED`,
+    worsening against `LIVE` -- see the module docstring."""
     return [[Delete(n - 1 - i)] for i in range(times)]
+
+
+def _append_right(n: int, times: int) -> list[list[Edit]]:
+    """`times` rounds of "append one step toward the target", against a
+    script that GROWS by one each accepted round -- hence `n + i`, where
+    `_delete_last` uses `n - 1 - i`. Improving against `LIVE`."""
+    return [[Insert(n + i, RIGHT_STEP)] for i in range(times)]
 
 
 def test_round_zero_is_the_parent_scored() -> None:
@@ -95,14 +134,51 @@ def test_round_zero_is_the_parent_scored() -> None:
     assert result.best_round == 0
 
 
-def test_an_improving_edit_is_accepted_and_becomes_the_new_best() -> None:
-    """Dropping trailing actions reaches the same tile in fewer steps."""
-    parent = _parent()
-    editor = ScriptedEditor(_delete_last(_n_actions(parent), 2))
+#: (label, trace, target, improving-edit factory, worsening action,
+#: improving step sequence, worsening step sequence) -- every number
+#: MEASURED against that parent, never carried over from the other one.
+#: The two rows invert each other: what improves against one worsens
+#: against the other. See the module docstring.
+_EDIT_CASES = [
+    pytest.param(
+        LIVE, TARGET, _append_right, LEFT_STEP,
+        [176, 198, 220], [176, 198, 198],
+        id="scripted_town-append",
+    ),
+    pytest.param(
+        RETIRED, RETIRED_TARGET, _delete_last, BIG,
+        [442, 416, 390], [442, 642, 642],
+        id="claude_town-delete",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "trace, target, improving, worsening, improving_steps, worsening_steps",
+    _EDIT_CASES,
+)
+def test_an_improving_edit_is_accepted_and_becomes_the_new_best(
+    trace: Path,
+    target: ReachTile,
+    improving: Callable[[int, int], list[list[Edit]]],
+    worsening: Action,
+    improving_steps: list[int],
+    worsening_steps: list[int],
+) -> None:
+    """Two rounds of that parent's own improving edit are both accepted
+    and the score sequence rises monotonically.
+
+    `worsening`/`worsening_steps` are unused here; the parametrization is
+    shared with the test below so the two halves of a parent's measured
+    edit pair cannot drift apart in separate tables.
+    """
+    del worsening, worsening_steps
+    parent = read(trace)
+    editor = ScriptedEditor(improving(_n_actions(parent), 2))
     result = optimize(
         parent,
         editor,
-        TARGET,
+        target,
         rounds=3,
         patience=3,
         max_rejections=1,
@@ -112,25 +188,36 @@ def test_an_improving_edit_is_accepted_and_becomes_the_new_best() -> None:
     assert scores == sorted(scores), f"score sequence went backwards: {scores}"
     assert scores[-1] > scores[0]
     assert result.best_round > 0
-    # The improvement is on the `steps` term specifically -- the tile is
-    # immovable against this parent, so a distance-term improvement here
-    # would mean the measurement above is wrong, not that the loop works.
-    assert [r.steps for r in result.rounds if r.steps is not None] == [442, 416, 390]
+    assert [
+        r.steps for r in result.rounds if r.steps is not None
+    ] == improving_steps
 
 
-def test_a_worsening_edit_is_kept_out_of_best_but_recorded() -> None:
-    parent = _parent()
+@pytest.mark.parametrize(
+    "trace, target, improving, worsening, improving_steps, worsening_steps",
+    _EDIT_CASES,
+)
+def test_a_worsening_edit_is_kept_out_of_best_but_recorded(
+    trace: Path,
+    target: ReachTile,
+    improving: Callable[[int, int], list[list[Edit]]],
+    worsening: Action,
+    improving_steps: list[int],
+    worsening_steps: list[int],
+) -> None:
+    del improving, improving_steps
+    parent = read(trace)
     n = _n_actions(parent)
     # `best_script` never advances (both candidates lose), so both rounds
     # append at the same index.
-    editor = ScriptedEditor([[Insert(n, BIG)], [Insert(n, BIG)]])
+    editor = ScriptedEditor([[Insert(n, worsening)], [Insert(n, worsening)]])
     result = optimize(
         parent,
         editor,
-        TARGET,
-        # `rounds=2`, not the plan's 3: with 3 the editor runs out and a
-        # third STOP round (score None) is appended, which the plan's own
-        # `all(r.score is not None ...)` assertion would then fail on.
+        target,
+        # `rounds=2`, not 3: with 3 the editor runs out and a third STOP
+        # round (score None) is appended, which the `all(r.score is not
+        # None ...)` assertion below would then fail on.
         rounds=2,
         patience=3,
         max_rejections=1,
@@ -139,12 +226,12 @@ def test_a_worsening_edit_is_kept_out_of_best_but_recorded() -> None:
     assert result.best_round == 0
     assert [r.accepted for r in result.rounds] == [True, False, False]
     assert all(r.score is not None for r in result.rounds)
-    assert [r.steps for r in result.rounds] == [442, 642, 642]
+    assert [r.steps for r in result.rounds] == worsening_steps
 
 
 def test_an_empty_proposal_stops_the_run() -> None:
     parent = _parent()
-    editor = ScriptedEditor([[Delete(_n_actions(parent) - 1)], []])
+    editor = ScriptedEditor([[Insert(_n_actions(parent), RIGHT_STEP)], []])
     result = optimize(
         parent,
         editor,
@@ -180,7 +267,7 @@ def test_patience_stops_a_run_that_stops_improving() -> None:
 
 def test_the_rounds_cap_stops_a_run_that_keeps_improving() -> None:
     parent = _parent()
-    editor = ScriptedEditor(_delete_last(_n_actions(parent), 10))
+    editor = ScriptedEditor(_append_right(_n_actions(parent), 10))
     result = optimize(
         parent,
         editor,
@@ -198,7 +285,7 @@ def test_the_rounds_cap_stops_a_run_that_keeps_improving() -> None:
 def test_an_invalid_proposal_is_a_rejected_round_not_a_crash() -> None:
     parent = _parent()
     editor = ScriptedEditor(
-        [[Replace(999, DOWN)], [Delete(_n_actions(parent) - 1)]]
+        [[Replace(999, DOWN)], [Insert(_n_actions(parent), RIGHT_STEP)]]
     )
     result = optimize(
         parent,
@@ -232,9 +319,12 @@ def test_an_over_budget_proposal_is_rejected_rather_than_run() -> None:
     """`max_cost` is the guard against an editor describing a
     12,000,000-step candidate: HOLD_CAP and SETTLE_CAP are 600 each, so a
     few thousand inserted actions is hours of engine time in one call."""
-    editor = ScriptedEditor([[Insert(18, Action(buttons.DOWN, 600, 600))]])
+    parent = _parent()
+    editor = ScriptedEditor(
+        [[Insert(_n_actions(parent), Action(buttons.DOWN, 600, 600))]]
+    )
     result = optimize(
-        _parent(),
+        parent,
         editor,
         TARGET,
         rounds=1,
@@ -290,7 +380,7 @@ def test_a_seal_failure_that_is_not_over_budget_propagates(
     stub = CandidateResult(
         trace=parent,
         steps=parent.header.step_count,
-        final_state={"map": "spyder_paper_town.tmx", "tile_pos": [11, 14]},
+        final_state={"map": "spyder_paper_town.tmx", "tile_pos": [16, 14]},
     )
     calls = {"n": 0}
 
@@ -346,17 +436,17 @@ def test_round_zero_is_sealed_without_max_cost() -> None:
     baseline, not a proposal.
 
     Review round 1, Important 1: every other `max_cost` in this file
-    (10_000, 500, 0) sits either above the parent's 442-step cost or
-    below the `>= 1` bound check, so passing `max_cost` through at round
-    0 would have left the whole suite green and a reasoned decision
-    deletable by a "consistency" cleanup. `max_cost=100` is below 442, so
+    (10_000, 500, 0) sits either above the parent's cost or below the
+    `>= 1` bound check, so passing `max_cost` through at round 0 would
+    have left the whole suite green and a reasoned decision deletable by
+    a "consistency" cleanup. `max_cost=100` is below the parent's 176, so
     it separates the two: round 0 must still be sealed and SCORED, while
-    round 1's 416-step candidate is refused.
+    round 1's 198-step candidate is refused.
     """
     parent = _parent()
     result = optimize(
         parent,
-        ScriptedEditor(_delete_last(_n_actions(parent), 2)),
+        ScriptedEditor(_append_right(_n_actions(parent), 2)),
         TARGET,
         rounds=2,
         patience=2,
@@ -364,7 +454,7 @@ def test_round_zero_is_sealed_without_max_cost() -> None:
         max_cost=100,
     )
     assert result.rounds[0].score is not None
-    assert result.rounds[0].steps == 442  # the parent ran in full
+    assert result.rounds[0].steps == 176  # the parent ran in full
     assert result.rounds[0].accepted is True
     assert result.rounds[1].accepted is False
     assert result.rounds[1].score is None
@@ -407,7 +497,11 @@ def test_a_propose_failure_is_a_rejected_round_not_the_end_of_the_run() -> None:
     counts toward `max_rejections`/`patience` and the loop continues.
     """
     parent = _parent()
-    editor = _BrokenThenGoodEditor(Delete(_n_actions(parent) - 1))
+    # An APPEND toward the target, not a delete: against this parent a
+    # delete worsens the score, so the second round would not improve
+    # either and the run would end "patience exhausted" -- a green-
+    # looking pass that stopped testing what this test is named for.
+    editor = _BrokenThenGoodEditor(Insert(_n_actions(parent), RIGHT_STEP))
     result = optimize(
         parent,
         editor,
@@ -506,7 +600,7 @@ def test_a_negative_checkpoint_is_refused() -> None:
     four bounds and not this one, and the failure is silent rather than
     loud: `seal`'s hook tests `i % checkpoint == 0`, and `i % -1` is 0
     for EVERY step, so `checkpoint=-1` took a `digest_of` AND a
-    `state_of` snapshot on all 442 steps of every round without saying
+    `state_of` snapshot on all 176 steps of every round without saying
     so. The CLI guarded it; a library caller had nothing. Refused before
     the engine boots, so this test costs no engine time.
 
@@ -546,10 +640,14 @@ def test_checkpoint_and_model_reach_seal() -> None:
         patience=1,
         max_rejections=1,
         max_cost=10_000,
-        checkpoint=64,
+        checkpoint=16,
         model="a-model-1",
     )
+    # `checkpoint=16` against a 176-step parent: every multiple below
+    # `step_count`, and NOT `step_count` itself even though 176 is an
+    # exact multiple of 16. Same convention `tests/test_optimize_seal.py`
+    # pins directly.
     assert [s for s, _ in result.best.checkpoints] == [
-        64, 128, 192, 256, 320, 384,
+        16, 32, 48, 64, 80, 96, 112, 128, 144, 160,
     ]
     assert result.best.trace.provenance.model == "a-model-1"

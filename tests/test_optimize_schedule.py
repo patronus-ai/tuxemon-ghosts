@@ -11,9 +11,12 @@ states cannot detect a perturbation in this game") applied to `lift`: the
 digest cannot be trusted to catch a dropped tail, so the invariant is
 asserted arithmetically instead.
 
-Both committed traces are tested, never just one: `claude_town_1234` has
-`lead_in == 0`, so a `lift` that drops lead-ins entirely passes against it
-and fails only against `walk_1234`.
+EVERY committed trace is tested, never just one: `scripted_town_1234`
+and `claude_town_1234` both have `lead_in == 0`, so a `lift` that drops
+lead-ins entirely passes against both and fails only against
+`walk_1234`. `walk_1234` therefore stays in this table permanently, and
+is not replaceable by the optimizer's newer parent -- it is the only
+committed trace with a non-zero lead-in.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ GOLDEN = Path(__file__).parent / "golden"
 
 #: (name, step_count, lead_in, tail, action count) -- measured, not guessed.
 COMMITTED = [
+    ("scripted_town_1234", 176, 0, 6, 8),
     ("claude_town_1234", 442, 0, 10, 18),
     ("walk_1234", 900, 30, 400, 40),
 ]

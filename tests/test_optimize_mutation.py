@@ -21,8 +21,13 @@ from tuxghost.optimize.runner import optimize
 from tuxghost.optimize.seal import CandidateResult
 from tuxghost.trace import read
 
-LIVE = Path(__file__).parent / "golden" / "claude_town_1234.tuxghost"
-TARGET = ReachTile("spyder_paper_town.tmx", (11, 16))
+LIVE = Path(__file__).parent / "golden" / "scripted_town_1234.tuxghost"
+#: Three tiles east of where the parent ends ([16, 14]), so the distance
+#: term is a real unmet term the mutator can actually climb. Against the
+#: RETIRED parent no target was climbable at all -- its trailing dialog
+#: swallowed every input -- so every acceptance there rode on `steps`
+#: alone (handoff item A1).
+TARGET = ReachTile("spyder_paper_town.tmx", (19, 14))
 
 
 #: `mypy --strict` refuses to `**`-splat a bare `dict[str, int]` into
@@ -109,19 +114,59 @@ def test_a_seeded_run_is_reproducible_end_to_end() -> None:
 
 
 def test_the_mutation_editor_improves_on_the_parent() -> None:
-    """Seed 7 is not a lucky pick: seeds 7, 8, and 9 were all measured
-    against this exact parent/target/BOUNDS combination (see the task-8
-    report for all three round-by-round score sequences) and every one
-    of them beats the parent within 12 rounds (best_round 10, 8, and 10
-    respectively) -- so the mutator genuinely searches this objective's
-    `steps` term rather than winning by chance on one seed. 7 is pinned
-    only because a test needs one fixed seed to be reproducible."""
+    """Seed 7 is not a lucky pick: seeds 7, 8 and 9 were all RE-MEASURED
+    against this parent/target/BOUNDS combination when the fixture was
+    swapped (handoff item A1), and every one still beats the parent
+    within 12 rounds -- best_round 9, 6 and 12 respectively, from
+    parent `(0.0, -3.0, -176.0)` to `(0.0, -3.0, -124.0)`,
+    `(0.0, -1.0, -175.0)` and `(0.0, -3.0, -142.0)`. So the mutator
+    genuinely searches rather than winning by chance on one seed. 7 is
+    pinned only because a test needs one fixed seed to be reproducible.
+
+    (Against the RETIRED parent the same three seeds measured best_round
+    10, 8 and 10. The numbers moved; the claim did not.)
+    """
     result = optimize(read(LIVE), MutationEditor(seed=7), TARGET, **BOUNDS)
     scores = [r.score for r in result.rounds if r.score is not None]
     assert result.best_round > 0, (
         f"no round beat the parent; score sequence was {scores}"
     )
     assert scores[0] < max(scores)
+
+
+def test_an_acceptance_can_be_carried_by_the_distance_term() -> None:
+    """The search finds a route improvement, not just a shorter route.
+
+    Seed 8 is pinned because it is the measured seed whose winner
+    improves DISTANCE, `-3.0` to `-1.0`: the mutator re-routed the player
+    two tiles nearer the target rather than merely arriving sooner.
+    Asserted on the distance term alone, because a whole-tuple assertion
+    passes on a pure `steps` win and would say nothing about routing.
+
+    WHAT THIS DOES *NOT* SHOW, recorded because the first draft of this
+    test claimed it and was wrong. It does not discriminate this parent
+    from the retired `claude_town_1234` -- run against that fixture with
+    this target, it still passes. Only APPENDED input is swallowed by
+    that parent's trailing dialog; `MutationEditor` edits MID-script, and
+    `docs/STATUS.org` records that mid-script edits change the route
+    before the dialogue opens, so distance moves there too. The claim
+    that appended input cannot move the retired parent is pinned where it
+    is actually demonstrable, in
+    `tests/test_scripted_parent.py::test_the_distance_term_is_live_
+    against_this_parent`.
+
+    What this DOES pin is the objective and the mutator staying wired
+    together: a `ReachTile.score` whose distance term went constant, or a
+    mutator that stopped producing route-changing edits, fails here.
+    """
+    result = optimize(read(LIVE), MutationEditor(seed=8), TARGET, **BOUNDS)
+    scores = [r.score for r in result.rounds if r.score is not None]
+    parent_distance = scores[0][1]
+    best_distance = max(scores)[1]
+    assert best_distance > parent_distance, (
+        "no accepted round improved the DISTANCE term; the search is "
+        f"winning on steps alone. Sequence was {scores}"
+    )
 
 
 def test_every_proposal_is_structurally_valid() -> None:
