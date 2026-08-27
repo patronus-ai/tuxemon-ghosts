@@ -592,14 +592,21 @@ def test_agent_accepts_a_relative_out_path(
     """The vacuous-test lesson from CLAUDE.md: every path in the old CLI
     test was an absolute tmp_path, so a real bug -- chdir into tuxemon/
     BEFORE parsing args, breaking every relative path a user would type --
-    went undetected. This test types a relative path on purpose."""
+    went undetected. This test types a relative path on purpose.
+
+    `--from-save` is ALSO typed relative here (review round 1, minor):
+    the first draft of this test left `--from-save` as the absolute
+    `FIXTURE` constant, covering only `--out`/`--run-dir` and repeating
+    the exact shape of blind spot this test exists to close, just for two
+    of `_PATH_ARGS["agent"]`'s four entries instead of all of them."""
     monkeypatch.chdir(tmp_path)
+    (tmp_path / "save.json").write_text(FIXTURE.read_text())
     code = main(
         [
             "agent", "--policy", "scripted",
             "--actions", str(_write_actions(tmp_path)),
             "--seed", "1234", "--clock-epoch", "1787659200",
-            "--from-save", str(FIXTURE), "--steps", "120",
+            "--from-save", "save.json", "--steps", "120",
             "--out", "relative.tuxghost", "--run-dir", "reldir",
         ]
     )
@@ -620,3 +627,124 @@ def test_agent_cold_boot_needs_no_save(tmp_path: Path) -> None:
         ]
     )
     assert code == 0
+
+
+# --- Review round 1, Critical: `run_agent(...)` had no exception
+# boundary at all, and three separate inputs each reached uncaught
+# ValueError/TypeError/AttributeError deep inside it, exiting 1 instead
+# of the required 2. `--policy replay` had NO committed coverage before
+# this round -- the positive-path test below closes that gap; the
+# malformed-transcript test below it pins the exact reproduced defect.
+
+
+def _write_malformed_replay_transcript(tmp_path: Path) -> Path:
+    """Two well-formed records, then a third whose action is missing
+    `settle` -- `actions_from_json` (called LAZILY inside
+    `ReplayPolicy.decide()`, not eagerly when `ReplayPolicy` is
+    constructed) raises `ValueError` for this only once the run reaches
+    that record, well after every precondition check in `_agent` already
+    succeeded on the first two records' account. No eager,
+    construction-time check can catch this -- only a boundary around the
+    `run_agent(...)` call itself can."""
+    path = tmp_path / "malformed_transcript.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {"actions": [{"button": 2, "hold": 30, "settle": 10}]}
+                ),
+                json.dumps(
+                    {"actions": [{"button": 2, "hold": 30, "settle": 10}]}
+                ),
+                json.dumps({"actions": [{"button": 2, "hold": 30}]}),
+            ]
+        )
+    )
+    return path
+
+
+def test_agent_replay_writes_a_trace(tmp_path: Path) -> None:
+    """The positive-path counterpart the review flagged as entirely
+    missing: before this round, no committed test ever exercised
+    `--policy replay` at all, which is exactly what let the malformed-
+    transcript defect below through undetected."""
+    out = tmp_path / "replay.tuxghost"
+    run_dir = tmp_path / "replaydir"
+    code = main(
+        [
+            "agent", "--policy", "replay",
+            "--actions", str(_write_actions(tmp_path)),
+            "--cold-boot",
+            "--seed", "1234", "--clock-epoch", "1787659200", "--steps", "300",
+            "--out", str(out), "--run-dir", str(run_dir),
+        ]
+    )
+    assert code == 0
+    assert out.exists()
+    assert (run_dir / "decisions.jsonl").exists()
+
+
+def test_agent_refuses_a_transcript_that_fails_mid_run(tmp_path: Path) -> None:
+    """Review round 1, Critical, case 1 of 3. Reproduced by the reviewer
+    as a real subprocess: `--policy replay` with a third transcript
+    record missing `settle` raised `ValueError` from
+    `ReplayPolicy.decide()` (called from `run_agent`'s loop), uncaught,
+    exiting 1. Fixed with a `try/except (ValueError, TypeError)` boundary
+    around the `run_agent(...)` call in `_agent`."""
+    code = main(
+        [
+            "agent", "--policy", "replay",
+            "--actions", str(_write_malformed_replay_transcript(tmp_path)),
+            "--cold-boot",
+            "--seed", "1234", "--clock-epoch", "1787659200", "--steps", "300",
+            "--out", str(tmp_path / "o.tuxghost"),
+            "--run-dir", str(tmp_path / "d"),
+        ]
+    )
+    assert code == 2
+
+
+def test_agent_refuses_a_non_object_actions_line(tmp_path: Path) -> None:
+    """Review round 1, Critical, case 2 of 3. Reproduced by the reviewer:
+    a `--actions` line that is valid JSON but not an object (`[1, 2,
+    3]`) made `record.get("actions", [])` raise `AttributeError` -- a
+    bare Python builtin, not one of this project's own
+    `ValueError`/`TypeError` input-validation exceptions, so it fell
+    through the `except (OSError, json.JSONDecodeError, ValueError,
+    TypeError)` tuple guarding the scripted actions-file parse and
+    propagated uncaught, exiting 1. Fixed with an explicit `isinstance`
+    check naming the offending line number."""
+    path = tmp_path / "bad.jsonl"
+    path.write_text(json.dumps([1, 2, 3]))
+    code = main(
+        [
+            "agent", "--policy", "scripted",
+            "--actions", str(path),
+            "--cold-boot",
+            "--seed", "1234", "--clock-epoch", "1787659200", "--steps", "60",
+            "--out", str(tmp_path / "o.tuxghost"),
+            "--run-dir", str(tmp_path / "d"),
+        ]
+    )
+    assert code == 2
+
+
+def test_agent_refuses_invalid_upscale(tmp_path: Path) -> None:
+    """Review round 1, Critical, case 3 of 3. Reproduced by the reviewer:
+    `--upscale 0` raised `ValueError` from `FrameRenderer.__init__`
+    (called from `run_agent`), uncaught, exiting 1. `--upscale` is a bad
+    ARGUMENT with a knowable valid range (>= 1) -- it should never reach
+    `run_agent` in the first place, so it is refused eagerly in `_agent`'s
+    precondition block, before `seed_all`/anything else runs."""
+    code = main(
+        [
+            "agent", "--policy", "scripted",
+            "--actions", str(_write_actions(tmp_path)),
+            "--cold-boot",
+            "--seed", "1234", "--clock-epoch", "1787659200", "--steps", "60",
+            "--upscale", "0",
+            "--out", str(tmp_path / "o.tuxghost"),
+            "--run-dir", str(tmp_path / "d"),
+        ]
+    )
+    assert code == 2

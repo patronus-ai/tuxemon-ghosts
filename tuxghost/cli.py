@@ -67,11 +67,28 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
 from tuxghost.trace import Refused, Trace, read
+
+if TYPE_CHECKING:
+    # Both are real, project-owned (or, for `SaveData`, project-adjacent)
+    # types, not stand-ins for an unannotated upstream shape -- named here
+    # only for static analysis. Neither is imported at RUNTIME at module
+    # scope: `tuxghost.agent.types` imports `tuxemon.platform.const` at
+    # its own module level, and `tuxemon.save_system.save_state` is
+    # vendored `tuxemon` -- both need `tuxemon/` on `sys.path` first,
+    # which only happens once `_bootstrap_vendored_tuxemon` runs inside
+    # `main()`. An eager top-level import here would break `python -m
+    # tuxghost.cli ...` (the module is imported before that bootstrap
+    # ever runs). `from __future__ import annotations` (above) means
+    # every annotation below is a string at runtime, never evaluated, so
+    # this TYPE_CHECKING-only import is all mypy needs.
+    from tuxemon.save_system.save_state import SaveData
+
+    from tuxghost.agent.types import Action, Policy
 
 #: Which of each subcommand's parsed arguments are paths that must be
 #: `.resolve()`d against the caller's cwd before any chdir happens.
@@ -352,7 +369,7 @@ def _record(args: argparse.Namespace) -> int:
     return 0
 
 
-def _agent_save_or_refuse(args: argparse.Namespace) -> Any | None:
+def _agent_save_or_refuse(args: argparse.Namespace) -> SaveData | None:
     """Read, parse, validate and map-check `--from-save`, or print a
     refusal and return None.
 
@@ -433,6 +450,24 @@ def _agent(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # Both are knowable-range arguments -- `run_agent` (via
+    # `FrameRenderer.__init__`/its own `step_budget < 1` check) would
+    # raise `ValueError` for either deep inside the run, but a bad CLI
+    # argument is a REFUSED precondition (exit 2), not something that
+    # should ever reach the run_agent boundary below at all. Checked here,
+    # eagerly, before anything else can fail on this run's behalf.
+    if args.upscale < 1:
+        print(
+            f"refused: --upscale must be >= 1, got {args.upscale!r}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.steps < 1:
+        print(
+            f"refused: --steps must be >= 1, got {args.steps!r}",
+            file=sys.stderr,
+        )
+        return 2
 
     seed_all(args.seed)
 
@@ -449,16 +484,48 @@ def _agent(args: argparse.Namespace) -> int:
     kind: RecorderKind
     taints: tuple[str, ...] = ()
     model: str | None = None
-    policy: Any
+    policy: Policy
     if args.policy == "scripted":
         try:
-            decisions = [
-                actions_from_json(json.loads(line).get("actions", []))
-                for line in args.actions.read_text().splitlines()
-                if line.strip()
-            ]
-        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
-            print(f"refused: bad --actions file: {exc}", file=sys.stderr)
+            lines = args.actions.read_text().splitlines()
+        except OSError as exc:
+            print(f"refused: cannot read {args.actions}: {exc}", file=sys.stderr)
+            return 2
+        decisions: list[tuple[Action, ...]] = []
+        try:
+            for lineno, line in enumerate(lines, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"line {lineno} is not valid JSON: {exc}"
+                    ) from exc
+                # `record.get(...)` below would raise `AttributeError` (a
+                # bare Python builtin, not one of this project's own
+                # input-validation exception types) for a line that is
+                # valid JSON but not an object -- e.g. `[1, 2, 3]`. Caught
+                # here, explicitly, and named by line number: a malformed
+                # actions file is bad INPUT, and a user fixing it needs to
+                # know which line, not just that "bad --actions file"
+                # happened somewhere in it.
+                if not isinstance(record, dict):
+                    raise TypeError(
+                        f"line {lineno} must be a JSON object (with an "
+                        f"'actions' key), got {type(record).__name__}"
+                    )
+                try:
+                    decisions.append(
+                        actions_from_json(record.get("actions", []))
+                    )
+                except (ValueError, TypeError) as exc:
+                    raise type(exc)(f"line {lineno}: {exc}") from exc
+        except (ValueError, TypeError) as exc:
+            print(
+                f"refused: bad --actions file ({args.actions}): {exc}",
+                file=sys.stderr,
+            )
             return 2
         policy = ScriptedPolicy(decisions)
         kind = "human"
@@ -505,18 +572,41 @@ def _agent(args: argparse.Namespace) -> int:
         kind = "cu-agent"
         model = args.model
 
-    result = run_agent(
-        policy=policy,
-        save_data=save_data,
-        cold_boot=bool(args.cold_boot),
-        seed=args.seed,
-        clock_epoch=args.clock_epoch,
-        step_budget=args.steps,
-        recorder_kind=kind,
-        model=model,
-        upscale=args.upscale,
-        taints=taints,
-    )
+    try:
+        result = run_agent(
+            policy=policy,
+            save_data=save_data,
+            cold_boot=bool(args.cold_boot),
+            seed=args.seed,
+            clock_epoch=args.clock_epoch,
+            step_budget=args.steps,
+            recorder_kind=kind,
+            model=model,
+            upscale=args.upscale,
+            taints=taints,
+        )
+    except (ValueError, TypeError) as exc:
+        # The structural fix, not a patch for one call site: bad input
+        # can surface AFTER this point, once the run is already under
+        # way, not just before it. `ReplayPolicy` parses each transcript
+        # record LAZILY inside `decide()` (`tuxghost/agent/replay.py`),
+        # called from deep inside `run_agent`'s loop -- a transcript whose
+        # Nth record is malformed raises there, well past every
+        # precondition check above. `ValueError`/`TypeError` are exactly
+        # the two exception types this project's OWN input validation
+        # raises for bad input (`validate_actions`, `actions_from_json`,
+        # `FrameRenderer.__init__`) -- the same two-exception taxonomy
+        # already caught above for the scripted/replay `--actions` file
+        # itself. Deliberately NOT a bare `except Exception`: a genuine
+        # internal engine invariant failure must stay a visible crash
+        # rather than being laundered into a tidy "refused" -- see
+        # `tuxghost.execute`'s own comments on the identical tradeoff
+        # around `boot_from_save`'s `AssertionError`.
+        print(
+            f"refused: --policy {args.policy} run failed: {exc}",
+            file=sys.stderr,
+        )
+        return 2
     write(result.trace, args.out)
 
     frames_dir = args.run_dir / "frames"
@@ -525,10 +615,12 @@ def _agent(args: argparse.Namespace) -> int:
         (frames_dir / f"{index:05d}.png").write_bytes(png)
     with (args.run_dir / "decisions.jsonl").open("w") as handle:
         for decision in result.decisions:
+            # `dataclasses.asdict` is recursive: it already converts each
+            # nested `Action` dataclass in `decision.actions` on its own,
+            # so a second, manual `record["actions"] = [...]` pass (an
+            # earlier draft of this loop had one) is dead code that
+            # reassigns the exact list `asdict` already built.
             record = dataclasses.asdict(decision)
-            record["actions"] = [
-                dataclasses.asdict(a) for a in decision.actions
-            ]
             handle.write(json.dumps(record) + "\n")
 
     print(f"wrote {args.out} ({result.steps} steps) and {args.run_dir}")
