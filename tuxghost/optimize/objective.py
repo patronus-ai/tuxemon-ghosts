@@ -41,6 +41,17 @@ class ReachTile:
     being optimized -- but it means `ReachTile` cannot reward a route
     that legitimately passes THROUGH another map. Such a target needs a
     state predicate, not a tile.
+
+    The two terms handle missing data asymmetrically, on purpose. A
+    missing/mismatched `"map"` fails SAFE -- it reads as off-target, the
+    worst score, which is the right default for a term whose whole job
+    is a boolean comparison. A missing, empty, or short `tile_pos` gets
+    no such default: there is no safe numeric stand-in for "we don't
+    know where the candidate ended up", because inventing one (e.g. the
+    origin) can silently outscore a genuine candidate that is merely far
+    from the target. So a malformed `tile_pos` is a REFUSAL --
+    `ValueError`, in the style of `tuxghost.optimize.schedule.lift` --
+    not a default. Do not "helpfully" restore a fallback here.
     """
 
     def __init__(self, map_name: str, tile: tuple[int, int]) -> None:
@@ -50,7 +61,13 @@ class ReachTile:
     def score(self, candidate: CandidateResult) -> tuple[float, ...]:
         state = candidate.final_state
         on_map = state.get("map") == self.map_name
-        pos = state.get("tile_pos") or [0, 0]
+        pos = state.get("tile_pos")
+        if not isinstance(pos, (list, tuple)) or len(pos) != 2:
+            raise ValueError(
+                f"final_state['tile_pos'] is {pos!r}; expected a "
+                "two-element (x, y) sequence, refusing rather than "
+                "inventing a position"
+            )
         distance = abs(pos[0] - self.tile[0]) + abs(pos[1] - self.tile[1])
         return (
             0.0 if on_map else -1.0,

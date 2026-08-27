@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from tuxghost.optimize.objective import ReachTile
 from tuxghost.optimize.seal import CandidateResult
 
@@ -78,3 +80,29 @@ def test_distance_is_symmetric_in_both_axes() -> None:
     left = _candidate("spyder_paper_town.tmx", (10, 20), 400)
     below = _candidate("spyder_paper_town.tmx", (12, 22), 400)
     assert TARGET.score(left) == TARGET.score(below)
+
+
+def _bare_candidate(final_state: dict[str, Any], steps: int = 400) -> CandidateResult:
+    """Like `_candidate`, but lets a test hand `final_state` a malformed
+    `tile_pos` directly rather than always producing a valid two-element
+    one."""
+    trace: Any = None
+    return CandidateResult(trace=trace, steps=steps, final_state=final_state)
+
+
+def test_missing_tile_pos_is_a_refusal_not_a_default() -> None:
+    candidate = _bare_candidate({"map": "spyder_paper_town.tmx"})
+    with pytest.raises(ValueError, match="tile_pos"):
+        TARGET.score(candidate)
+
+
+def test_empty_tile_pos_is_a_refusal_not_a_default() -> None:
+    candidate = _bare_candidate({"map": "spyder_paper_town.tmx", "tile_pos": []})
+    with pytest.raises(ValueError, match="tile_pos"):
+        TARGET.score(candidate)
+
+
+def test_short_tile_pos_is_a_refusal_not_a_default() -> None:
+    candidate = _bare_candidate({"map": "spyder_paper_town.tmx", "tile_pos": [5]})
+    with pytest.raises(ValueError, match="tile_pos"):
+        TARGET.score(candidate)
