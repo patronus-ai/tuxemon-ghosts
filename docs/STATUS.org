@@ -231,6 +231,12 @@ measures as *16 steps* (raw per-tile deltas =[2, 16, 16, 16, 16]=; the
 leading =2= is a start-position edge effect), corroborated by
 =STEP_RATE 60 / player_walkrate 3.75 = 16=.
 
+One thing that spawn is NOT: unoccluded. At tile (12, 12) the player
+stands behind the map's house, drawn on a layer above the sprite, so the
+first frame of every agent run from this save shows no player avatar at
+all — measured, and noticed unprompted by the live model itself (see "The
+live-model capture" below, finding 2).
+
 ** Two S1 defects found and fixed by S2's work, neither reachable by S1's own 131-test suite
 
 - An unresolvable =npc_state.current_map= escaped as an uncaught
@@ -297,14 +303,135 @@ patch series (=patches/= is not for that) or a global monkeypatch every
 consumer inherits, for a guarantee (frame reproducibility) this project
 never promised. See the spec's Known Limitations for the full reasoning.
 
-** No live-model evidence
+** The live-model capture — model =claude-sonnet-5=, 2026-08-27
 
-The entire Anthropic wire contract — request-shape acceptance, the real
-model's JSON-fencing reliability, the real response object's
-=.content=/=.type=/=.text= shape, and token sufficiency — has NO live
-capture behind it. Every =ClaudePolicy= test uses an injected stub. A
-reader must not mistake stub coverage for a real run; if a live capture
-happens later, record its model id here.
+The Anthropic wire contract now has exactly ONE live capture behind it,
+and everything below is measured from it rather than assumed. Before this,
+every =ClaudePolicy= test used an injected stub and no committed
+transcript had ever been near the API.
+
+The invocation (from the repo root, real API, key supplied out of band):
+
+#+begin_src bash
+tuxghost agent --policy claude \
+  --from-save tests/fixtures/paper_town.save \
+  --seed 1234 --clock-epoch 1787659200 --steps 600 --upscale 1 \
+  --goal "Explore this town on foot and find another person to talk to. Keep moving and keep trying; do not end the run early." \
+  --out tests/golden/claude_town_1234.tuxghost --run-dir <run dir>
+#+end_src
+
+Exit *0*. 5 decisions, 442 of 600 steps, =stop_reason= "step budget",
+=final_digest= =bc717075d0ba16b8731ae89ddf92f8aa9ff3201429f6766c480f02cded5faf1f=.
+=--model= was omitted, so this exercises the shipped default path:
+=tuxghost.agent.claude.DEFAULT_MODEL= = *=claude-sonnet-5=*. No other
+model id has live evidence, and =anthropic= resolved to *1.1.0* (the
+=[agent]= extra's floor is 0.40; the SDK's 0.x→1.x major bump did not
+affect either binding this project uses, =anthropic.Anthropic()= and
+=messages.create=).
+
+*What the run actually did*, from its own transcript: walked RIGHT/DOWN
+out of the spawn area, spotted an NPC two tiles away, walked LEFT to her,
+pressed =A=, pushed a =DialogState=, and advanced the dialogue with six
+more =A= presses before heading for the shop. It reached the goal — a
+judgement made BY HAND from the transcript and the frames, not by any
+evaluator: =--goal= still has none (see "Honest limits"), and nothing
+in the suite scores this run's outcome.
+
+That matters beyond novelty. Every one of the older golden's 80 inputs
+(=tests/golden/walk_1234.tuxghost=) is button 64 (=A=) — despite its name
+it never walks — so until this capture NO committed trace exercised
+replaying a directional press or a pushed state at all, which is exactly
+the gap two S1 defects hid in (see "Two S1 defects found and fixed by
+S2's work" above).
+
+*What is therefore no longer unmeasured*: request-shape acceptance
+(base64 =image/png= content blocks plus a =system= string and a sliding
+4-turn window), the real response object's =.content= /
+=.type= / =.text= shape (the =getattr(block, "type", None) == "text"=
+filter in =ClaudePolicy.decide= works against the real SDK's objects),
+=MAX_TOKENS = 1024= sufficiency (no truncated answer in 7 live answers
+across this run and a 2-decision smoke run before it), and JSON-fencing
+reliability (7 of 7 answers parsed; zero =ValueError= from
+=parse_response=).
+
+*Still unmeasured*: prompt BUILDING has no real-model coverage of any
+kind — nothing checks that =build_messages= produces what the API
+prefers, only that the API accepts it. Nothing in =make check= re-runs
+the model, by design: the gate must not need a network or a key. And a
+live run is not reproducible from seed alone — see "Honest limits" above.
+
+*** Three findings the capture produced
+
+1. *The stub suite could not have caught a fence regex that cannot span
+   newlines.* Every stub answer in =tests/test_agent_claude.py= has a
+   SINGLE-LINE json payload; every real answer is multi-line (the model
+   pretty-prints across =actions=/=notes=/=claimed_outcome=). Measured:
+   deleting =re.DOTALL= from =ClaudePolicy._JSON_BLOCK= leaves all 16
+   stub tests passing and fails only the new
+   =tests/test_live_capture.py::test_transcript_raw_answers_reparse_to_their_recorded_actions=.
+   That test exists because of this, and the two module docstrings that
+   claimed committed transcripts were all synthetic are corrected.
+2. *At the fixture's spawn tile the player sprite is not visible.* The
+   model said so unprompted in its first note ("No player character
+   visible in initial frame"), and frame =00000.png= confirms it: tile
+   (12, 12) puts the player behind =spyder_paper_town.tmx='s house, which
+   the map draws on a layer above the sprite, so the agent's very first
+   observation does not contain its own avatar. Four tiles later the
+   player renders plainly (blue cap, centre of frame). This is an
+   occlusion property of the FIXTURE plus the camera, not a renderer
+   defect — a scripted control run walking DOWN/RIGHT shows the sprite in
+   frames 1-7 — but it does mean the first decision of every run from
+   this save is taken semi-blind. A future fixture should spawn somewhere
+   unoccluded.
+3. *A run that ends because the policy said STOP discards the answer that
+   said so.* =run_agent='s STOP break path never reaches
+   =decisions.append=, and =run.json= records only
+   =stop_reason: "policy returned STOP"= — the model's final raw answer
+   lives in =policy.last_raw= and is dropped on the floor. Observed for
+   real in the smoke run (2 decisions, second answer lost); the committed
+   capture stopped on step budget instead, so its transcript is complete.
+   Not fixed here: it is a real observability gap, recorded rather than
+   quietly left for someone to rediscover.
+
+*** Practical note on =--upscale=
+
+The capture passed =--upscale 1=. The CLI's default is 4, which — layered
+on =scaled_context()='s measured scale 5 — sends 5120x2880 PNGs that the
+API downscales anyway. At scale 5 the drawn region already fills
+1280x720 (see =tuxghost/observe.py='s =png= docstring), so upscaling
+before sending buys nothing but bytes.
+
+*** The committed artifacts, and what pins them
+
+- =tests/golden/claude_town_1234.tuxghost= (10 KB) — the recorded trace,
+  =provenance.recorder = "cu-agent"=, =model = "claude-sonnet-5"=.
+- =tests/fixtures/claude_town_1234.decisions.jsonl= (4.6 KB) — the real
+  transcript, =raw= answers included.
+- =tests/fixtures/claude_town_1234.run.json= — goal, seed, epoch, model,
+  stop reason, so the transcript is not an orphan.
+- Frames are NOT committed: 5 PNGs at ~19 KB each is exactly the bloat
+  that cost S1 a 3.7 MB blob (see task 14's history).
+
+=tests/test_live_capture.py= holds five tests over them, each
+demonstrated to fail against the defect it pins:
+
+| Test | Mutation it was shown to fail against | Discrimination |
+|------+--------------------------------------+----------------|
+| =..._trace_verifies=, =..._still_reaches_its_recorded_digest= | =tuxghost/execute.py='s =_schedule_of= drops every non-=A= button | both fail (=verify= 1≠0; digest =e60cad02…= vs =bc717075…=) while ALL FOUR =walk_1234= golden tests keep passing — the point of the fixture in one measurement |
+| =..._presses_directions_not_only_a= | point it at =walk_1234.tuxghost= | fails with =assert ({64} - {64})= — which also re-measures that the old golden is A-only |
+| =..._raw_answers_reparse_to_their_recorded_actions= | drop =re.DOTALL= from =_JSON_BLOCK= | fails alone; 16 stub tests pass (finding 1 above) |
+| =..._transcript_replays_to_the_captured_trace= | =ReplayPolicy.decide= loops instead of returning =STOP= when exhausted | fails =assert 546 == 442= |
+
+The replay test is also an independent re-confirmation of the
+digest-neutrality of display scale: the live run recorded at
+=scaled=True= (scale 5) and the test replays at =scaled=False=, and the
+input schedule and =final_digest= match byte-for-byte.
+
+=tests/conftest.py='s =patch_series_id= tripwire tracks the new file with
+NO pinned entries, deliberately: this fixture was recorded against the
+current =patches/=, so it must warn zero times, and the day a seventh
+patch lands the tripwire fails loudly instead of the stale fixture
+joining the ambient noise.
 
 ** Display scale: measured digest-neutral, real scale is 5
 
@@ -474,6 +601,26 @@ actually been evaluated: it ran, emitted exactly its pinned *1*
 reported no mismatch. The pinned count for that entry is confirmed
 correct, not just assumed.
 
+*After the live-model capture* (2026-08-27): fast tier *213 passed, 3
+skipped, 9 warnings*; slow tier *3 passed, 213 deselected, 1 warning*.
+=make check= exit 0, sequentially, on this tree — five new tests
+(=tests/test_live_capture.py=), warning count deliberately unchanged
+(the new file's fixture was recorded against the current =patches/=, so
+it must warn zero times; the tripwire tracks it with no pinned entries
+to keep that true). =ruff=, =lint-patched=, =mypy --strict= over *42*
+source files green in the same run.
+
+That gate run happened with the optional =[agent]= extra
+(=anthropic= 1.1.0) installed locally, which the capture needed. The
+suite does not depend on it either way: =tests/test_live_capture.py=
+plus =tests/test_agent_claude.py= were re-run with =anthropic= blocked
+outright by a =sys.meta_path= finder that raises =ModuleNotFoundError=
+for it — 20 passed — so the SDK remains a genuine optional extra and
+=make check= still needs no network SDK. The new file constructs
+=ClaudePolicy()= with no client precisely so this stays true:
+=_ensure_client= (and its lazy =import anthropic=) is only reachable
+from =decide()=, which no test calls.
+
 ** Honest limits
 
 - *Model sampling is not determinism.* A live =ClaudePolicy= run is not
@@ -491,6 +638,10 @@ correct, not just assumed.
   machine even where the trace format holds.
 - *=--goal= has no evaluator.* It is free text that goes into the prompt
   and the run directory; nothing in S2 checks whether it was achieved.
+  The live capture's own goal WAS achieved (the model found and talked to
+  an NPC), but a person read the transcript to establish that; no code
+  did, and =tests/test_live_capture.py= asserts a =DialogState= was
+  reached, which is a proxy for "a conversation happened", not a score.
   Scoring is S5's job, and a half-scorer here would be worse than none.
 
 * Next subsystem

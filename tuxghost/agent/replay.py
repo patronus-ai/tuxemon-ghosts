@@ -6,9 +6,20 @@ module re-covers `actions_from_json` (the validation the two policies
 share) end to end without a network call, but NOT `parse_response`'s own
 fence parsing (`_JSON_BLOCK`, last-block selection, the json-decode and
 non-object-payload checks) or prompt building -- those are covered only
-by the stub-client tests in `tests/test_agent_claude.py`. The
-transcripts this project commits are SYNTHETIC test fixtures, not
-captured from a live `ClaudePolicy` run.
+by the stub-client tests in `tests/test_agent_claude.py`.
+
+Most transcripts this project commits are synthetic test fixtures. ONE is
+not: `tests/fixtures/claude_town_1234.decisions.jsonl` came off a real
+`--policy claude` run against the live API (see
+`tests/test_live_capture.py` for the invocation and the model id), and
+`tests/test_live_capture.py::test_live_transcript_replays_to_the_captured_
+trace` replays it through this class to the digest that run recorded.
+That still does not give `parse_response` transcript-replay coverage --
+this class never calls it -- but the same file re-parses that transcript's
+`raw` answers through `parse_response` directly, which found a real hole:
+every stub answer's json payload is single-line, so dropping `re.DOTALL`
+from `ClaudePolicy._JSON_BLOCK` failed NO stub test and every real answer
+(they are multi-line) at once.
 
 It deliberately does NOT loop when exhausted -- a transcript that silently
 restarted would make a replayed run diverge from the run it claims to

@@ -55,7 +55,17 @@ os.chdir(TUXEMON_DIR)
 # this check flagged those as "unexpected" too, which is wrong: it
 # would have made this tripwire fail on ANY committed test of the
 # warning path itself, in any file, forever.
-_TRACKED_FILES = ("tests/test_golden.py::", "tests/test_execute.py::")
+_TRACKED_FILES = (
+    "tests/test_golden.py::",
+    "tests/test_execute.py::",
+    # No pinned entries below for this file, deliberately: its
+    # fixture (`tests/golden/claude_town_1234.tuxghost`) was recorded
+    # against the CURRENT `patches/`, so it must warn ZERO times.
+    # Tracking it means the day someone adds a seventh patch, the
+    # live-capture fixture going stale FAILS here instead of quietly
+    # joining the ambient noise.
+    "tests/test_live_capture.py::",
+)
 _EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS: dict[str, int] = {
     "tests/test_golden.py::test_golden_trace_still_reaches_its_recorded_digest": 1,
     "tests/test_golden.py::test_golden_trace_verifies": 1,

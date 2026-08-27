@@ -1,0 +1,10 @@
+{
+  "goal": "Explore this town on foot and find another person to talk to. Keep moving and keep trying; do not end the run early.",
+  "seed": 1234,
+  "clock_epoch": 1787659200,
+  "step_budget": 600,
+  "policy": "claude",
+  "model": "claude-sonnet-5",
+  "steps": 442,
+  "stop_reason": "step budget"
+}

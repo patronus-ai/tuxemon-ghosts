@@ -11,8 +11,14 @@ response shapes change, and are covered directly, with stub responses, by
 `tests/test_agent_claude.py`. `ReplayPolicy` does NOT exercise either of
 them -- it calls `actions_from_json` directly and never `parse_response`
 (see `tuxghost/agent/replay.py`) -- so it re-covers only that shared
-validation against SYNTHETIC transcripts; fence parsing and prompt
-building have no transcript-replay coverage. Context is a sliding window
+validation; fence parsing and prompt building have no transcript-replay
+coverage. `parse_response` DOES have real-model coverage, just not
+through `ReplayPolicy`: `tests/test_live_capture.py` re-parses the `raw`
+answers of a live-captured transcript through it. That test is the only
+thing in this suite that sees a multi-line json payload -- every stub
+answer's payload is single-line, so `_JSON_BLOCK` losing `re.DOTALL`
+passes all 16 stub tests and fails only that one (measured). Prompt
+building still has no real-model coverage of any kind. Context is a sliding window
 of the last `window` turns plus a notes block carried forward verbatim --
 no summarisation call, whose output would silently steer the run and be a
 second prompt to maintain.
