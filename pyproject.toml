@@ -6,6 +6,7 @@ dependencies = ["pydantic>=2.10.6"]
 
 [project.optional-dependencies]
 dev = ["pytest", "mypy", "ruff"]
+agent = ["anthropic>=0.40"]
 
 [tool.setuptools.packages.find]
 include = ["tuxghost*"]
@@ -18,6 +19,16 @@ warn_unreachable = true
 module = "tuxemon.*"
 ignore_missing_imports = true
 follow_imports = "skip"
+
+# The `anthropic` SDK is an OPTIONAL extra (`pip install -e .[agent]`):
+# `ScriptedPolicy`/`ReplayPolicy` -- everything `make check` runs -- never
+# import it, and requiring a network SDK to run the gate would be a
+# needless coupling. `tuxghost/agent/claude.py` imports it lazily inside
+# `decide()`, so mypy needs to be told the stubs may be absent rather than
+# failing the strict gate on a dependency the gate does not install.
+[[tool.mypy.overrides]]
+module = "anthropic.*"
+ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py312"

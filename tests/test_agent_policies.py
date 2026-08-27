@@ -60,6 +60,37 @@ def test_replay_policy_refuses_a_malformed_record(tmp_path: Path) -> None:
         policy.decide(OBS)
 
 
+def test_replay_policy_claimed_outcome_survives_a_later_record_that_omits_it(
+    tmp_path: Path,
+) -> None:
+    """`ReplayPolicy` guards `claimed_outcome` with `if record.get(...)` so
+    a later record that omits the key cannot clobber an earlier value.
+    Carried from the task-6 review: no test pinned this before `ClaudePolicy`
+    started relying on it (task 7)."""
+    transcript = tmp_path / "three.jsonl"
+    transcript.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {"actions": [{"button": buttons.UP, "hold": 2, "settle": 2}]},
+                {
+                    "actions": [{"button": buttons.DOWN, "hold": 2, "settle": 2}],
+                    "claimed_outcome": "left town",
+                },
+                {"actions": [{"button": buttons.A, "hold": 2, "settle": 2}]},
+            ]
+        )
+    )
+    policy = ReplayPolicy(transcript)
+    policy.decide(OBS)
+    after_record_1 = policy.claimed_outcome
+    assert after_record_1 is None
+    policy.decide(OBS)
+    assert policy.claimed_outcome == "left town"
+    policy.decide(OBS)  # record 3 omits claimed_outcome entirely
+    assert policy.claimed_outcome == "left town"
+
+
 def test_replay_policy_does_not_loop_when_exhausted(tmp_path: Path) -> None:
     """A transcript that silently restarted would make a replayed run
     diverge from the run it claims to reproduce."""
