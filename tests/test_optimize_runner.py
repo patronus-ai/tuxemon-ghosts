@@ -15,8 +15,15 @@ tile (11, 14) on `spyder_paper_town.tmx` after 442 steps with
 `state_stack == ['DialogState', 'WorldState']`, and that trailing dialog
 swallows every input: one appended `UP`/`DOWN`/`LEFT`/`RIGHT`, and `A`
 then `DOWN`, and `B` then `DOWN`, ALL leave the tile at (11, 14). So no
-append-only edit to this parent can move the player, `ReachTile`'s
-`distance` term is frozen, and only its `steps` term is optimizable.
+append-only edit to this parent can move the player, and every accepted
+round in this module is accepted on `ReachTile`'s `steps` term.
+`ReachTile`'s `distance` term is NOT frozen -- across the nine-run tuning
+sweep it varied from -2 (the parent's own) down to -9, from mid-script
+edits that change the route before the dialogue opens -- but no candidate
+ever scored BETTER than the parent on it, so it has never been the term
+that carried an acceptance. See docs/STATUS.org, "The consequence, and it
+is a limit not a feature", which measured the earlier "frozen" reading
+false.
 
 That makes the improving edit a DELETE (442 -> 416 -> 390 -> 364 steps,
 same tile) and the worsening edit an APPEND (442 -> 642 -> 842). Fewer
@@ -492,3 +499,57 @@ def test_the_other_bounds_below_one_are_refused(
             max_rejections=max_rejections,
             max_cost=max_cost,
         )
+
+
+def test_a_negative_checkpoint_is_refused() -> None:
+    """Whole-branch review, Also-fix 1. `optimize()` validated its other
+    four bounds and not this one, and the failure is silent rather than
+    loud: `seal`'s hook tests `i % checkpoint == 0`, and `i % -1` is 0
+    for EVERY step, so `checkpoint=-1` took a `digest_of` AND a
+    `state_of` snapshot on all 442 steps of every round without saying
+    so. The CLI guarded it; a library caller had nothing. Refused before
+    the engine boots, so this test costs no engine time.
+
+    `>= 0`, not `>= 1`: 0 is the legal "do not sample" value, pinned by
+    `test_checkpoint_zero_samples_nothing`-style coverage in
+    `tests/test_optimize_seal.py`.
+    """
+    with pytest.raises(ValueError, match="checkpoint"):
+        optimize(
+            _parent(),
+            ScriptedEditor([]),
+            TARGET,
+            rounds=1,
+            patience=1,
+            max_rejections=1,
+            max_cost=10_000,
+            checkpoint=-1,
+        )
+
+
+def test_checkpoint_and_model_reach_seal() -> None:
+    """Whole-branch review, Also-fix 3: both were plumbed through
+    `optimize()` to `seal` and neither was asserted anywhere, so a
+    version that dropped either kept the whole suite green.
+
+    Asserted behaviourally on round 0's own candidate rather than by
+    intercepting `seal`: `checkpoint` shows up as sampled checkpoints
+    that a `checkpoint=0` run would not have, and `model` shows up in the
+    sealed trace's provenance. A stubbed `seal` would only prove the
+    keyword was forwarded, not that it did anything.
+    """
+    result = optimize(
+        _parent(),
+        ScriptedEditor([]),  # STOP at round 1: only round 0 boots.
+        TARGET,
+        rounds=1,
+        patience=1,
+        max_rejections=1,
+        max_cost=10_000,
+        checkpoint=64,
+        model="a-model-1",
+    )
+    assert [s for s, _ in result.best.checkpoints] == [
+        64, 128, 192, 256, 320, 384,
+    ]
+    assert result.best.trace.provenance.model == "a-model-1"

@@ -195,6 +195,19 @@ def optimize(
     ):
         if value < 1:
             raise ValueError(f"{name} must be >= 1, got {value!r}")
+    # `>= 0`, not `>= 1`: 0 is the LEGAL "do not sample" value, so this
+    # bound cannot be folded into the loop above. Checked here and not
+    # only in `tuxghost.cli` (whole-branch review, Also-fix 1) because
+    # `optimize()` is a boundary too, and a negative value is silently
+    # catastrophic rather than merely wrong: `tuxghost.optimize.seal`'s
+    # hook tests `i % checkpoint == 0`, and `i % -1` is 0 for EVERY step,
+    # so `checkpoint=-1` takes a `digest_of` and a `state_of` snapshot on
+    # all 442 of them without saying so.
+    if checkpoint < 0:
+        raise ValueError(
+            f"checkpoint must be >= 0 (0 means do not sample), got "
+            f"{checkpoint!r}"
+        )
 
     base_script = lift(parent.inputs, parent.header.step_count)
     # Round 0 seals the parent WITHOUT `max_cost`: the parent is the

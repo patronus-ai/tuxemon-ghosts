@@ -52,7 +52,23 @@ def _one(raw: Any, position: int) -> Edit:
         raise ValueError(f"edit {position} ({op}) is missing 'action'")
     # Reuses S2's validation so an edit's action is checked by exactly
     # the rules a policy's action is.
-    (action,) = actions_from_json([raw["action"]])
+    #
+    # Re-raised with `position` prefixed (whole-branch review, Also-fix
+    # 4): `actions_from_json` numbers its findings against the
+    # SINGLE-ITEM list handed to it, so every malformed nested action
+    # reported itself as `actions[0]` no matter which edit in the round
+    # it belonged to. These messages now reach a user as a round's
+    # `rejected_reason` in `optimize.jsonl`, where an index that is
+    # always 0 is actively misleading. The exception TYPE is preserved
+    # (`TypeError` for a non-object action, `ValueError` for a bad
+    # field), because `tuxghost.optimize.runner`'s boundary catches both
+    # and callers distinguish them.
+    try:
+        (action,) = actions_from_json([raw["action"]])
+    except (ValueError, TypeError) as exc:
+        raise type(exc)(
+            f"edit {position} ({op}) has a malformed 'action': {exc}"
+        ) from exc
     return Insert(index, action) if op == "insert" else Replace(index, action)
 
 

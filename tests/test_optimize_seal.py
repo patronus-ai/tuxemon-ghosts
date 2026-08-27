@@ -46,10 +46,18 @@ def test_sealing_an_unedited_script_reproduces_its_parent_exactly() -> None:
 def test_a_sealed_candidate_is_an_offline_agent_trace_that_verifies() -> None:
     parent = read(LIVE)
     script = lift(parent.inputs, parent.header.step_count)
-    result = seal(script, parent, taints=("derived in a test",))
+    result = seal(
+        script, parent, taints=("derived in a test",), model="a-model-1"
+    )
 
     assert result.trace.provenance.recorder == "offline-agent"
     assert result.trace.provenance.taints == ["derived in a test"]
+    # `model=` was plumbed through to `Recorder` but never asserted
+    # (whole-branch review, Also-fix 3): a `seal` that dropped it would
+    # have written every LLM-edited candidate with no model attribution
+    # at all, and this suite would have stayed green. Provenance honesty
+    # is the reason `--editor replay` is refused without `--model`.
+    assert result.trace.provenance.model == "a-model-1"
     assert execute(result.trace).final_digest == result.trace.header.final_digest
 
 

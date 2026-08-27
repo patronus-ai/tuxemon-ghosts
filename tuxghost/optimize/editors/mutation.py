@@ -21,6 +21,8 @@ from __future__ import annotations
 import random
 from collections.abc import Sequence
 
+from tuxemon.platform.const import buttons
+
 from tuxghost.agent.types import HOLD_CAP, SETTLE_CAP, VALID_BUTTONS, Action
 from tuxghost.optimize.edits import Delete, Edit, Insert, Replace
 from tuxghost.optimize.schedule import ActionScript
@@ -29,7 +31,23 @@ from tuxghost.optimize.seal import CandidateResult
 #: Only the overworld buttons an edit can usefully reach. `VALID_BUTTONS`
 #: includes mouse and finger events the overworld ignores; proposing them
 #: would spend rounds on no-ops that still cost a full engine run.
-_USEFUL = (1, 2, 4, 8, 64, 128)
+#:
+#: Read from `tuxemon.platform.const.buttons`, not written out as
+#: `(1, 2, 4, 8, 64, 128)` (whole-branch review, Also-fix 2). The
+#: `assert` below catches a value LEAVING `VALID_BUTTONS` but not a
+#: REMAPPING: if upstream swapped `UP` and `LEFT`, every literal here
+#: would still be a valid button, this editor would silently propose the
+#: wrong direction, and the assert would stay green. The prompt in
+#: `tuxghost.optimize.editors.claude` states the same six and now reads
+#: them from the same place, for the same reason.
+_USEFUL = (
+    buttons.UP,
+    buttons.DOWN,
+    buttons.LEFT,
+    buttons.RIGHT,
+    buttons.A,
+    buttons.B,
+)
 
 
 class MutationEditor:

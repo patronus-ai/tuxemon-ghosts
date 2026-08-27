@@ -176,6 +176,7 @@ if TYPE_CHECKING:
     from tuxemon.save_system.save_state import SaveData
 
     from tuxghost.agent.types import Action, Policy
+    from tuxghost.optimize.runner import Round
 
 #: Which of each subcommand's parsed arguments are paths that must be
 #: `.resolve()`d against the caller's cwd before any chdir happens.
@@ -294,12 +295,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p_opt.add_argument("--model", default=None)
     p_opt.add_argument("--objective", choices=("reach-tile",), required=True)
     p_opt.add_argument("--target", required=True)
+    # Mirrors `agent`'s `--goal`, and for the same reason: `--editor
+    # claude` is the only editor that reads it, and without it the model
+    # was sent the action list, the end tile and a bare score tuple with
+    # NO statement of what it was optimizing toward (whole-branch review,
+    # Important 1 -- and a repeat of the defect the comment at the
+    # `--goal`-never-reached-the-run site below records). Unlike
+    # `agent`'s, this one is NOT left empty when unset: `--objective`
+    # plus `--target` already say what the goal is, so `_optimize`
+    # derives a default from them (`_derived_goal`) rather than sending
+    # nothing. Set it explicitly to say something the target cannot,
+    # e.g. "get there without entering the tall grass".
+    p_opt.add_argument("--goal", default="")
     p_opt.add_argument("--rounds", type=int, required=True)
     p_opt.add_argument("--patience", type=int, required=True)
     p_opt.add_argument(
         "--max-rejections", type=int, required=True, dest="max_rejections"
     )
-    p_opt.add_argument("--max-cost", type=int, required=True, dest="max_cost")
+    p_opt.add_argument(
+        "--max-cost", type=int, required=True, dest="max_cost",
+        help=(
+            "Step ceiling on what an EDITOR MAY PROPOSE, not on the run: "
+            "round 0 seals the parent without it (refusing the baseline "
+            "would leave nothing to compare against), so a budget below "
+            "the parent's own cost is not an error and still writes a "
+            "parent-cost trace."
+        ),
+    )
     p_opt.add_argument("--checkpoint", type=int, default=64)
     p_opt.add_argument("--out", type=Path, required=True)
     p_opt.add_argument("--run-dir", type=Path, required=True, dest="run_dir")
@@ -901,12 +923,48 @@ def _parse_target(raw: str) -> tuple[str, tuple[int, int]] | None:
         return None
 
 
+def _derived_goal(objective: str, target: tuple[str, tuple[int, int]]) -> str:
+    """The default `--goal` when the caller gives none.
+
+    `--objective`/`--target` already say what the run is optimizing
+    toward, so an unset `--goal` derives from them rather than leaving
+    `ClaudeEditor` blindfolded (whole-branch review, Important 1). Only
+    `reach-tile` exists; a new objective must extend this rather than
+    fall through to a stale sentence about tiles, so the `else` raises.
+    """
+    map_name, (x, y) = target
+    if objective == "reach-tile":
+        return f"reach tile ({x}, {y}) on map {map_name}"
+    raise AssertionError(  # pragma: no cover -- argparse `choices` refuses this
+        f"unhandled objective {objective!r}"
+    )
+
+
+def _round_json(entry: Round) -> dict[str, Any]:
+    """One `runner.Round` as a JSON object, with its edits serialized
+    through `Edit.to_json` rather than `dataclasses.asdict`.
+
+    Whole-branch review, Important 2. `asdict` recurses by FIELD, and
+    `Insert` and `Replace` have identical field sets, so an
+    `asdict`-logged round could not be told apart from the other and fed
+    back through `edits_from_json` raised `edit 0: unknown op None`
+    (measured). The spec's claim that `ReplayEditor` "is what makes an
+    LLM-driven optimization auditable after the fact" only holds if
+    `optimize.jsonl`'s rows can be read by `--edits`, and after an
+    `--editor claude` run -- the one editor the spec calls unreproducible
+    by construction -- that log is the only record of what was proposed.
+    """
+    import dataclasses
+
+    row: dict[str, Any] = dataclasses.asdict(entry)
+    row["edits"] = [edit.to_json() for edit in entry.edits]
+    return row
+
+
 def _optimize(args: argparse.Namespace) -> int:
     """Optimize a trace offline. Exits 0 or 2 for everything it can
     anticipate; 1 is reserved for a genuine engine bug, exactly as
     `_agent` documents -- there is nothing here to diverge FROM."""
-    import dataclasses
-
     from tuxghost.optimize.editors.mutation import MutationEditor
     from tuxghost.optimize.editors.replay import ReplayEditor, edits_from_json
     from tuxghost.optimize.editors.scripted import ScriptedEditor
@@ -1075,7 +1133,19 @@ def _optimize(args: argparse.Namespace) -> int:
         from tuxghost.optimize.editors.claude import ClaudeEditor
 
         model = args.model if args.model is not None else DEFAULT_MODEL
-        editor = ClaudeEditor(model=model)
+        # `goal` and `score_legend` are BOTH required for this editor to
+        # be told what it is optimizing toward (whole-branch review,
+        # Important 1). Without the first the prompt named no target at
+        # all; without the second the prompt's only quantitative feedback
+        # was three unlabelled numbers (`[0.0, -2.0, -442.0]`) whose
+        # order and sign the model had to guess. `ReachTile.TERMS` is the
+        # objective's own statement of its terms, so the legend cannot
+        # drift out of step with `ReachTile.score`.
+        editor = ClaudeEditor(
+            model=model,
+            goal=args.goal or _derived_goal(args.objective, target),
+            score_legend=", ".join(ReachTile.TERMS),
+        )
     else:  # pragma: no cover -- argparse `choices` already refuses this
         raise AssertionError(f"unhandled editor {args.editor!r}")
 
@@ -1139,11 +1209,19 @@ def _optimize(args: argparse.Namespace) -> int:
     # the refusal above); the `is not None` guard stays as the local,
     # readable statement of that rather than an assumption about a check
     # 80 lines up.
+    # The count is rounds that ACTUALLY PROPOSED EDITS, not
+    # `len(result.rounds) - 1` (whole-branch review, Also-fix 8). Round 0
+    # is the parent and the STOP round is deliberately appended to the
+    # log, so an editor that stopped immediately -- applying zero edits
+    # -- was recorded as "over 1 round(s)". Cosmetic, but the taint is
+    # this branch's sole lineage record. A round whose `propose` RAISED
+    # also has no edits and is also not counted: it proposed nothing.
+    edited_rounds = sum(1 for entry in result.rounds if entry.edits)
     lineage = (
         f"derived by offline-agent ({args.editor}"
         + (f", seed {args.seed}" if args.seed is not None else "")
         + f") from parent {parent.header.final_digest} over "
-        f"{len(result.rounds) - 1} round(s)"
+        f"{edited_rounds} round(s)"
     )
     # RE-SEAL the winner with its lineage rather than rewriting the trace
     # the loop already sealed. The round count is only known now, and
@@ -1188,7 +1266,7 @@ def _optimize(args: argparse.Namespace) -> int:
     args.run_dir.mkdir(parents=True, exist_ok=True)
     with (args.run_dir / "optimize.jsonl").open("w") as handle:
         for entry in result.rounds:
-            handle.write(json.dumps(dataclasses.asdict(entry), default=str) + "\n")
+            handle.write(json.dumps(_round_json(entry), default=str) + "\n")
     (args.run_dir / "run.json").write_text(
         json.dumps(
             {

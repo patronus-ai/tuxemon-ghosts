@@ -20,10 +20,23 @@ multi-line, so a regex without it passes all 16 stub tests and fails only
 against real text (measured -- see docs/STATUS.org, "The live-model
 capture", finding 1).
 
+`goal` and `score_legend` are both OPTIONAL here and both are supplied
+by `tuxghost.cli._optimize` on every real run (pinned by
+`tests/test_optimize_cli.py`). They default to `""` so the two pure
+functions below stay testable in isolation, NOT because a blindfolded
+editor is an intended configuration: until the whole-branch review, the
+CLI passed neither, and every `--editor claude` run sent the action list,
+the end tile, the checkpoints and a bare `[0.0, -2.0, -442.0]` with no
+target and no legend for the terms.
+
 No comparison against `tuxghost.optimize.editors.mutation.MutationEditor`
 has been run: this editor is not asserted or implied to perform better
 (or worse) than that seeded baseline anywhere in this module. That
-comparison is unmeasured future work.
+comparison is unmeasured future work -- and the spec permits it only at
+the same parent, budget and objective, which is why the blindfold above
+had to be fixed before it could be run at all: it would have pitted a
+goalless editor against a sighted seeded baseline and invited "the LLM
+editor is no better than random" as the reading.
 """
 
 from __future__ import annotations
@@ -32,6 +45,8 @@ import json
 import re
 from collections.abc import Sequence
 from typing import Any
+
+from tuxemon.platform.const import buttons
 
 from tuxghost.agent.claude import DEFAULT_MODEL
 from tuxghost.optimize.editors.replay import edits_from_json
@@ -43,12 +58,25 @@ EDITOR_MAX_TOKENS = 4096
 
 _JSON_BLOCK = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 
+#: The overworld buttons this editor is told about -- the same six
+#: `MutationEditor._USEFUL` draws from, and read from
+#: `tuxemon.platform.const.buttons` for the same reason it is (whole-branch
+#: review, Also-fix 2): the values were hardcoded in the prompt below,
+#: so an upstream remapping of UP/LEFT would have left this editor
+#: confidently proposing the wrong button with nothing to catch it.
+#: Built by concatenation rather than an f-string because the prompt's
+#: json example is full of braces.
+_BUTTON_LEGEND = ", ".join(
+    f"{name}={getattr(buttons, name)}"
+    for name in ("UP", "DOWN", "LEFT", "RIGHT", "A", "B")
+)
+
 SYSTEM = """You are improving a recorded Tuxemon play trace, offline.
 
 The trace is a list of ACTIONS. Each action presses one button, holds it
 `hold` steps, releases it, then waits `settle` steps. The game runs at 60
 steps per second and one tile of walking takes 16 steps of a direction
-held. Buttons: UP=1, DOWN=2, LEFT=4, RIGHT=8, A=64, B=128.
+held. Buttons: """ + _BUTTON_LEGEND + """.
 
 You never see the game. You see the action list, where the run ended, and
 a sequence of checkpoints showing where it was along the way. Propose
@@ -73,6 +101,14 @@ class ClaudeEditor:
         self,
         model: str = DEFAULT_MODEL,
         goal: str = "",
+        # Names for the `Objective`'s score terms, in priority order,
+        # e.g. `"on_target_map, -distance_to_target, -steps"`. Without
+        # it the prompt's only quantitative feedback was three unlabelled
+        # numbers whose order and sign the model had to guess
+        # (whole-branch review, Important 1). Supplied by the CALLER --
+        # an editor never sees the `Objective` itself -- and
+        # `tuxghost.cli` passes `ReachTile.TERMS`.
+        score_legend: str = "",
         # The injected `anthropic.Anthropic` instance (real or test stub).
         # Bare `Any` for the same reason `ClaudePolicy` uses it: naming
         # the type would need an unconditional import of an optional
@@ -82,6 +118,7 @@ class ClaudeEditor:
     ) -> None:
         self.model = model
         self.goal = goal
+        self.score_legend = score_legend
         self.notes = ""
         self.last_raw: str | None = None
         self._client = client
@@ -104,6 +141,10 @@ class ClaudeEditor:
         if self.goal:
             lines.append(f"\nGoal: {self.goal}")
         lines.append(f"\nScore (higher is better): {list(score)}")
+        if self.score_legend:
+            lines.append(
+                f"Score terms, in priority order: {self.score_legend}"
+            )
         state = candidate.final_state
         lines.append(
             f"\nEnded on map {state.get('map')!r}, tile_pos "

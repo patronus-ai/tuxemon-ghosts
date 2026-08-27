@@ -106,3 +106,19 @@ def test_short_tile_pos_is_a_refusal_not_a_default() -> None:
     candidate = _bare_candidate({"map": "spyder_paper_town.tmx", "tile_pos": [5]})
     with pytest.raises(ValueError, match="tile_pos"):
         TARGET.score(candidate)
+
+
+def test_terms_names_every_score_term_in_order() -> None:
+    """`ReachTile.TERMS` is sent to `ClaudeEditor` as the legend for the
+    score tuple (whole-branch review, Important 1), so a term added to
+    `score` without a name here would mislabel every number after it.
+    Pinned on LENGTH and on the sign convention each name states, not on
+    the exact strings, which are prose for a prompt."""
+    score = TARGET.score(_candidate("spyder_paper_town.tmx", (12, 18), 400))
+    assert len(ReachTile.TERMS) == len(score)
+    # The trailing two terms are negated in `score`; their names say so,
+    # because a model told "higher is better" and shown `-442.0` has to
+    # know that number is a cost.
+    assert ReachTile.TERMS[1].startswith("-")
+    assert ReachTile.TERMS[2].startswith("-")
+    assert not ReachTile.TERMS[0].startswith("-")

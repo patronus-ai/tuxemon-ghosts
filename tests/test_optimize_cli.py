@@ -20,6 +20,10 @@ from pathlib import Path
 
 import pytest
 
+from tuxghost.agent.types import Action
+from tuxghost.optimize.editors.replay import edits_from_json
+from tuxghost.optimize.edits import Insert, Replace
+
 ROOT = Path(__file__).resolve().parent.parent
 GOLDEN = ROOT / "tests" / "golden" / "claude_town_1234.tuxghost"
 
@@ -55,6 +59,13 @@ def _run(
     )
 
 
+def parent_digest_of_the_taint(taint: str, parent: Path) -> bool:
+    """Whether `taint` names `parent`'s own final digest. A lineage that
+    named some other trace's digest would be worse than one naming none:
+    it would claim a derivation that never happened."""
+    return json.loads(parent.read_text())["header"]["final_digest"] in taint
+
+
 def test_a_mutation_run_succeeds_and_writes_its_artifacts(tmp_path: Path) -> None:
     out = tmp_path / "best.tuxghost"
     run_dir = tmp_path / "run"
@@ -84,6 +95,17 @@ def test_a_mutation_run_succeeds_and_writes_its_artifacts(tmp_path: Path) -> Non
     ]
     assert rows[0]["index"] == 0 and rows[0]["accepted"] is True
     assert not (run_dir / "frames").exists(), "S3 renders nothing"
+
+    # The lineage taint, and specifically its SEED clause (whole-branch
+    # review, Also-fix 3). It was built and never asserted anywhere in
+    # the fast tier, so a lineage that dropped it -- or recorded the
+    # wrong seed -- would have left this suite green while the one
+    # durable record of HOW this trace was derived lost the only value
+    # that makes a `mutation` run reproducible at all.
+    taints = json.loads(out.read_text())["provenance"]["taints"]
+    assert len(taints) == 1, taints
+    assert "mutation" in taints[0] and "seed 7" in taints[0], taints[0]
+    assert parent_digest_of_the_taint(taints[0], GOLDEN), taints[0]
 
     # Folded in from what used to be a separate test issuing a
     # byte-identical invocation (review round 1): the written trace must
@@ -750,3 +772,247 @@ def test_a_non_anthropic_error_on_the_claude_editor_still_crashes(
     assert "RuntimeError: a real bug, not an API problem" in proc.stderr
     assert "refused" not in proc.stderr
     assert "main() RETURNED" not in proc.stdout
+
+
+#: Two edits IN ONE ROUND -- an insert and a replace -- so a single
+#: candidate run produces a logged round containing both ops. Cheaper
+#: than two rounds and it is the discrimination that matters, not the
+#: round count.
+_TWO_OP_EDITS_LINE = json.dumps([
+    {"op": "insert", "index": 0, "action": {"button": 2, "hold": 8, "settle": 4}},
+    {"op": "replace", "index": 0, "action": {"button": 8, "hold": 16, "settle": 0}},
+])
+
+
+def test_a_logged_round_round_trips_through_edits_from_json(
+    tmp_path: Path,
+) -> None:
+    """WHOLE-BRANCH REVIEW, IMPORTANT 2 -- the auditability contract, end
+    to end.
+
+    The spec calls `ReplayEditor` "what makes an LLM-driven optimization
+    auditable after the fact", and `--edits FILE` takes exactly the
+    `[{"op": ..., "index": ..., "action": {...}}]` shape. That claim is
+    only true if what `optimize.jsonl` WRITES can be READ back by
+    `edits_from_json` -- and before this fix it could not: rounds were
+    logged with bare `dataclasses.asdict`, which recurses by field, and
+    `Insert`/`Replace` have identical field sets. Measured on the pre-fix
+    checkout, a logged insert came back as
+
+        {"index": 0, "action": {"button": 2, "hold": 8, "settle": 4}}
+
+    indistinguishable from a replace, and fed to the project's own parser
+    raised `ValueError: edit 0: unknown op None`.
+
+    Asserted as EQUALITY against the edits that went in, not merely "it
+    parsed": a serializer that labelled everything `"delete"` would also
+    parse. The `op` sequence is asserted separately so an
+    insert-rendered-as-replace fails here rather than passing an
+    equality check by luck.
+    """
+    (tmp_path / "edits.jsonl").write_text(_TWO_OP_EDITS_LINE + "\n")
+    run_dir = tmp_path / "run"
+    proc = _run(
+        "--trace", str(GOLDEN), "--editor", "scripted",
+        "--edits", str(tmp_path / "edits.jsonl"),
+        "--objective", "reach-tile",
+        "--target", "spyder_paper_town.tmx:11,16",
+        "--rounds", "1", "--patience", "1", "--max-rejections", "1",
+        "--max-cost", "4000", "--out", str(tmp_path / "best.tuxghost"),
+        "--run-dir", str(run_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "optimize.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    # Round 1 must be a real scored candidate, or the edits never reached
+    # the log at all and everything below is vacuous.
+    assert rows[1]["index"] == 1 and rows[1]["rejected_reason"] is None, rows[1]
+
+    assert [edit["op"] for edit in rows[1]["edits"]] == ["insert", "replace"]
+    assert edits_from_json(rows[1]["edits"]) == (
+        Insert(0, Action(2, 8, 4)),
+        Replace(0, Action(8, 16, 0)),
+    )
+
+
+#: A FAKE `anthropic` module -- like `_ANTHROPIC_ARM_DRIVER`'s, but with a
+#: working `Anthropic` client that appends every `messages.create` kwargs
+#: dict to a file and answers STOP. STOP (an empty `edits` list) is what
+#: keeps this test to ONE prompt and two engine passes: round 0's parent
+#: seal, then the winner's re-seal. Braces are doubled throughout because
+#: this template goes through `str.format`.
+_CLAUDE_PROMPT_DRIVER = '''\
+import json
+import sys
+import types
+
+sys.path.insert(0, {root!r})
+
+CAPTURED = {captured!r}
+
+fake = types.ModuleType("anthropic")
+
+
+class AnthropicError(Exception):
+    pass
+
+
+class _Block:
+    def __init__(self, text):
+        self.type = "text"
+        self.text = text
+
+
+class _Response:
+    def __init__(self, text):
+        self.content = [_Block(text)]
+
+
+class _Messages:
+    def create(self, **kwargs):
+        with open(CAPTURED, "a") as handle:
+            handle.write(json.dumps(kwargs, default=str) + "\\n")
+        return _Response('```json\\n{{"edits": []}}\\n```')
+
+
+class Anthropic:
+    def __init__(self, *args, **kwargs):
+        self.messages = _Messages()
+
+
+fake.AnthropicError = AnthropicError
+fake.Anthropic = Anthropic
+sys.modules["anthropic"] = fake
+
+from tuxghost.execute import _bootstrap_vendored_tuxemon
+
+_bootstrap_vendored_tuxemon()
+
+from tuxghost.cli import main
+
+print("main() RETURNED", main(sys.argv[1:]))
+'''
+
+
+def _claude_prompt(
+    tmp_path: Path, *extra: str
+) -> tuple[subprocess.CompletedProcess[str], list[dict[str, object]]]:
+    """Run `--editor claude` against a stub SDK and return what the CLI
+    actually sent."""
+    captured = tmp_path / "captured.jsonl"
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        _CLAUDE_PROMPT_DRIVER.format(root=str(ROOT), captured=str(captured))
+    )
+    proc = subprocess.run(
+        [
+            sys.executable, str(driver),
+            "optimize",
+            "--trace", str(GOLDEN), "--editor", "claude",
+            "--objective", "reach-tile",
+            "--target", "spyder_paper_town.tmx:11,16",
+            "--rounds", "1", "--patience", "1", "--max-rejections", "1",
+            "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
+            "--run-dir", str(tmp_path / "run"),
+            *extra,
+        ],
+        capture_output=True, text=True, cwd=ROOT,
+        env={**os.environ, "SDL_VIDEODRIVER": "dummy",
+             "SDL_AUDIODRIVER": "dummy", "PYTHONHASHSEED": "0"},
+        check=False,
+    )
+    calls = [
+        json.loads(line)
+        for line in (
+            captured.read_text().splitlines() if captured.exists() else []
+        )
+        if line.strip()
+    ]
+    return proc, calls
+
+
+def test_the_target_reaches_the_claude_editors_prompt(tmp_path: Path) -> None:
+    """WHOLE-BRANCH REVIEW, IMPORTANT 1. `_optimize` built
+    `ClaudeEditor(model=model)` and there was no `--goal` on this parser,
+    so `ClaudeEditor.goal` was `""`, `build_prompt` skipped the `Goal:`
+    line entirely, and every real `--editor claude` run sent the action
+    list, the end tile, the checkpoints and a bare
+    `Score (higher is better): [0.0, -2.0, -442.0]` -- no target, no
+    legend for the three numbers.
+
+    The mechanism (a goal that IS passed reaches the prompt) was already
+    pinned by `tests/test_optimize_claude.py::test_the_goal_reaches_the
+    _prompt`. What nothing pinned, and what this asserts, is that the CLI
+    passes one. This is the same class of defect the comment at
+    `--goal never reached the run` in `tuxghost/cli.py` records for
+    `agent`, caught a second time.
+    """
+    proc, calls = _claude_prompt(tmp_path)
+    assert "main() RETURNED 0" in proc.stdout, (proc.stdout, proc.stderr)
+    assert len(calls) == 1, calls
+
+    prompt = str(calls[0]["messages"])
+    # The derived goal names the objective's own target: map AND tile.
+    assert "Goal:" in prompt, prompt
+    assert "(11, 16)" in prompt, prompt
+    assert "spyder_paper_town.tmx" in prompt, prompt
+    # The legend for the score tuple, from `ReachTile.TERMS`.
+    assert "on_target_map" in prompt, prompt
+    assert "-steps" in prompt, prompt
+
+    # Also-fix 2, in the one place it is observable from outside: the
+    # button values in the SYSTEM prompt are read from
+    # `tuxemon.platform.const.buttons`, not written out as literals, so a
+    # remapping upstream cannot leave this editor confidently proposing
+    # the wrong direction.
+    system = str(calls[0]["system"])
+    assert "UP=1" in system and "LEFT=4" in system, system
+
+    # Also-fix 8, and this run is exactly the case that exposed it: the
+    # editor answered STOP, so ZERO edits were applied -- and the lineage
+    # taint said "over 1 round(s)", because the count was
+    # `len(result.rounds) - 1` and the STOP round is deliberately
+    # appended to the log. The taint is this branch's sole lineage
+    # record, so a count that overstates it by one is worth one line.
+    written = json.loads((tmp_path / "o.tuxghost").read_text())
+    assert "over 0 round(s)" in written["provenance"]["taints"][0], (
+        written["provenance"]["taints"]
+    )
+
+
+def test_an_explicit_goal_overrides_the_derived_one(tmp_path: Path) -> None:
+    """`--goal` mirrors `agent`'s and says something `--target` cannot.
+    The derived default must not survive alongside it, or a caller who
+    typed a goal gets two."""
+    proc, calls = _claude_prompt(
+        tmp_path, "--goal", "get there without entering the tall grass"
+    )
+    assert "main() RETURNED 0" in proc.stdout, (proc.stdout, proc.stderr)
+    prompt = str(calls[0]["messages"])
+    assert "without entering the tall grass" in prompt, prompt
+    assert "reach tile" not in prompt, prompt
+
+
+def test_max_costs_help_states_that_the_parent_is_exempt(tmp_path: Path) -> None:
+    """Also-fix 5. `--max-cost 400` against the 442-step parent exits 0
+    and writes a 442-step trace -- deliberate (round 0 seals the parent
+    without the budget, or the run would have nothing to compare
+    against), pinned by
+    `test_a_parent_over_the_max_cost_still_seals_the_winner`, and
+    documented in docs/STATUS.org. From `--help` alone it was surprising:
+    a flag called `--max-cost` that a written artifact openly exceeds.
+
+    A `--help` assertion and not a prose review: the help string is the
+    one place a user meets this flag before running it.
+    """
+    del tmp_path
+    proc = _run("--help")
+    assert proc.returncode == 0, proc.stderr
+    # Collapse argparse's line wrapping before matching.
+    helptext = " ".join(proc.stdout.split())
+    assert "EDITOR MAY PROPOSE" in helptext, helptext
+    assert "parent-cost trace" in helptext, helptext

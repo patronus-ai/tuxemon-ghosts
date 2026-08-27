@@ -96,3 +96,39 @@ def test_deleting_every_action_is_allowed() -> None:
     editor is allowed to reach it. `seal` still runs `lead_in` steps."""
     out = apply_edits(ActionScript(lead_in=5, actions=(A,)), [Delete(0)])
     assert out == ActionScript(lead_in=5, actions=())
+
+
+def test_insert_and_replace_serialize_distinguishably() -> None:
+    """Whole-branch review, Important 2. `Insert` and `Replace` have
+    IDENTICAL field sets, so `dataclasses.asdict` rendered them as the
+    same object -- measured on the pre-fix checkout:
+
+        Insert(0, Action(2, 8, 4))   -> {"index": 0, "action": {...}}
+        Replace(1, Action(8, 16, 0)) -> {"index": 1, "action": {...}}
+
+    An `optimize.jsonl` reader could not tell whether round 7 inserted at
+    index 3 or overwrote what was already there. The `op` discriminator
+    is what closes that.
+    """
+    same_index_same_action = (Insert(0, UP).to_json(), Replace(0, UP).to_json())
+    assert same_index_same_action[0] != same_index_same_action[1]
+    assert same_index_same_action[0]["op"] == "insert"
+    assert same_index_same_action[1]["op"] == "replace"
+    assert Delete(0).to_json() == {"op": "delete", "index": 0}
+
+
+def test_to_json_round_trips_through_edits_from_json() -> None:
+    """The auditability contract, at the unit level: what an edit WRITES
+    is exactly what the project's own parser -- the one behind `--edits
+    FILE` and `ClaudeEditor`'s reply parsing -- READS. Asserted as
+    equality of the rebuilt edits, not just "it parsed": a parser that
+    silently turned every op into `Delete` would also "parse".
+
+    `tests/test_optimize_cli.py` asserts the same property end to end,
+    over a round the CLI actually logged.
+    """
+    from tuxghost.optimize.editors.replay import edits_from_json
+
+    originals = (Insert(0, UP), Delete(1), Replace(2, DOWN))
+    rebuilt = edits_from_json([edit.to_json() for edit in originals])
+    assert rebuilt == originals

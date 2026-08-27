@@ -90,12 +90,14 @@ slow tier unchanged at 3 passed / 203 deselected, and later to 213
 passed / 3 skipped after the live-model capture — see "S2 — CU-agent
 harness, delivered" below.
 
-*Current, as of S3's close-out: 347 passed / 4 skipped / 11 warnings
-(fast) and 4 passed / 347 deselected / 1 warning (slow), =make check=
-=EXIT=0=*, measured sequentially on this tree. That is the number to
-trust; see "S3 — offline trajectory optimizer, delivered" below for the
-full gate output and for why two older runtime figures (=10:52= and
-=41:54=) must not be inherited.
+*Current, as of S3's final fix wave: 356 passed / 4 skipped / 11
+warnings (fast) and 4 passed / 356 deselected / 1 warning (slow), =make
+check= =EXIT=0=*, measured sequentially on this tree. (S3's close-out
+commit measured 347 / 4 / 11; the fix wave added nine tests.) That is the
+number to trust; see "S3 — offline trajectory optimizer, delivered" below
+for the full gate output and for why three runtime figures (=10:52=,
+=41:54= and the fix wave's own =332.14 s=) must not be inherited as
+timings.
 
 * Measured determinism results, with real digests
 
@@ -674,14 +676,20 @@ replays to the digest it recorded. Spec:
 =recorder= vocabulary was invented, =format_version= stays *1*, and no
 header field was added. Lineage lives in =provenance.taints= as one
 string, e.g. ~"derived by offline-agent (mutation, seed 3) from parent
-bc717075… over 32 round(s)"~. The cost of that choice is accepted and
+bc717075… over 32 round(s)"~. The round count is the number of rounds
+that *actually proposed edits* — not =len(rounds) - 1=, which counted
+round 0's absence and the deliberately-logged STOP round and so said
+"over 1 round(s)" for a run that applied none (measured; fixed in the
+final fix wave). The cost of that choice is accepted and
 stated rather than glossed: lineage is prose, so nothing can mechanically
 walk a chain of derived traces, and S4 would have to parse a string to
 render a lineage tree. If that becomes real it is a v2 header field,
 argued then.
 
-Task history: S3's =.superpowers/sdd/= workspace is deleted at close-out,
-like S2's. Do not go looking for it. The durable record is the git
+Task history: S3's =.superpowers/sdd/= workspace *will be deleted* at
+close-out, like S2's — it still exists at this commit, and the present
+tense here was a claim about a pending action. Once it is gone, do not go
+looking for it. The durable record is the git
 history — =39b28c7= (spec) and =f34d2c6= (plan) through =c306465= (Task
 11's fix round), plus this close-out commit — and this section.
 
@@ -1006,6 +1014,25 @@ From the spec's "Known limitations", with what is now known:
   measured is that a dumb seeded mutator can, which is the baseline such
   a claim would have to beat. There is no S3 equivalent of S2's
   live-capture section below because there was no S3 live capture.
+
+  *Until the final fix wave, that capture could not have been run
+  honestly.* =tuxghost.cli._optimize= built =ClaudeEditor(model=model)=
+  and the =optimize= parser had no =--goal= at all, so =ClaudeEditor.goal=
+  was =""=, =build_prompt= skipped its =Goal:= line, and every real
+  =--editor claude= run would have sent the action list, the end tile,
+  the checkpoints and a bare ~Score (higher is better): [0.0, -2.0,
+  -442.0]~ — no target, and no legend for the three numbers (measured;
+  the pre-fix prompt is pasted in the final-fix report). The only claim
+  the spec permits about this editor is a comparison against
+  =MutationEditor= at the same parent, budget and objective, and that
+  comparison would have pitted a blindfolded editor against a sighted
+  seeded baseline. Now fixed both ways: =--goal= exists and mirrors
+  =agent='s, an unset =--goal= derives ~"reach tile (X, Y) on map
+  MAP"~ from =--objective=/=--target=, and =ReachTile.TERMS= is sent as
+  the score tuple's legend. Pinned at the CLI level by
+  =tests/test_optimize_cli.py::test_the_target_reaches_the_claude_editors_prompt=
+  (a stub =anthropic= module records what was actually sent). *The live
+  comparison itself is still unrun.*
 - *The =anthropic= extra stays optional.* The import is lazy and gated on
   =--editor claude=, so a genuine engine crash on =--editor mutation=
   cannot have its traceback replaced by =ModuleNotFoundError=. The extra
@@ -1022,6 +1049,88 @@ From the spec's "Known limitations", with what is now known:
 - *S3 renders nothing.* No =FrameRenderer=, no =scaled_context=, no
   frames in any run directory — by design, and the =CandidateResult= an
   editor sees carries no pixels.
+- *A transient =AnthropicError= discards the whole run, and this is the
+  one place the branch's containment philosophy stops.* Everything else
+  an editor can do wrong is contained to a single round: a malformed
+  reply, an out-of-range index, an over-budget script are all logged as
+  rejected rounds and the loop continues. An =AnthropicError= is not —
+  =_optimize='s gated =except Exception= arm sits OUTSIDE the loop, so a
+  rate limit on round 19 of 20 exits 2 having written *no artifact at
+  all*: no winner trace, no =optimize.jsonl=, no =run.json=, and 19
+  rounds of engine time gone. That is correct in the sense that it
+  matches =_agent='s contract and never reports an API problem as a
+  divergence (exit 1) or as the editor's fault; it is a limit in the
+  sense that nothing checkpoints the log as it goes. Closing it means
+  streaming =optimize.jsonl= per round rather than at the end, which is a
+  change to when the file is opened, not to the loop — *unmeasured, not
+  attempted.*
+
+** The final fix wave, after the whole-branch review
+
+One wave, no second round: the whole-branch review found S3 sound in
+architecture and scope but not mergeable on three localized findings,
+plus eight cheap items. All eleven landed. *Every one of the three
+findings and five of the eight items reproduced exactly as described when
+re-checked on this checkout*; nothing was "fixed" on a finding that did
+not reproduce.
+
+*The three findings.*
+
+1. =ClaudeEditor= was never told what it is optimizing toward. Details
+   and the pre-fix prompt are under "Honest limits" above. Fixed BOTH
+   ways the review offered rather than either: a =--goal= flag mirroring
+   =agent='s, AND a derived default from =--objective=/=--target= when it
+   is unset, because an empty string is not a sensible default for
+   something the CLI already knows. A score legend was added too
+   (=ReachTile.TERMS=, sent as one extra prompt line): three unlabelled
+   floats with a sign convention the model has to infer is the same
+   defect in a smaller costume.
+2. =optimize.jsonl= dropped each edit's =op=. Rounds were written with
+   =json.dumps(dataclasses.asdict(entry))=, and =asdict= recurses by
+   FIELD — =Insert= and =Replace= have identical field sets, so a logged
+   insert and a logged replace at the same index were byte-identical, and
+   a logged row fed back through this project's own parser raised
+   =ValueError: edit 0: unknown op None= (re-measured). Each variant now
+   carries an =op= =ClassVar= and a =to_json()=; =_round_json= in
+   =tuxghost/cli.py= serializes through it. =edits_from_json='s accepted
+   shape is unchanged — the point was that what is written can be read.
+   Note the =ClassVar=: it is not a dataclass field, so =__match_args__=
+   is untouched and =apply_edits='s positional =case Insert(index,
+   action)= patterns still work (that positional coupling was on the
+   deliberately-carried list and stayed there).
+3. A claim this branch measured false survived in
+   =tests/test_optimize_runner.py='s module docstring ("=ReachTile='s
+   =distance= term is frozen"). Corrected in place to what was actually
+   measured: it *varies* (−2 down to −9) and has simply never *improved*
+   against this parent, with a pointer here.
+
+*The eight cheap items*, in the review's order: (1) =optimize()= now
+validates =checkpoint >= 0= — a library caller passing =-1= got =i % -1
+== 0= for every step and so a =digest_of= AND a =state_of= snapshot on
+all 442 of them, silently; (2) both editors now read their button values
+from =tuxemon.platform.const.buttons= instead of hardcoding =(1, 2, 4, 8,
+64, 128)= in =MutationEditor= and again in =ClaudeEditor='s prompt; (3)
+four plumbed-but-unasserted paths are now asserted — =seal='s =model=→
+=Provenance.model=, =checkpoint= and =model= through =optimize()= to
+=seal=, and the mutation lineage taint's =seed 7= clause; (4) =_one= in
+=editors/replay.py= now prefixes the EDIT's own position to a malformed
+nested action's message, which previously always said =actions[0]=
+because the index came from the single-item list handed to
+=actions_from_json= — and those messages now reach a user as
+=rejected_reason=; (5) =--max-cost='s =--help= states the
+parent-is-exempt behaviour; (6) and (7) are the two =STATUS.org=
+corrections above; (8) the lineage round count is now rounds that
+actually proposed edits.
+
+*Item 2 is the one change in this wave with no demonstration, and that is
+stated rather than glossed.* Its defect — an upstream remap of, say, =UP=
+and =LEFT= — cannot be reintroduced without editing =tuxemon/=, which
+this project forbids outside a patch. The existing =assert set(_USEFUL)
+<= VALID_BUTTONS= catches a value LEAVING the set and would stay green
+through a remap; reading from =buttons= removes the failure mode instead
+of detecting it. The =UP=1=/=LEFT=4= assertion added to the CLI prompt
+test observes the values reaching the model, but it would also pass
+against the old literals, so it is coverage, not a pin.
 
 ** New test counts and the close-out gate
 
@@ -1030,7 +1139,9 @@ tests, written before any other S3 code), =tests/test_loop_add_edge.py=
 (the =add_edge= move), and nine =tests/test_optimize_*.py= modules — one
 per production module — with =schedule= 11, =edits= 13, =seal= 9,
 =objective= 10, =runner= 17, =mutation= 6, =replay= 12, =claude= 14 and
-=cli= 18 tests.
+=cli= 18 tests. The final fix wave took that to =edits= 15,
+=objective= 11, =runner= 19 and =cli= 22 (nine new tests; =seal= and
+=replay= gained assertions inside existing tests rather than new ones).
 
 Baseline entering S3 was S2's *213 passed / 3 skipped / 9 warnings*.
 
@@ -1080,6 +1191,35 @@ the same tier should NOT be inherited:
 
 The whole =make check= (all five targets) took roughly five minutes wall
 clock under the same falling load.
+
+*** The fix wave's own gate
+
+Re-run in full after the final fix wave, sequentially, on the same host:
+
+#+begin_src bash
+$ ( make check > /tmp/final-fix-gate.log 2>&1; echo "EXIT=$?" >> /tmp/final-fix-gate.log )
+./.venv/bin/python -m ruff check tuxghost tests
+All checks passed!                                  # lint
+All checks passed!                                  # lint-patched
+./.venv/bin/python -m mypy tuxghost tests
+Success: no issues found in 64 source files
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q
+356 passed, 4 skipped, 11 warnings in 332.14s (0:05:32)
+PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 ./.venv/bin/python -m pytest -q -m slow
+4 passed, 356 deselected, 1 warning in 72.50s (0:01:12)
+EXIT=0
+#+end_src
+
+- *=EXIT=0=.* +9 fast tests over close-out's 347, exactly the nine the
+  wave added; skips, warnings and the slow tier's 4 all unchanged.
+- *The =332.14 s= is NOT a timing.* =uptime= before the run reported
+  1-minute load *5.26*; during it, load rose to *11.5–13.8* because an
+  unrelated =pytest= suite was running in =gym-cua-lucidchart= (a
+  different repo and venv, so no =~/.tuxemon/cache/l18n= race and no
+  violation of the one-suite rule — but the CPU is shared). Against the
+  =238.62 s= reference at load ~5, treat this as "still well under the
+  600-second cap" and nothing more. A clean re-measurement needs a
+  quiescent host.
 
 * Next subsystem
 

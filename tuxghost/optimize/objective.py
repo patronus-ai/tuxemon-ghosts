@@ -54,6 +54,17 @@ class ReachTile:
     not a default. Do not "helpfully" restore a fallback here.
     """
 
+    #: This objective's score terms, in the order `score` returns them.
+    #: It exists so a prompt can LABEL the tuple: `ClaudeEditor` was
+    #: sent a bare `[0.0, -2.0, -442.0]` and had to guess the order and
+    #: the signs (whole-branch review, Important 1). Kept here, beside
+    #: `score`, rather than in the CLI, so the names cannot drift out of
+    #: step with the tuple they describe -- pinned by
+    #: `tests/test_optimize_objective.py`. NOT part of the `Objective`
+    #: protocol: an objective that wants no legend simply omits it, and
+    #: `ClaudeEditor.score_legend` defaults to none.
+    TERMS = ("on_target_map", "-distance_to_target", "-steps")
+
     def __init__(self, map_name: str, tile: tuple[int, int]) -> None:
         self.map_name = map_name
         self.tile = tile

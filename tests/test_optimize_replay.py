@@ -82,13 +82,21 @@ def test_edits_from_json_refuses_a_malformed_nested_action() -> None:
     -- so a non-object action (a bare string, here) is refused with a
     `TypeError`, not silently accepted or misparsed.
 
-    `actions_from_json` reports the malformed action's position relative
-    to the single-item list `_one` hands it, not the edit's position in
-    the round, so this deliberately matches only on the part of the
-    message that is actually correct ("must be an object"), not on the
-    index -- see the task-9 review's Minor, left unfixed on purpose."""
-    with pytest.raises(TypeError, match=r"must be an object"):
-        edits_from_json([{"op": "insert", "index": 0, "action": "nope"}])
+    `actions_from_json` numbers its own findings against the single-item
+    list `_one` hands it, so its half of the message always says
+    `actions[0]`. `_one` now prefixes the EDIT's own position
+    (whole-branch review, Also-fix 4): these messages reach a user as a
+    round's `rejected_reason` in `optimize.jsonl`, where an index that is
+    always 0 whatever went wrong is actively misleading. Asserted on the
+    SECOND edit, so a message that still reported the first would fail
+    -- against the first edit the two indices coincide and the test would
+    prove nothing."""
+    with pytest.raises(TypeError, match=r"must be an object") as excinfo:
+        edits_from_json([
+            {"op": "delete", "index": 0},
+            {"op": "insert", "index": 0, "action": "nope"},
+        ])
+    assert "edit 1 (insert)" in str(excinfo.value), str(excinfo.value)
 
 
 def test_replay_returns_each_round_in_order(tmp_path: Path) -> None:

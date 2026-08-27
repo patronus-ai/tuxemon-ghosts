@@ -15,32 +15,73 @@ Every refusal is a `ValueError`, matching `validate_actions`, so
 `tuxghost.optimize.runner` can catch exactly `(ValueError, TypeError)` --
 the same narrow boundary `tuxghost.cli._agent` uses -- and treat a bad
 proposal as a rejected round rather than a crash.
+
+Each variant carries an `op` DISCRIMINATOR and serializes through
+`to_json`, never through bare `dataclasses.asdict` (whole-branch review,
+Important 2). `asdict` recurses by field and the field sets of `Insert`
+and `Replace` are identical, so an `asdict`-logged round rendered
+`Insert(0, Action(2, 8, 4))` and `Replace(0, Action(2, 8, 4))` as the
+same object and fed back through
+`tuxghost.optimize.editors.replay.edits_from_json` raised
+`ValueError: edit 0: unknown op None` (measured). The spec calls
+`ReplayEditor` "what makes an LLM-driven optimization auditable after the
+fact", and that claim is only true if what `optimize.jsonl` WRITES is
+what `--edits FILE` can READ -- so `to_json`'s output shape is exactly
+`edits_from_json`'s accepted shape, pinned by
+`tests/test_optimize_edits.py` and, end to end, by
+`tests/test_optimize_cli.py`'s round-trip assertion.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from typing import Any, ClassVar
 
 from tuxghost.agent.types import Action, validate_actions
 from tuxghost.optimize.schedule import ActionScript
 
 
+def _action_json(action: Action) -> dict[str, int]:
+    return {
+        "button": action.button,
+        "hold": action.hold,
+        "settle": action.settle,
+    }
+
+
 @dataclass(frozen=True)
 class Insert:
+    #: A `ClassVar`, so it is NOT a dataclass field: `__match_args__`
+    #: stays `("index", "action")` and the positional `case Insert(index,
+    #: action)` patterns in `apply_edits` below are unaffected.
+    op: ClassVar[str] = "insert"
     index: int
     action: Action
+
+    def to_json(self) -> dict[str, Any]:
+        return {"op": self.op, "index": self.index,
+                "action": _action_json(self.action)}
 
 
 @dataclass(frozen=True)
 class Delete:
+    op: ClassVar[str] = "delete"
     index: int
+
+    def to_json(self) -> dict[str, Any]:
+        return {"op": self.op, "index": self.index}
 
 
 @dataclass(frozen=True)
 class Replace:
+    op: ClassVar[str] = "replace"
     index: int
     action: Action
+
+    def to_json(self) -> dict[str, Any]:
+        return {"op": self.op, "index": self.index,
+                "action": _action_json(self.action)}
 
 
 Edit = Insert | Delete | Replace
