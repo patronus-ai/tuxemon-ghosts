@@ -207,9 +207,11 @@ agent wearing a CU agent's clothes; ~ClaudePolicy~ is prompted from
 *Display scale is a measured gate, then a pinned constant.*
 =headless_init= hardcodes ~scale=1~/~DefaultScaling(1)~, while the real
 game builds its context with ~make_default_scaling(CONFIG,
-NATIVE_RESOLUTION)~ — scale 4 at 1280x720. The consequence is not
-cosmetic: at ~scale=1~ the camera shows roughly 80x45 tiles where a human
-sees roughly 20x11, so the probe's frames were a small native-scale
+NATIVE_RESOLUTION)~ — *scale 5* at 1280x720, measured in task 9 (an
+earlier draft of this spec said 4, unmeasured; ~make_default_scaling~
+computes ~int(1280 / 256)~, where 256 is ~NATIVE_RESOLUTION[0]~, not 320).
+The consequence is not cosmetic: at ~scale=1~ the camera shows roughly
+80x45 tiles where a human sees roughly *16x9*, so the probe's frames were a small native-scale
 island in a large black field. Implementation *measures* whether booting
 the scaled context changes ~digest_of~ against ~scale=1~ on a fixed
 route, and the result is recorded in =docs/= either way:

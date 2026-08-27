@@ -2672,9 +2672,13 @@ test missed exactly this bug)."
 
 The spec's one deliberately-open measurement. =headless_init= hardcodes
 =scale=1=/=DefaultScaling(1)= while the real game builds its context with
-=make_default_scaling(CONFIG, NATIVE_RESOLUTION)= — scale 4 at 1280x720.
-At =scale=1= the camera shows roughly 80x45 tiles where a human sees
-roughly 20x11.
+=make_default_scaling(CONFIG, NATIVE_RESOLUTION)= — *scale 5* at
+1280x720, measured in this task. (An earlier draft of this plan said
+"scale 4" and "~20x11 tiles" without measuring; =make_default_scaling=
+computes =int(1280 / 256)=, where 256 is =NATIVE_RESOLUTION[0]= from
+=tuxemon/platform/const/sizes.py=, not 320.) At =scale=1= the camera
+shows roughly 80x45 tiles at =tile_size=(16, 16)= where a human sees
+roughly *16x9* at =tile_size=(80, 80)=.
 
 *Files:*
 - Modify: =tuxghost/boot.py= (optional injected context)
@@ -2767,7 +2771,8 @@ git add tuxghost/boot.py tuxghost/observe.py tests/test_display_scale.py \
 git commit -m "measure: display scale versus the state digest
 
 headless_init pins scale=1 while the real game scales 4x, so the headless
-camera shows ~80x45 tiles where a human sees ~20x11. Measured, pinned by
+camera shows ~80x45 tiles where a human sees ~16x9 (scale 5, measured --
+an earlier draft said 4). Measured, pinned by
 a test, and recorded in docs/ -- see the note for which way it went."
 #+end_src
 
