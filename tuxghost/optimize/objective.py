@@ -63,7 +63,18 @@ class ReachTile:
     #: `tests/test_optimize_objective.py`. NOT part of the `Objective`
     #: protocol: an objective that wants no legend simply omits it, and
     #: `ClaudeEditor.score_legend` defaults to none.
-    TERMS = ("on_target_map", "-distance_to_target", "-steps")
+    #:
+    #: Term 0 is `-off_target_map`, NOT `on_target_map`, and the
+    #: difference is not cosmetic: `score` returns `0.0` when the
+    #: candidate IS on the target map and `-1.0` when it is not, so a
+    #: model told the term is `on_target_map` reads the good value
+    #: (`0.0`) as false -- exactly backwards. Naming it as a cost makes
+    #: all three terms read uniformly as "negated cost, 0 is best", so
+    #: `[0.0, -2.0, -442.0]` is unambiguous: on the map, 2 away, 442
+    #: steps. `test_every_term_that_can_go_negative_is_named_as_a_cost`
+    #: pins the convention against the values themselves rather than
+    #: against these strings.
+    TERMS = ("-off_target_map", "-distance_to_target", "-steps")
 
     def __init__(self, map_name: str, tile: tuple[int, int]) -> None:
         self.map_name = map_name

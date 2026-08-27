@@ -23,6 +23,7 @@ import pytest
 from tuxghost.agent.types import Action
 from tuxghost.optimize.editors.replay import edits_from_json
 from tuxghost.optimize.edits import Insert, Replace
+from tuxghost.optimize.objective import ReachTile
 
 ROOT = Path(__file__).resolve().parent.parent
 GOLDEN = ROOT / "tests" / "golden" / "claude_town_1234.tuxghost"
@@ -935,6 +936,70 @@ def _claude_prompt(
     return proc, calls
 
 
+def test_an_explicit_goal_reaches_optimizes_run_json(tmp_path: Path) -> None:
+    """HANDOFF ITEM A3. `agent`'s `run.json` carries `goal`; `optimize`'s
+    did not. A DERIVED goal is reconstructible after the fact from
+    `objective` + `target`, which this same file records -- but an
+    EXPLICIT `--goal` is not reconstructible from anything, so a
+    `--editor claude` run's actual instruction to the model survived
+    nowhere once the process exited. The run directory is the only
+    durable record of how a run was configured; a field that is not in
+    it is gone.
+
+    Asserted with a goal whose text appears in NO other field, so it
+    cannot be satisfied by the derived string that `_derived_goal` builds
+    out of the objective and target.
+    """
+    explicit = "wander northeast and do not talk to anyone"
+    proc, _ = _claude_prompt(tmp_path, "--goal", explicit)
+    assert "main() RETURNED 0" in proc.stdout, (proc.stdout, proc.stderr)
+
+    info = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert info["goal"] == explicit, info
+
+
+def test_a_derived_goal_is_recorded_as_the_one_the_model_was_sent(
+    tmp_path: Path,
+) -> None:
+    """The companion to the test above. With no `--goal`, the CLI derives
+    one and sends THAT to the model, so recording `args.goal` verbatim
+    would write `""` into `run.json` for a run whose prompt did carry a
+    goal -- true to the command line and false about the run. What is
+    recorded is the string the editor was actually built with.
+    """
+    proc, calls = _claude_prompt(tmp_path)
+    assert "main() RETURNED 0" in proc.stdout, (proc.stdout, proc.stderr)
+
+    info = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert info["goal"], info
+    # The same string the model was sent, not merely a non-empty one.
+    assert info["goal"] in str(calls[0]["messages"]), info["goal"]
+
+
+def test_editors_that_read_no_goal_record_none_rather_than_empty_string(
+    tmp_path: Path,
+) -> None:
+    """`--editor mutation` hands no goal to any editor, so `null` is the
+    true value here. It is asserted as `None` specifically, not merely
+    falsy: `""` would read as "the run had an empty goal" where `null`
+    reads as "no goal was involved", and only the second is accurate.
+    """
+    out = tmp_path / "best.tuxghost"
+    run_dir = tmp_path / "run"
+    proc = _run(
+        "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
+        "--objective", "reach-tile",
+        "--target", "spyder_paper_town.tmx:11,16",
+        "--rounds", "2", "--patience", "2", "--max-rejections", "2",
+        "--max-cost", "4000", "--out", str(out), "--run-dir", str(run_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    info = json.loads((run_dir / "run.json").read_text())
+    assert "goal" in info, info
+    assert info["goal"] is None, info
+
+
 def test_the_target_reaches_the_claude_editors_prompt(tmp_path: Path) -> None:
     """WHOLE-BRANCH REVIEW, IMPORTANT 1. `_optimize` built
     `ClaudeEditor(model=model)` and there was no `--goal` on this parser,
@@ -960,9 +1025,16 @@ def test_the_target_reaches_the_claude_editors_prompt(tmp_path: Path) -> None:
     assert "Goal:" in prompt, prompt
     assert "(11, 16)" in prompt, prompt
     assert "spyder_paper_town.tmx" in prompt, prompt
-    # The legend for the score tuple, from `ReachTile.TERMS`.
-    assert "on_target_map" in prompt, prompt
-    assert "-steps" in prompt, prompt
+    # The legend for the score tuple, read from `ReachTile.TERMS` itself
+    # rather than written out as literals: this assertion's job is that
+    # the CLI PASSES the legend, not that the legend says any particular
+    # word, and a literal here silently went stale when term 0 was
+    # renamed `-off_target_map` (handoff item A2). Every term is checked,
+    # not two of three, so a legend truncated in the middle fails.
+    assert ReachTile.TERMS, "an empty legend would make this vacuous"
+    for term in ReachTile.TERMS:
+        assert term, "an empty term name would make this vacuous"
+        assert term in prompt, (term, prompt)
 
     # Also-fix 2, in the one place it is observable from outside: the
     # button values in the SYSTEM prompt are read from

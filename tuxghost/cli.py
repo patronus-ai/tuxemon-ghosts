@@ -1059,6 +1059,14 @@ def _optimize(args: argparse.Namespace) -> int:
 
     editor: Editor
     model: str | None = None
+    #: The goal string actually handed to an editor, or `None` when no
+    #: editor read one. Declared here beside `model`, and for the same
+    #: reason: it is set only in the branch that genuinely uses it, so
+    #: `run.json` records what influenced the run rather than what
+    #: happened to be on the command line. `--editor claude` is the only
+    #: consumer, so `None` for the other three is a true statement, not
+    #: a dropped field (handoff item A3).
+    goal: str | None = None
     if args.editor == "mutation":
         editor = MutationEditor(seed=args.seed)
     elif args.editor == "replay":
@@ -1141,9 +1149,15 @@ def _optimize(args: argparse.Namespace) -> int:
         # order and sign the model had to guess. `ReachTile.TERMS` is the
         # objective's own statement of its terms, so the legend cannot
         # drift out of step with `ReachTile.score`.
+        # Computed once and reused for `run.json` below rather than
+        # recomputed there: an explicit `--goal` is NOT reconstructible
+        # from anything else the run directory records, and a derived one
+        # recomputed at the writer could silently disagree with the one
+        # the model was actually sent.
+        goal = args.goal or _derived_goal(args.objective, target)
         editor = ClaudeEditor(
             model=model,
-            goal=args.goal or _derived_goal(args.objective, target),
+            goal=goal,
             score_legend=", ".join(ReachTile.TERMS),
         )
     else:  # pragma: no cover -- argparse `choices` already refuses this
@@ -1271,6 +1285,7 @@ def _optimize(args: argparse.Namespace) -> int:
         json.dumps(
             {
                 "parent_digest": parent.header.final_digest,
+                "goal": goal,
                 "objective": args.objective,
                 "target": args.target,
                 "editor": args.editor,

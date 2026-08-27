@@ -112,13 +112,49 @@ def test_terms_names_every_score_term_in_order() -> None:
     """`ReachTile.TERMS` is sent to `ClaudeEditor` as the legend for the
     score tuple (whole-branch review, Important 1), so a term added to
     `score` without a name here would mislabel every number after it.
-    Pinned on LENGTH and on the sign convention each name states, not on
-    the exact strings, which are prose for a prompt."""
+    Pinned on LENGTH; the SIGN convention each name states is pinned by
+    `test_every_term_that_can_go_negative_is_named_as_a_cost` below."""
     score = TARGET.score(_candidate("spyder_paper_town.tmx", (12, 18), 400))
     assert len(ReachTile.TERMS) == len(score)
-    # The trailing two terms are negated in `score`; their names say so,
-    # because a model told "higher is better" and shown `-442.0` has to
-    # know that number is a cost.
-    assert ReachTile.TERMS[1].startswith("-")
-    assert ReachTile.TERMS[2].startswith("-")
-    assert not ReachTile.TERMS[0].startswith("-")
+
+
+def test_every_term_that_can_go_negative_is_named_as_a_cost() -> None:
+    """`TERMS[0]` read `on_target_map` while `score`'s term 0 is `0.0`
+    when the candidate IS on the target map and `-1.0` when it is not.
+    A model shown `[0.0, -2.0, -442.0]` and told term 0 is
+    `on_target_map` reads `0.0` as FALSE -- the exact inversion of the
+    truth (handoff item A2).
+
+    Asserted as an INVARIANT over every term rather than as a string
+    comparison against the fixed word: a term whose value goes negative
+    for the worse of two candidates is a cost, and its name must say so
+    with a leading `-`. A fourth term wired up backwards fails here too,
+    which a `TERMS[0] == "-off_target_map"` assertion would not catch.
+    """
+    best = _candidate("spyder_paper_town.tmx", (12, 18), 400)
+    #: One candidate per term, each strictly worse than `best` in that
+    #: one term and identical in the others.
+    worse_by_term = (
+        _candidate("cotton_town.tmx", (12, 18), 400),       # 0: off map
+        _candidate("spyder_paper_town.tmx", (12, 30), 400),  # 1: further
+        _candidate("spyder_paper_town.tmx", (12, 18), 900),  # 2: slower
+    )
+    assert len(worse_by_term) == len(ReachTile.TERMS)
+
+    baseline = TARGET.score(best)
+    for index, candidate in enumerate(worse_by_term):
+        name = ReachTile.TERMS[index]
+        degraded = TARGET.score(candidate)[index]
+        assert degraded < baseline[index], (
+            f"term {index} ({name}) was supposed to get WORSE for this "
+            "candidate but did not; the fixture no longer isolates it"
+        )
+        assert degraded < 0.0, (
+            f"term {index} ({name}) is worse at {degraded}, which is not "
+            "negative, so it is not a negated cost"
+        )
+        assert name.startswith("-"), (
+            f"term {index} goes negative ({degraded}) for a worse "
+            f"candidate, so it is a COST, but its name {name!r} does not "
+            "say so -- a model reading the tuple will invert its meaning"
+        )
