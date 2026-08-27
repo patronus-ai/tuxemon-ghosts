@@ -253,7 +253,7 @@ def test_a_zero_settle_action_does_not_silently_drop_the_next_press() -> None:
     exactly the step the NEXT action's press lands on (`release = step +
     action.hold` equals the following iteration's starting `step`).
     `validate_actions` permits `settle == 0`, so this is reachable from an
-    entirely ordinary policy -- `_add_edge`'s predecessor
+    entirely ordinary policy -- `add_edge`'s predecessor
     (`schedule[step] = [...]`) silently overwrote the first edge with the
     second instead of accumulating both."""
     policy = ScriptedPolicy(
@@ -281,7 +281,7 @@ def test_a_zero_settle_action_schedules_edges_in_canonical_order() -> None:
     (DOWN, PRESSED)] = [(8, 0.0), (2, 1.0)], strictly descending by
     button number, while `_schedule_of` (via `Recorder.finish`'s
     write-time `sorted(self._inputs)`) always reconstructs ascending
-    (button, value) order: [(2, 1.0), (8, 0.0)]. Without `_add_edge`'s
+    (button, value) order: [(2, 1.0), (8, 0.0)]. Without `add_edge`'s
     `edges.sort()`, the live schedule and the trace's reconstructed
     schedule would disagree, AND -- the more serious half -- a replay
     would deliver DOWN's press before RIGHT's release, the opposite

@@ -22,11 +22,12 @@ exists to prevent:
 Every edge written into the schedule is also handed to `Recorder.observe`,
 so the trace IS the schedule -- pinned by
 `tests/test_agent_runner.py::test_runner_schedule_equals_the_traces_schedule`.
-Edges are APPENDED (via `_add_edge`), not assigned: two edges can legally
+Edges are APPENDED (via `add_edge`), not assigned: two edges can legally
 land on the same step index (a `settle=0` action's release lands exactly
 on the next action's press), and `schedule[step] = [...]` would silently
-drop one -- see `_add_edge`'s own docstring, and task 5 review round 1,
-which found this reachable from a perfectly ordinary policy.
+drop one -- see `add_edge`'s own docstring (`tuxghost/loop.py`), and task
+5 review round 1, which found this reachable from a perfectly ordinary
+policy.
 """
 
 from __future__ import annotations
@@ -38,7 +39,14 @@ from typing import TYPE_CHECKING, Any, Literal
 from tuxghost.agent.types import Action, Observation, Policy, validate_actions
 from tuxghost.boot import boot_from_save, build_client
 from tuxghost.digest import digest_of
-from tuxghost.loop import InputSchedule, install_schedule, run_steps
+from tuxghost.loop import (
+    PRESSED,
+    RELEASED,
+    InputSchedule,
+    add_edge,
+    install_schedule,
+    run_steps,
+)
 from tuxghost.observe import scaled_context
 from tuxghost.record import Recorder
 from tuxghost.trace import Trace
@@ -53,9 +61,6 @@ if TYPE_CHECKING:
     # mutates the client by installing a real `MapRenderer` -- stays an
     # opt-in side effect, not a module-import-time one.
     from tuxghost.observe import FrameRenderer
-
-PRESSED = 1.0
-RELEASED = 0.0
 
 #: Mirrors `tuxghost.trace.Provenance.recorder`. Spelled out here so the
 #: runner and the CLI can type this argument without a `type: ignore` at
@@ -108,69 +113,6 @@ class RunResult:
     #: at all -- see `tuxghost.cli._agent`, which writes this into
     #: `run_dir/run.json`.
     stop_reason: str = "step budget"
-
-
-def _add_edge(
-    schedule: InputSchedule, step: int, button: int, value: float
-) -> None:
-    """Insert one `(button, value)` edge at `step`, appending rather than
-    assigning, and keeping the list at that key sorted by `(button,
-    value)`.
-
-    `schedule[step] = [...]` (this function's predecessor) SILENTLY
-    OVERWRITES rather than accumulates. `validate_actions` permits
-    `settle == 0`, and an action with `settle=0` schedules its release at
-    exactly the step the *next* action's press lands on (`release = step
-    + action.hold` equals the following iteration's starting `step`).
-    Task 5 review round 1 found this reachable from an entirely ordinary
-    policy: the trace (built by `Recorder.observe`, which only ever
-    appends) kept both edges, but the live schedule kept only the last
-    write -- so `result.schedule != _schedule_of(result.trace)`, and
-    worse, REPLAY would then deliver a button release the RECORDING never
-    actually delivered to the engine.
-
-    Sorted by `(button, value)`, on every insert, rather than left in
-    whatever order calls happened to arrive. The canonical order a
-    replay sees comes from `Recorder.finish` (`tuxghost/record.py`),
-    which writes `inputs=sorted(self._inputs)` -- sorted by the full
-    `(step, button, value)` tuple -- at RECORD time. `_schedule_of`
-    (`tuxghost.execute`) itself does no sorting at all: it just appends
-    each `trace.inputs` entry, in the order it finds them, into
-    `schedule.setdefault(step, []).append(...)`. It only reconstructs
-    ascending `(button, value)` order per step because `Recorder` already
-    wrote the file that way. This is a WRITER-SIDE CONVENTION, not a
-    format-enforced guarantee: `tuxghost/trace.py`'s `read()` neither
-    sorts nor validates input ordering, so a hand-edited or third-party
-    trace with unsorted same-step inputs would replay in file order,
-    whatever that happens to be (task 5 review round 2 -- pre-existing
-    format surface, not something this function introduces or closes).
-    What matters here is only that THIS module's own writer
-    (`Recorder`, fed by this very function) and THIS module's own live
-    delivery agree with each other, and sorting on insert is how that
-    agreement is kept.
-
-    Matching that order is not just for the equality check:
-    `install_schedule`'s `process_events` yields a step's edges in LIST
-    ORDER, and delivers them to the live engine as it goes. An
-    insertion-order list could still compare `==` to `_schedule_of`'s
-    output as a Python list (if it happened to already be in the same
-    order) while, on a different policy, delivering a press/release pair
-    to the ENGINE in the opposite order replay would -- a divergence no
-    equality check on the schedule alone would catch, only matching,
-    canonical ordering does. Safe to re-sort on every insert (not just
-    once, lazily) because a step's list is only ever written before
-    `run_steps` reaches that step, never mutated after the engine has
-    already consumed it. See
-    `tests/test_agent_runner.py::test_a_zero_settle_action_schedules_edges_in_canonical_order`,
-    which pins this specifically: reversing the collision's button order
-    relative to the append-only regression test above is what makes a
-    missing `edges.sort()` actually fail (task 5 review round 2 --
-    `buttons.DOWN < buttons.RIGHT` made the append-only test's insertion
-    order already ascending, so deleting the sort left it green).
-    """
-    edges = schedule.setdefault(step, [])
-    edges.append((button, value))
-    edges.sort()
 
 
 def _observation(
@@ -352,10 +294,10 @@ def run_agent(
             break
 
         for action in actions:
-            _add_edge(schedule, step, action.button, PRESSED)
+            add_edge(schedule, step, action.button, PRESSED)
             recorder.observe(step, action.button, PRESSED)
             release = step + action.hold
-            _add_edge(schedule, release, action.button, RELEASED)
+            add_edge(schedule, release, action.button, RELEASED)
             recorder.observe(release, action.button, RELEASED)
 
             base = step
