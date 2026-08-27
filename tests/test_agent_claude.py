@@ -63,6 +63,24 @@ def test_parse_response_refuses_a_response_with_no_json_block() -> None:
         policy.parse_response("I will walk south.")
 
 
+def test_parse_response_raises_value_error_for_a_malformed_json_block() -> None:
+    """A fence CAN be present with content that isn't json at all -- the
+    loosened `_JSON_BLOCK` regex (task-7 review round 1) matches any
+    fenced content, not just `{...}`-shaped text, so `json.loads` hitting
+    `JSONDecodeError` on plain prose inside a fence is a real path this
+    regex change widened, not a hypothetical.
+
+    Matches on the message's own wording ("not valid json"), not merely
+    `ValueError`, so this pins the RE-RAISE with its descriptive message
+    rather than just the exception type: `except json.JSONDecodeError`
+    dropped entirely would let a bare `JSONDecodeError` escape, which is
+    not even a `ValueError`, but a test that only checked "some exception
+    was raised" would not distinguish that regression from this one."""
+    policy = ClaudePolicy()
+    with pytest.raises(ValueError, match="not valid json"):
+        policy.parse_response("```json\nthis is not json at all\n```")
+
+
 def test_parse_response_refuses_an_out_of_range_hold() -> None:
     policy = ClaudePolicy()
     with pytest.raises(ValueError, match="hold"):
