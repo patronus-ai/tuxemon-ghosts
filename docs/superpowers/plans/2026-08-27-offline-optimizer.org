@@ -2830,7 +2830,17 @@ def test_construction_and_propose_never_reach_the_lazy_import() -> None:
     from importlib.abc import MetaPathFinder
 
     class Block(MetaPathFinder):
-        def find_spec(self, fullname, path=None, target=None):  # type: ignore[no-untyped-def]
+        # Annotate this fully rather than suppressing: `mypy --strict`
+        # objects to an unannotated def, and this project's gate forbids a
+        # bare `# type: ignore` (CLAUDE.md). If a full annotation proves
+        # impractical, a suppression needs a written reason in the house
+        # style of tests/test_agent_types.py:73-76.
+        def find_spec(
+            self,
+            fullname: str,
+            path: Sequence[str] | None = None,
+            target: ModuleType | None = None,
+        ) -> ModuleSpec | None:
             if fullname == "anthropic" or fullname.startswith("anthropic."):
                 raise ModuleNotFoundError(f"blocked: {fullname}")
             return None
@@ -2854,7 +2864,17 @@ def test_a_missing_client_reaches_the_lazy_import_and_says_so() -> None:
     from importlib.abc import MetaPathFinder
 
     class Block(MetaPathFinder):
-        def find_spec(self, fullname, path=None, target=None):  # type: ignore[no-untyped-def]
+        # Annotate this fully rather than suppressing: `mypy --strict`
+        # objects to an unannotated def, and this project's gate forbids a
+        # bare `# type: ignore` (CLAUDE.md). If a full annotation proves
+        # impractical, a suppression needs a written reason in the house
+        # style of tests/test_agent_types.py:73-76.
+        def find_spec(
+            self,
+            fullname: str,
+            path: Sequence[str] | None = None,
+            target: ModuleType | None = None,
+        ) -> ModuleSpec | None:
             if fullname == "anthropic" or fullname.startswith("anthropic."):
                 raise ModuleNotFoundError(f"blocked: {fullname}")
             return None
