@@ -76,14 +76,31 @@ def test_lower_places_the_first_press_at_lead_in() -> None:
 def test_lower_keeps_a_zero_settle_collision_intact() -> None:
     """A `settle=0` action releases on exactly the step the next action
     presses. Both edges must survive -- the defect `add_edge` exists to
-    prevent, re-checked from this side of the boundary."""
+    prevent, re-checked from this side of the boundary.
+
+    Deliberately RIGHT-then-DOWN, not DOWN-then-RIGHT: `buttons.DOWN
+    (2) < buttons.RIGHT (8)`, so a DOWN-then-RIGHT collision has its
+    append order and its `add_edge`-sorted-by-`(button, value)` order
+    coincide regardless of whether `lower` actually sorts -- the
+    button-number ordering already matches insertion order, so a naive
+    `lower` that hand-built the schedule with
+    `schedule.setdefault(step, []).append(...)` and never called
+    `add_edge` at all would pass this test unchanged. This is the exact
+    pitfall `add_edge`'s own docstring in `tuxghost/loop.py` records
+    already having caught once, with this exact button pair. RIGHT
+    (8) pressed first then DOWN (2) makes append order
+    [(RIGHT, RELEASED), (DOWN, PRESSED)] while the sorted-by-`(button,
+    value)` order `add_edge` actually produces is [(DOWN, PRESSED),
+    (RIGHT, RELEASED)] -- the two orders diverge, so this direction is
+    the one that can actually catch a hand-built schedule dict. Do not
+    "simplify" this back to DOWN-then-RIGHT."""
     script = ActionScript(
         lead_in=0,
-        actions=(Action(buttons.DOWN, 4, 0), Action(buttons.RIGHT, 4, 0)),
+        actions=(Action(buttons.RIGHT, 4, 0), Action(buttons.DOWN, 4, 0)),
     )
     assert lower(script)[4] == [
-        (buttons.DOWN, RELEASED),
-        (buttons.RIGHT, PRESSED),
+        (buttons.DOWN, PRESSED),
+        (buttons.RIGHT, RELEASED),
     ]
 
 
