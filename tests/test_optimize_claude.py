@@ -89,6 +89,15 @@ def test_the_prompt_carries_the_telemetry_but_no_image() -> None:
     sent = client.calls[0]
     body = str(sent["messages"])
     assert "tile_pos" in body and "12, 13" in body.replace("[", "").replace("]", "")
+    # The final-state line alone would satisfy the assertion above even
+    # with `checkpoint_states` dropped entirely from the prompt -- pin
+    # the CHECKPOINT telemetry too, on data only that block renders.
+    # Checkpoint 16's tile is [12, 12], distinct from both the final
+    # state's and checkpoint 32's shared [12, 13], so this fails on its
+    # own if `checkpoint_states` is dropped, independently of the
+    # assertion above.
+    assert "step 16" in body
+    assert "12, 12" in body.replace("[", "").replace("]", "")
     assert "image" not in body, "S3 renders nothing; no frame may be sent"
     assert sent["max_tokens"] == EDITOR_MAX_TOKENS > 1024
 
@@ -167,12 +176,21 @@ def test_construction_and_propose_never_reach_the_lazy_import() -> None:
     `assert "anthropic" not in sys.modules or True`, which can never
     fail. Step 6 runs the same block across the whole suite."""
     import sys
+    from collections.abc import Sequence
     from importlib.abc import MetaPathFinder
+    from importlib.machinery import ModuleSpec
+    from types import ModuleType
 
     class Block(MetaPathFinder):
-        def find_spec(self, fullname, path=None, target=None):  # type: ignore[no-untyped-def]
+        def find_spec(
+            self,
+            fullname: str,
+            path: Sequence[str] | None = None,
+            target: ModuleType | None = None,
+        ) -> ModuleSpec | None:
             if fullname == "anthropic" or fullname.startswith("anthropic."):
                 raise ModuleNotFoundError(f"blocked: {fullname}")
+            return None
 
     blocker = Block()
     sys.meta_path.insert(0, blocker)
@@ -190,12 +208,21 @@ def test_a_missing_client_reaches_the_lazy_import_and_says_so() -> None:
     reach the import. If it did not, the test above would pass for the
     wrong reason -- because nothing ever tried."""
     import sys
+    from collections.abc import Sequence
     from importlib.abc import MetaPathFinder
+    from importlib.machinery import ModuleSpec
+    from types import ModuleType
 
     class Block(MetaPathFinder):
-        def find_spec(self, fullname, path=None, target=None):  # type: ignore[no-untyped-def]
+        def find_spec(
+            self,
+            fullname: str,
+            path: Sequence[str] | None = None,
+            target: ModuleType | None = None,
+        ) -> ModuleSpec | None:
             if fullname == "anthropic" or fullname.startswith("anthropic."):
                 raise ModuleNotFoundError(f"blocked: {fullname}")
+            return None
 
     blocker = Block()
     sys.meta_path.insert(0, blocker)
