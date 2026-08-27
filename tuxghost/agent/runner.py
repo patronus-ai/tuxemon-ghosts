@@ -120,22 +120,43 @@ def _add_edge(
     actually delivered to the engine.
 
     Sorted by `(button, value)`, on every insert, rather than left in
-    whatever order calls happened to arrive: `_schedule_of`
-    (`tuxghost.execute`) rebuilds each step's list from
-    `sorted(trace.inputs)`, which sorts by the full `(step, button,
-    value)` tuple -- so within one step, the reconstructed list is always
-    in ascending `(button, value)` order. Matching that order here is not
-    just for the equality check: `install_schedule`'s `process_events`
-    yields a step's edges in LIST ORDER, and delivers them to the live
-    engine as it goes. An insertion-order list could still compare `==`
-    to `_schedule_of`'s output as a Python list (if it happened to already
-    be in the same order) while, on a different policy, delivering a
-    press/release pair to the ENGINE in the opposite order replay would --
-    a divergence no equality check on the schedule alone would catch,
-    only matching, canonical ordering does. Safe to re-sort on every
-    insert (not just once, lazily) because a step's list is only ever
-    written before `run_steps` reaches that step, never mutated after the
-    engine has already consumed it.
+    whatever order calls happened to arrive. The canonical order a
+    replay sees comes from `Recorder.finish` (`tuxghost/record.py`),
+    which writes `inputs=sorted(self._inputs)` -- sorted by the full
+    `(step, button, value)` tuple -- at RECORD time. `_schedule_of`
+    (`tuxghost.execute`) itself does no sorting at all: it just appends
+    each `trace.inputs` entry, in the order it finds them, into
+    `schedule.setdefault(step, []).append(...)`. It only reconstructs
+    ascending `(button, value)` order per step because `Recorder` already
+    wrote the file that way. This is a WRITER-SIDE CONVENTION, not a
+    format-enforced guarantee: `tuxghost/trace.py`'s `read()` neither
+    sorts nor validates input ordering, so a hand-edited or third-party
+    trace with unsorted same-step inputs would replay in file order,
+    whatever that happens to be (task 5 review round 2 -- pre-existing
+    format surface, not something this function introduces or closes).
+    What matters here is only that THIS module's own writer
+    (`Recorder`, fed by this very function) and THIS module's own live
+    delivery agree with each other, and sorting on insert is how that
+    agreement is kept.
+
+    Matching that order is not just for the equality check:
+    `install_schedule`'s `process_events` yields a step's edges in LIST
+    ORDER, and delivers them to the live engine as it goes. An
+    insertion-order list could still compare `==` to `_schedule_of`'s
+    output as a Python list (if it happened to already be in the same
+    order) while, on a different policy, delivering a press/release pair
+    to the ENGINE in the opposite order replay would -- a divergence no
+    equality check on the schedule alone would catch, only matching,
+    canonical ordering does. Safe to re-sort on every insert (not just
+    once, lazily) because a step's list is only ever written before
+    `run_steps` reaches that step, never mutated after the engine has
+    already consumed it. See
+    `tests/test_agent_runner.py::test_a_zero_settle_action_schedules_edges_in_canonical_order`,
+    which pins this specifically: reversing the collision's button order
+    relative to the append-only regression test above is what makes a
+    missing `edges.sort()` actually fail (task 5 review round 2 --
+    `buttons.DOWN < buttons.RIGHT` made the append-only test's insertion
+    order already ascending, so deleting the sort left it green).
     """
     edges = schedule.setdefault(step, [])
     edges.append((button, value))

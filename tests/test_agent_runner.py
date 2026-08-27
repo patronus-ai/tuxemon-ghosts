@@ -225,6 +225,40 @@ def test_a_zero_settle_action_does_not_silently_drop_the_next_press() -> None:
     assert verify(result.trace) == 0
 
 
+def test_a_zero_settle_action_schedules_edges_in_canonical_order() -> None:
+    """Companion to the append-only regression above, with the button
+    order REVERSED. Task 5 review round 2: the test above collides a
+    DOWN release with a RIGHT press, and `buttons.DOWN (2) <
+    buttons.RIGHT (8)`, so the live INSERTION order at step 30 is
+    ALREADY ascending by (button, value) -- `edges.sort()` is a no-op
+    there, and deleting it leaves that test green. This test collides
+    RIGHT first, so live insertion order is [(RIGHT, RELEASED),
+    (DOWN, PRESSED)] = [(8, 0.0), (2, 1.0)], strictly descending by
+    button number, while `_schedule_of` (via `Recorder.finish`'s
+    write-time `sorted(self._inputs)`) always reconstructs ascending
+    (button, value) order: [(2, 1.0), (8, 0.0)]. Without `_add_edge`'s
+    `edges.sort()`, the live schedule and the trace's reconstructed
+    schedule would disagree, AND -- the more serious half -- a replay
+    would deliver DOWN's press before RIGHT's release, the opposite
+    order the live run actually delivered them in."""
+    policy = ScriptedPolicy(
+        [
+            (Action(buttons.RIGHT, hold=30, settle=0),),
+            (Action(buttons.DOWN, hold=30, settle=10),),
+        ]
+    )
+    result = run_agent(
+        policy=policy, save_data=_save(), seed=1234,
+        clock_epoch=EPOCH, step_budget=400,
+    )
+    # The exact list, in order, at the point of collision -- makes the
+    # ordering property visible at the point of failure, not just as a
+    # dict inequality against `_schedule_of`.
+    assert result.schedule[30] == [(buttons.DOWN, 1.0), (buttons.RIGHT, 0.0)]
+    assert result.schedule == _schedule_of(result.trace)
+    assert verify(result.trace) == 0
+
+
 def test_taints_and_claimed_outcome_reach_the_trace_provenance() -> None:
     """Task 5 review round 1: nothing pinned `taints=`/`claimed_outcome=`
     actually reaching `trace.provenance` -- the whole suite stayed green
