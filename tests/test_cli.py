@@ -531,3 +531,92 @@ def test_process_level_exit_codes_are_0_1_and_2(tmp_path: Path) -> None:
     missing = run(tmp_path / "does-not-exist.tuxghost")
     assert missing.returncode == 2, (missing.stdout, missing.stderr)
     assert "refused" in missing.stderr.lower()
+
+
+# --- `agent` subcommand -------------------------------------------------
+
+FIXTURE = Path(__file__).parent / "fixtures" / "paper_town.save"
+
+
+def _write_actions(tmp_path: Path) -> Path:
+    """A scripted policy's decisions as JSONL -- the same shape
+    ReplayPolicy reads, so --policy scripted and --policy replay take the
+    same file."""
+    path = tmp_path / "actions.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps({"actions": [{"button": 2, "hold": 30, "settle": 10}]})
+            for _ in range(3)
+        )
+    )
+    return path
+
+
+def test_agent_writes_a_trace_and_a_run_directory(tmp_path: Path) -> None:
+    out = tmp_path / "run.tuxghost"
+    run_dir = tmp_path / "rundir"
+    code = main(
+        [
+            "agent", "--policy", "scripted",
+            "--actions", str(_write_actions(tmp_path)),
+            "--seed", "1234", "--clock-epoch", "1787659200",
+            "--from-save", str(FIXTURE), "--steps", "300",
+            "--out", str(out), "--run-dir", str(run_dir),
+        ]
+    )
+    assert code == 0
+    assert out.exists()
+    assert (run_dir / "decisions.jsonl").exists()
+    assert list((run_dir / "frames").glob("*.png"))
+
+
+def test_agent_refuses_an_unreadable_save(tmp_path: Path) -> None:
+    """Refusal is exit 2, never exit 1 -- exit 1 means 'diverged', and a
+    recording has nothing to diverge from. See this module's docstring."""
+    code = main(
+        [
+            "agent", "--policy", "scripted",
+            "--actions", str(_write_actions(tmp_path)),
+            "--seed", "1234", "--clock-epoch", "1787659200",
+            "--from-save", str(tmp_path / "nope.save"), "--steps", "60",
+            "--out", str(tmp_path / "o.tuxghost"),
+            "--run-dir", str(tmp_path / "d"),
+        ]
+    )
+    assert code == 2
+
+
+def test_agent_accepts_a_relative_out_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The vacuous-test lesson from CLAUDE.md: every path in the old CLI
+    test was an absolute tmp_path, so a real bug -- chdir into tuxemon/
+    BEFORE parsing args, breaking every relative path a user would type --
+    went undetected. This test types a relative path on purpose."""
+    monkeypatch.chdir(tmp_path)
+    code = main(
+        [
+            "agent", "--policy", "scripted",
+            "--actions", str(_write_actions(tmp_path)),
+            "--seed", "1234", "--clock-epoch", "1787659200",
+            "--from-save", str(FIXTURE), "--steps", "120",
+            "--out", "relative.tuxghost", "--run-dir", "reldir",
+        ]
+    )
+    assert code == 0
+    assert (tmp_path / "relative.tuxghost").exists()
+
+
+def test_agent_cold_boot_needs_no_save(tmp_path: Path) -> None:
+    code = main(
+        [
+            "agent", "--policy", "scripted",
+            "--actions", str(_write_actions(tmp_path)),
+            "--cold-boot",
+            "--seed", "1234", "--clock-epoch", "1787659200",
+            "--steps", "200",
+            "--out", str(tmp_path / "cold.tuxghost"),
+            "--run-dir", str(tmp_path / "colddir"),
+        ]
+    )
+    assert code == 0

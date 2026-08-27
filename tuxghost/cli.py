@@ -49,6 +49,16 @@ string `tuxghost.trace.read`/a recorder chose to put in
 whose `step_count` came from elapsed real time rather than a deterministic
 schedule. Findings are informational, not divergences: only a difference
 in `initial_state` or `inputs` moves the exit code to 1.
+
+`agent` (drives a policy against a live session and records what it did,
+via `tuxghost.agent.runner.run_agent`) returns 0 or 2 ONLY, like `execute`
+above and for the identical reason: a recording has nothing to diverge
+FROM. Conflating "refused" with "diverged" here would be exactly the same
+defect the old CLI shipped -- an uncaught exception (e.g. a missing
+`--from-save` file) reports exit 1, indistinguishable from a real
+divergence, so every precondition `_agent`/`_agent_save_or_refuse` can
+detect is checked explicitly and mapped to exit 2 before anything can
+raise.
 """
 
 from __future__ import annotations
@@ -71,13 +81,14 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
     "info": ("trace",),
     "compare": ("a", "b"),
     "record": ("out", "from_save"),
+    "agent": ("actions", "from_save", "out", "run_dir"),
 }
 
 #: Subcommands that need the vendored `tuxemon/` package importable and
 #: cwd-relative asset loading working -- i.e. anything that actually boots
 #: a session. `info` and `compare` are pure trace-file inspection and need
 #: neither.
-_NEEDS_BOOTSTRAP = frozenset({"execute", "verify", "record"})
+_NEEDS_BOOTSTRAP = frozenset({"execute", "verify", "record", "agent"})
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -128,6 +139,27 @@ def _build_parser() -> argparse.ArgumentParser:
     p_rec.add_argument("--seed", type=int, required=True)
     p_rec.add_argument("--clock-epoch", type=int, required=True, dest="clock_epoch")
     p_rec.add_argument("--steps", type=int, required=True)
+
+    p_agent = sub.add_parser(
+        "agent",
+        help="Record a trace by driving a policy against a live session.",
+    )
+    p_agent.add_argument(
+        "--policy", choices=["scripted", "replay", "claude"], required=True
+    )
+    p_agent.add_argument(
+        "--actions", type=Path, help="JSONL decisions for scripted/replay"
+    )
+    p_agent.add_argument("--from-save", type=Path, dest="from_save")
+    p_agent.add_argument("--cold-boot", action="store_true", dest="cold_boot")
+    p_agent.add_argument("--seed", type=int, required=True)
+    p_agent.add_argument("--clock-epoch", type=int, required=True, dest="clock_epoch")
+    p_agent.add_argument("--steps", type=int, required=True)
+    p_agent.add_argument("--goal", default="")
+    p_agent.add_argument("--model", default="claude-sonnet-5")
+    p_agent.add_argument("--upscale", type=int, default=4)
+    p_agent.add_argument("--out", type=Path, required=True)
+    p_agent.add_argument("--run-dir", type=Path, required=True, dest="run_dir")
 
     return parser
 
@@ -320,6 +352,189 @@ def _record(args: argparse.Namespace) -> int:
     return 0
 
 
+def _agent_save_or_refuse(args: argparse.Namespace) -> Any | None:
+    """Read, parse, validate and map-check `--from-save`, or print a
+    refusal and return None.
+
+    Every check mirrors `_record`'s, verbatim and in the same order, plus
+    Task 1's `resolve_map_asset`. Factored out so `_agent` reads as the
+    control flow it is rather than 60 lines of guard clauses.
+    """
+    from tuxemon.save_system.save_state import SaveData
+
+    from tuxghost.boot import resolve_map_asset
+
+    try:
+        raw = json.loads(args.from_save.read_text())
+    except OSError as exc:
+        print(f"refused: cannot read {args.from_save}: {exc}", file=sys.stderr)
+        return None
+    except json.JSONDecodeError as exc:
+        print(
+            f"refused: {args.from_save} is not valid JSON: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    try:
+        save_data = SaveData.model_validate(raw)
+    except ValidationError as exc:
+        print(
+            f"refused: {args.from_save} does not validate as a SaveData: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    if save_data.npc_state is None or save_data.npc_state.current_map is None:
+        print(
+            "refused: from-save is missing npc_state.current_map; cannot "
+            "restore a session (see tuxghost.boot.boot_from_save)",
+            file=sys.stderr,
+        )
+        return None
+
+    if resolve_map_asset(save_data.npc_state.current_map) is None:
+        print(
+            "refused: from-save's npc_state.current_map="
+            f"{save_data.npc_state.current_map!r} resolves to no map asset "
+            "(tried it as given and with a .tmx extension)",
+            file=sys.stderr,
+        )
+        return None
+
+    return save_data
+
+
+def _agent(args: argparse.Namespace) -> int:
+    """Record a trace by driving a policy against a live session.
+
+    Returns 0 or 2 only. Exit 1 means "diverged", and a recording has
+    nothing to diverge FROM -- see this module's docstring, which records
+    the earlier CLI defect that conflated the two.
+    """
+    import dataclasses
+
+    from tuxghost.agent.replay import ReplayPolicy, actions_from_json
+    from tuxghost.agent.runner import RecorderKind, run_agent
+    from tuxghost.agent.scripted import ScriptedPolicy
+    from tuxghost.determinism import seed_all
+    from tuxghost.trace import write
+
+    if bool(args.from_save) == bool(args.cold_boot):
+        print(
+            "refused: pass exactly one of --from-save or --cold-boot",
+            file=sys.stderr,
+        )
+        return 2
+    if args.policy in ("scripted", "replay") and args.actions is None:
+        print(
+            f"refused: --policy {args.policy} requires --actions "
+            "(a JSONL file of decisions)",
+            file=sys.stderr,
+        )
+        return 2
+
+    seed_all(args.seed)
+
+    save_data = None
+    if not args.cold_boot:
+        save_data = _agent_save_or_refuse(args)
+        if save_data is None:
+            return 2
+
+    # Policy, plus the provenance each one honestly implies (see the
+    # spec's Provenance section): a scripted list is a person's, a replayed
+    # transcript is the model's decisions taken from a recording rather
+    # than live, and only a live call is an untainted cu-agent trace.
+    kind: RecorderKind
+    taints: tuple[str, ...] = ()
+    model: str | None = None
+    policy: Any
+    if args.policy == "scripted":
+        try:
+            decisions = [
+                actions_from_json(json.loads(line).get("actions", []))
+                for line in args.actions.read_text().splitlines()
+                if line.strip()
+            ]
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            print(f"refused: bad --actions file: {exc}", file=sys.stderr)
+            return 2
+        policy = ScriptedPolicy(decisions)
+        kind = "human"
+    elif args.policy == "replay":
+        try:
+            policy = ReplayPolicy(args.actions)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"refused: bad --actions file: {exc}", file=sys.stderr)
+            return 2
+        kind = "cu-agent"
+        model = args.model
+        taints = (
+            "decisions replayed from a captured transcript, not taken live",
+        )
+    else:
+        # `ClaudePolicy.__init__` never imports `anthropic` -- only its
+        # `_ensure_client`, called lazily on the first `decide()` inside
+        # `run_agent`'s loop, does (see `tuxghost/agent/claude.py`'s
+        # module docstring). Wrapping `ClaudePolicy(...)` construction in
+        # `except ImportError` (an earlier draft of this branch did) is
+        # dead code: the import never happens there, so a missing
+        # `anthropic` package would instead raise deep inside `run_agent`,
+        # UNCAUGHT -- which Python reports as exit 1, indistinguishable
+        # from "diverged", exactly the collision this module's docstring
+        # says `agent` must never produce. Importing `anthropic` here,
+        # explicitly, before any policy or `run_agent` call, is a real
+        # precondition check: it fails fast, on the same branch the old
+        # `except ImportError` was meant to guard, without ever touching
+        # the network (a missing package fails before any client is
+        # constructed).
+        try:
+            import anthropic  # noqa: F401
+        except ImportError as exc:
+            print(
+                f"refused: --policy claude needs the anthropic SDK "
+                f"(pip install -e '.[agent]'): {exc}",
+                file=sys.stderr,
+            )
+            return 2
+
+        from tuxghost.agent.claude import ClaudePolicy
+
+        policy = ClaudePolicy(model=args.model, goal=args.goal)
+        kind = "cu-agent"
+        model = args.model
+
+    result = run_agent(
+        policy=policy,
+        save_data=save_data,
+        cold_boot=bool(args.cold_boot),
+        seed=args.seed,
+        clock_epoch=args.clock_epoch,
+        step_budget=args.steps,
+        recorder_kind=kind,
+        model=model,
+        upscale=args.upscale,
+        taints=taints,
+    )
+    write(result.trace, args.out)
+
+    frames_dir = args.run_dir / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    for index, png in enumerate(result.frames):
+        (frames_dir / f"{index:05d}.png").write_bytes(png)
+    with (args.run_dir / "decisions.jsonl").open("w") as handle:
+        for decision in result.decisions:
+            record = dataclasses.asdict(decision)
+            record["actions"] = [
+                dataclasses.asdict(a) for a in decision.actions
+            ]
+            handle.write(json.dumps(record) + "\n")
+
+    print(f"wrote {args.out} ({result.steps} steps) and {args.run_dir}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -352,6 +567,8 @@ def main(argv: list[str] | None = None) -> int:
         return _compare(args.a, args.b, args.allow_mismatch)
     if command == "record":
         return _record(args)
+    if command == "agent":
+        return _agent(args)
     if command == "verify":
         return _verify(args.trace, args.allow_mismatch)
     if command == "execute":
