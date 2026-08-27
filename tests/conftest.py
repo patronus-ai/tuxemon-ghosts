@@ -99,6 +99,13 @@ _TRACKED_FILES = (
     # ambient noise -- the `test_optimize_runner.py` precedent (task 8, S3
     # plan).
     "tests/test_optimize_mutation.py::",
+    # No pinned entries below for this file either: it reads only
+    # `scripted_town_1234.tuxghost`, recorded against the current
+    # `patches/` (measured: warns ZERO times at the moment of
+    # committing), so a future seventh patch must fail loudly here
+    # rather than let the optimizer's own PARENT go stale unnoticed --
+    # the `test_optimize_mutation.py` precedent (handoff item A1).
+    "tests/test_scripted_parent.py::",
 )
 _EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS: dict[str, int] = {
     "tests/test_golden.py::test_golden_trace_still_reaches_its_recorded_digest": 1,

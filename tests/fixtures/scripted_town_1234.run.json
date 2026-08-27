@@ -1,0 +1,10 @@
+{
+  "goal": "",
+  "seed": 1234,
+  "clock_epoch": 1787659200,
+  "step_budget": 200,
+  "policy": "scripted",
+  "model": null,
+  "steps": 176,
+  "stop_reason": "policy returned STOP"
+}
