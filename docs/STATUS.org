@@ -1,5 +1,5 @@
 #+TITLE: Project status — deterministic trace format and offline replay
-#+DATE: 2026-08-25
+#+DATE: 2026-08-27 (last revised at S3 close-out; S1 sections keep their original measurement dates)
 
 Read this file first, before any spec, plan, or task report under
 =.superpowers/sdd/=. It states what is true of the tree right now; those
@@ -85,10 +85,17 @@ three must-fix defects below plus the =--checkpoint= flag; the slow
 count is unchanged.)
 
 This section is S1's own count, left as it was measured at the time.
-*S2 has since raised the fast tier to 203 passed / 3 skipped* (75 net
-new tests), slow tier unchanged at 3 passed / 203 deselected — see
-"S2 — CU-agent harness, delivered" below for the current whole-suite
-number and what backs it.
+*S2 raised the fast tier to 203 passed / 3 skipped* (75 net new tests),
+slow tier unchanged at 3 passed / 203 deselected, and later to 213
+passed / 3 skipped after the live-model capture — see "S2 — CU-agent
+harness, delivered" below.
+
+*Current, as of S3's close-out: 347 passed / 4 skipped / 11 warnings
+(fast) and 4 passed / 347 deselected / 1 warning (slow), =make check=
+=EXIT=0=*, measured sequentially on this tree. That is the number to
+trust; see "S3 — offline trajectory optimizer, delivered" below for the
+full gate output and for why two older runtime figures (=10:52= and
+=41:54=) must not be inherited.
 
 * Measured determinism results, with real digests
 
@@ -198,8 +205,14 @@ An agent sees a rendered game frame, answers with a
 *same* =tuxghost.record.Recorder= S1 already ships, as a
 =provenance.recorder = "cu-agent"= trace that the S1 executor verifies
 unchanged. Spec: =docs/superpowers/specs/2026-08-26-cu-agent-harness-design.org=
-(=#+STATUS: implemented=). Full task history:
-=.superpowers/sdd/2026-08-26-cu-agent-harness.org/=.
+(=#+STATUS: implemented=).
+
+Task history: S2's =.superpowers/sdd/= workspace was deleted at its own
+close-out, as every plan workspace in this project is. The durable record
+is the git history — S2 spans =c3d1f15= (spec) through =61f63aa= (final
+residuals), plus =95912aa= (the live-model capture) — and this section.
+Do not look for a task-report directory; there isn't one, and a pointer
+to one is a dead pointer by design.
 
 ** No seventh patch
 
@@ -571,8 +584,9 @@ rule against concurrent suites. All other gates (=ruff=, =lint-patched=,
 *Updated by the final whole-branch fix wave*: fast tier is now *208
 passed, 3 skipped, 9 warnings* (=make check-fast=, measured on this
 tree; five new regression tests, each demonstrated to fail against the
-defect it pins and pass once fixed — see that task's report at
-=.superpowers/sdd/2026-08-26-cu-agent-harness.org/final-fix-report.md=).
+defect it pins and pass once fixed — that wave is commit =d03b587=; its
+task report lived in the deleted =.superpowers/sdd/= workspace, so the
+commit is the record).
 =ruff=, =lint-patched=, and =mypy= over the same 41 source files all
 green in the same run. The 9-warning count is unchanged from before the
 wave — parked minor 7's fix pins that count as a tripwire rather than
@@ -644,9 +658,438 @@ from =decide()=, which no test calls.
   reached, which is a proxy for "a conversation happened", not a score.
   Scoring is S5's job, and a half-scorer here would be worse than none.
 
+* S3 — offline trajectory optimizer, delivered
+
+An editor proposes *named edits* to an existing trace's action list; each
+candidate is recompiled and replayed offline; an objective scores the
+state it reached; the winner is sealed as a
+=provenance.recorder = "offline-agent"= trace that =tuxghost verify=
+replays to the digest it recorded. Spec:
+=docs/superpowers/specs/2026-08-27-offline-optimizer-design.org=
+(=#+STATUS: implemented=). Tuning numbers:
+=docs/2026-08-27-optimizer-tuning.org=.
+
+=offline-agent= is the exact =recorder= value S2's spec reserved for
+"S3's offline optimizer, which is the thing that name describes"; no new
+=recorder= vocabulary was invented, =format_version= stays *1*, and no
+header field was added. Lineage lives in =provenance.taints= as one
+string, e.g. ~"derived by offline-agent (mutation, seed 3) from parent
+bc717075… over 32 round(s)"~. The cost of that choice is accepted and
+stated rather than glossed: lineage is prose, so nothing can mechanically
+walk a chain of derived traces, and S4 would have to parse a string to
+render a lineage tree. If that becomes real it is a v2 header field,
+argued then.
+
+Task history: S3's =.superpowers/sdd/= workspace is deleted at close-out,
+like S2's. Do not go looking for it. The durable record is the git
+history — =39b28c7= (spec) and =f34d2c6= (plan) through =c306465= (Task
+11's fix round), plus this close-out commit — and this section.
+
+** No seventh patch, re-measured at close-out
+
+S3 adds *no* engine change. Re-run as part of this close-out, not carried
+forward from memory:
+
+#+begin_src bash
+$ ls patches/ | wc -l
+       6
+$ git -C tuxemon diff --stat | tail -1
+ 18 files changed, 265 insertions(+), 63 deletions(-)
+$ git -C tuxemon status --short | wc -l
+      20
+$ git -C tuxemon ls-files --others --exclude-standard
+tuxemon/core/clock.py
+tuxemon/core/ids.py
+$ ./.venv/bin/python -c "...; from tuxghost.digest import EXEMPTIONS; print('EXEMPTIONS ==', EXEMPTIONS)"
+EXEMPTIONS == {}
+#+end_src
+
+Same six patches, same 18/265/63, same 2 untracked files, =EXEMPTIONS=
+still =={}=. The 20 short-status lines are those 18 modified plus those 2
+untracked.
+
+** Architecture: no new stepping loop, no new format writer
+
+=seal()= composes four primitives that already existed —
+=boot_from_save=, =install_schedule=, =run_steps= (with =execute='s own
+per-step checkpoint hook) and =Recorder= — and adds no fifth. =run_steps=
+remains *the* loop and =Recorder= remains *the* trace writer, which is
+load-bearing rather than tidy: =tuxghost/trace.py='s =read()= neither
+sorts nor validates same-step input ordering, so a trace written by
+anything other than those writers could replay in file order. S3 never
+writes a trace file directly.
+
+=seal()= exists rather than reusing =run_agent= because =run_agent='s
+scripted path starts its first action at step 0 and therefore cannot
+express a lead-in — true of 1 of the 2 committed traces
+(=walk_1234= waits 30 steps).
+
+** Where =add_edge= lives now — a third option, not either of the spec's two
+
+The spec left =_add_edge='s home open with two candidates, and *neither
+was taken*. Leaving it in =tuxghost/agent/runner.py= makes the optimizer
+depend on the agent harness for one function; moving it to
+=tuxghost/optimize/schedule.py= makes the *agent harness depend on the
+optimizer*, which is worse. =PRESSED=, =RELEASED= and =add_edge= moved
+verbatim to =tuxghost/loop.py=, which already defines =InputSchedule= and
+which both subsystems already import — one edge writer, no
+cross-subsystem dependency. The leading underscore was dropped (the name
+is public across modules now), =tuxghost/agent/runner.py= imports the
+three from there, its local copies were deleted, and
+=tests/test_loop_add_edge.py= covers the move directly.
+
+** =lift= needs =step_count=, not just the edge list — the measured reason =lead_in= exists
+
+Two quantities in a trace leave no input edge behind at all, and both are
+real on the committed traces:
+
+| trace | =step_count= | lead-in before first press | tail after last release | actions |
+|-------+--------------+----------------------------+-------------------------+---------|
+| =claude_town_1234= | 442 | 0 | 10 | 18 |
+| =walk_1234= | 900 | *30* | *400* | 40 |
+
+400 of =walk_1234='s 900 steps are trailing settle and 30 more precede
+its first press. This is not a hypothetical: a naive =lift= over the edge
+list alone produced an action list costing *432* steps for the *442*-step
+=claude_town_1234= — and *the replay's digest matched anyway*, because
+the ten dropped steps changed nothing that had not already settled. A
+digest-only check would have passed a =lift= that silently drops tails.
+That near-miss is why =ActionScript= carries an explicit =lead_in= field
+and why the no-op identity control asserts three things rather than one.
+Both rows above are pinned by
+=tests/test_optimize_schedule.py::test_lift_recovers_the_measured_shape=,
+parametrised over *both* traces — one alone would not catch it, since
+=claude_town_1234='s lead-in is 0.
+
+** The identity result: an unedited script reproduces its parent exactly
+
+=tests/test_optimize_seal.py::test_sealing_an_unedited_script_reproduces_its_parent_exactly=
+asserts all four of:
+
+- =result.trace.inputs == parent.inputs=,
+- =result.trace.header.step_count == parent.header.step_count= *and*
+  =result.steps == parent.header.step_count=,
+- =result.trace.header.final_digest == parent.header.final_digest=
+  (=bc717075d0ba16b8731ae89ddf92f8aa9ff3201429f6766c480f02cded5faf1f=),
+- =result.trace.initial_state == parent.initial_state= — added because
+  =Recorder.__init__= re-snapshots from the *live* session rather than
+  copying =parent.initial_state= verbatim, so =seal='s "verbatim" claim
+  is an invariant about a lossless boot→snapshot round-trip that nothing
+  else asserted.
+
+Inputs, digest *and* step_count. The first probe of this matched inputs
+and digest while silently dropping 10 real steps, which is the whole
+reason the step_count assertion is there.
+
+** =max_cost=: an addition the spec never mentioned
+
+Nothing in the spec bounded how much an editor may grow a script, and
+=HOLD_CAP=/=SETTLE_CAP= are 600 each — so a few thousand inserted actions
+describes a multi-million-step candidate: hours of engine time inside one
+uninterruptible =seal()= call. That is the same reasoning
+=tuxghost/agent/types.py= gives for capping a single action at all, so
+=optimize()= takes a *required* =max_cost= and treats an over-budget
+candidate as a *rejected round*, not a crash. =seal()='s own =max_cost=
+is optional and refuses *before booting anything*, raising =OverBudget=
+(a =ValueError= subclass, so existing broad handlers keep working) so
+that "this candidate was too expensive" stays distinguishable from "this
+parent trace does not boot".
+
+Two places deliberately do *not* pass =max_cost=, both pinned and both
+commented against restoration: =optimize()='s round 0 (the parent is the
+baseline, not a proposal — refusing it would leave the run with nothing
+to compare against) and the CLI's closing re-seal of the winner. The
+second was a real bug: passing =max_cost= there raised =OverBudget=
+uncaught and exited *1* for a plain =--max-cost 400= against the
+442-step parent.
+
+** The parent fixture ends mid-dialogue, and that bounds what S3 can claim
+
+=tests/golden/claude_town_1234.tuxghost= — the only committed trace with
+live-model provenance, and S3's parent throughout — ends at tile
+=[11, 14]= on =spyder_paper_town.tmx= after 442 steps with
+=state_stack == ['DialogState', 'WorldState']=.
+
+*That trailing dialogue swallows every appended input.* Measured, one
+appended action at a time: UP, DOWN, LEFT, RIGHT all leave the tile at
+=[11, 14]=; so do A-then-DOWN and B-then-DOWN. An edit appended after the
+dialogue opens cannot move the player at all.
+
+Measured step effects on the same parent, which *inverted two of the
+plan's own assumptions* — the plan named =Insert(18, DOWN)= the
+"improving" edit and =Delete(0)= the "worsening" one, and both do the
+opposite:
+
+| edit | steps |
+|------+-------|
+| =Delete(last)=, repeated | 442 → 416 → 390 → 364 (better) |
+| =Delete(0)=, repeated | 442 → 416 → 390 (better) |
+| =Insert(18, DOWN)= | 466 (worse) |
+| a long inserted wait, repeated | 442 → 642 → 842 (worse) |
+
+*The consequence, and it is a limit not a feature*: in the nine-run
+tuning sweep, all 60 accepted rounds were accepted on the =ReachTile=
+=steps= term. The =distance= term did *vary* — values from =-2= (the
+parent's own) down to =-9=, from mid-script edits that change the route
+*before* the dialogue opens — but *no candidate in any run ever scored
+better than the parent's =-2=*. The =map= term was =0.0= every round in
+every run; nothing ever left the map.
+
+So the loop's ACCEPT path is exercised only through the =steps= term. *The
+distance term's role in acceptance is untested*, and closing that needs a
+parent fixture that does not end mid-dialogue — not a code change.
+
+(An earlier reading of this fixture concluded the distance term was
+*frozen* for every candidate. That is wrong, measured: it varies. The
+operational conclusion is the same, but the reason is "it never improved",
+not "it never moved".)
+
+** Tuning: measured, and the budget is still the binding constraint
+
+Full raw table in =docs/2026-08-27-optimizer-tuning.org=. Nine CLI runs,
+=MutationEditor= against =claude_town_1234= and
+=ReachTile(spyder_paper_town.tmx, (11, 16))=, seeds 1/2/3 ×
+rounds ∈ {8, 16, 32}, with =patience= and =max_rejections= set equal to
+=rounds= so neither could bind.
+
+*The dumb mutator beats the parent at every budget on every seed — 9 runs
+out of 9.* Best candidate's steps against the 442-step parent:
+
+| rounds | best steps (seeds 1 / 2 / 3) | best round (1 / 2 / 3) |
+|--------+------------------------------+------------------------|
+|      8 | 392 / 414 / 408 | 8 / 8 / 8 |
+|     16 | 374 / 385 / 303 | 13 / 11 / 16 |
+|     32 | 284 / 317 / 262 | 32 / 32 / 28 |
+
+*But 32 rounds has not saturated.* Every run found its best candidate at,
+or within four rounds of, its own cap; all nine stopped with
+=stop_reason == "rounds exhausted"=, never on patience and never on the
+rejection cap. Doubling the budget kept buying improvement at both
+doublings with no sign of flattening. The honest reading is "more than
+32, unmeasured how much more" — *not* "32 is enough". Zero rounds were
+rejected in any of the nine runs, so the sweep says nothing about
+=max_rejections=, and no candidate came near =--max-cost 4000=.
+
+=patience= is *derived, not measured*, from those same runs: 10 is the
+smallest value that would not have truncated any of the nine early
+(seed 3 at 32 rounds found its best — the sweep's best overall, 262
+steps, 41% off the parent — after a 10-round barren stretch). Since
+patience never actually fired, that is a lower bound and nothing more.
+
+No default was adopted in code. =rounds=, =patience=, =max_rejections=
+and =max_cost= all remain required arguments of =optimize()= and of the
+CLI, which is the only honest position while =rounds= has no measured
+ceiling.
+
+Task 8 independently measured seeds 7, 8 and 9 also beating the same
+parent within 12 rounds (best rounds 10, 8, 10).
+
+** Freshly re-measured: a settled end state still cannot detect the improvement
+
+Within one 32-round run (seed 3), candidates from *408 steps down to
+262* — a 146-step spread — all reached the identical final digest
+=b97ebc7c=, and a 438-step candidate reached the parent's own
+=bc717075=. The full round log is in the tuning note.
+
+*"The optimizer improved the trace" can therefore never be established
+from the final digest.* The burden falls entirely on =steps= and on the
+per-checkpoint digest *sequence*, which is why every S3 convergence test
+compares round-by-round score sequences rather than final bests. This is
+S1/S2's attractor lesson (see "Settled end states cannot detect a
+perturbation in this game" above) re-confirmed on S3's own data.
+
+Round 32 of that run also demonstrates the loop requires *strictly*
+better: it tied round 28's winner exactly at =(0, -2, -262)= and was not
+accepted.
+
+** An honest negative: the winner's re-seal is unfalsifiable from the artifact
+
+The CLI re-seals the winning script to stamp its lineage taint rather than
+editing an already-sealed =Provenance= (which would make the CLI a second
+trace writer). *Nothing observable in the resulting artifact distinguishes
+that re-seal from a trace whose =Provenance= was patched after the fact.*
+=Recorder.finish= never passes =recorded_at= — the only field that could
+carry a wall-clock discriminator — and is otherwise a pure function of
+the pinned seed/epoch and the reached state, so the only field differing
+between the loop's best trace and the re-seal is =taints=, which is
+exactly what a patch would set.
+
+The re-seal still earns its keep: one trace writer, plus a free digest
+re-check that the winning script still reaches the score the loop
+recorded (a mismatch is a refusal, exit 2, reported as a determinism
+failure rather than a bad edit). But no assertion over the file can prove
+the re-seal happened, and none pretends to. Verified independently by two
+reviewers; the claim was traced through =record.py=, =trace.py= and
+=runner.py= rather than assumed.
+
+** Validation item 6 was re-specified, because the original described an unwritable test
+
+The spec's item 6 ("=seal()= refuses a clipped candidate") originally said
+to construct a script whose =cost= and =step_count= disagree. Nobody can
+write that test: =seal= derives its budget *from* the script, so its
+input cannot be made inconsistent from outside. The real demonstration
+mutates =seal= itself (pass =script.cost() - 1=) — which is also why
+=seal= installs its step-counting hook *even when =checkpoint == 0==,
+the "do not sample" path. Without the always-on counter there would be
+nothing for the assertion to compare against.
+
+** The CLI's refusals
+
+=optimize= follows =agent='s contract exactly: *0 or 2 for every
+anticipated precondition; 1 is reserved for a genuine engine bug*, since
+=optimize=, like =agent=, has nothing to diverge *from*. The shipped
+exit-2 list is longer than the spec's sketch and is enumerated in the
+spec's CLI section. Two worth naming here:
+
+- =--editor mutation= without =--seed= is refused (an unseeded run would
+  be unreproducible while still *looking* reproducible), *and so is its
+  converse* — any other editor *with* =--seed=. Refusing rather than
+  silently dropping it: dropping would still leave a seed no editor ever
+  used sitting in =run.json= and in the winner's lineage taint, recorded
+  as if it had produced the run.
+- The parent trace is read through =cli._read_trace_or_refuse=, the
+  module's single trace-reading boundary, with =allow_mismatch=False=.
+  The plan's own code used a bare =read()= under
+  =except (OSError, Refused)=, which would have exited *1* ("diverged")
+  for a parent that is merely not valid JSON
+  (=json.JSONDecodeError=) or structurally malformed
+  (=pydantic.ValidationError=) — neither of which is =OSError= or
+  =Refused=.
+
+A known, deferred inconsistency: an unusable =--seed= is refused while an
+unusable =--edits= (or =--model= on =mutation=/=scripted=) is still
+silently ignored.
+
+** Known limitations, each restated as measured or explicitly unmeasured
+
+From the spec's "Known limitations", with what is now known:
+
+- *The objective is a proxy* — *measured, and confirmed to be the binding
+  weakness.* =ReachTile= scored position, and on this parent position
+  could not improve at all, so 60 of 60 acceptances came from the =steps=
+  tie-breaker. It says nothing about whether the *game* progressed. That
+  is S5's job.
+- *=manhattan= across maps is meaningless, so the map term leads* —
+  *unexercised.* The map term was =0.0= in all 9 runs, every round; no
+  candidate ever left =spyder_paper_town.tmx=. The behaviour is pinned by
+  =tests/test_optimize_objective.py=, not by any measured run.
+- *Overlapping button holds are refused, not supported* — *measured on
+  constructed inputs, not on real traces.* Neither committed trace has
+  any (=walk_1234=: 80 edges → 40 clean pairs; =claude_town_1234=: 36 →
+  18). The three refusals (unreleased button, release without press,
+  overlapping holds) are pinned by hand-built traces.
+- *=lead_in= is not editable in v1* — *shipped exactly as specified.* It
+  is preserved verbatim; no =Edit= variant touches it. A run whose only
+  problem is starting too early cannot be fixed by S3.
+- *=state_stack= is names only* — *unchanged, and it bit here.* The
+  parent's =['DialogState', 'WorldState']= is the whole reason its
+  position is immovable, and the optimizer can see the state name but has
+  no seam into what the dialogue is or how to advance past it.
+- *=world_state= is still exactly two fields* (=factions_manager=,
+  =menu_flags=) — *unchanged; S1's widening commitment still never
+  shipped.* A world-state objective would still have almost nothing to
+  read.
+- *=ClaudeEditor= is unreproducible by construction* — *unchanged, and
+  =ReplayEditor= is the mitigation, not a fix.*
+- *One machine* — *unchanged.* macOS 26.6.1 arm64, one Python 3.12, one
+  SDL build.
+
+** Honest limits
+
+- *No live =ClaudeEditor= capture exists.* Unlike S2 — which has a real
+  =claude-sonnet-5= run committed as
+  =tests/golden/claude_town_1234.tuxghost= — S3's =ClaudeEditor= has
+  *never been run against a real model*. Its coverage is stub-client
+  tests only (=tests/test_optimize_claude.py=): prompt shape, JSON-fence
+  parsing, the malformed-reply and =AnthropicError= arms. So the claim
+  "an LLM editor can optimize a trace" is *unmeasured for S3*; what is
+  measured is that a dumb seeded mutator can, which is the baseline such
+  a claim would have to beat. There is no S3 equivalent of S2's
+  live-capture section below because there was no S3 live capture.
+- *The =anthropic= extra stays optional.* The import is lazy and gated on
+  =--editor claude=, so a genuine engine crash on =--editor mutation=
+  cannot have its traceback replaced by =ModuleNotFoundError=. The extra
+  *is* installed in this venv (S2's live capture needed it); the gate
+  does not depend on it.
+- *=ReachTile= is a proxy and this is not a hedge.* See the two entries
+  above: on the one parent that exists, it degenerated to "same place,
+  fewer steps".
+- *One parent, one objective, one editor, three seeds, one machine, under
+  load.* The tuning sweep ran at 1-minute load averages of 13.7–33.1 from
+  unrelated work in other repos, so its wall-clock column is not usable;
+  CPU time and total engine steps sealed are the columns that mean
+  anything. Details and the raw numbers are in the tuning note.
+- *S3 renders nothing.* No =FrameRenderer=, no =scaled_context=, no
+  frames in any run directory — by design, and the =CandidateResult= an
+  editor sees carries no pixels.
+
+** New test counts and the close-out gate
+
+S3 added *eleven* test modules: =tests/test_convention_alignment.py= (2
+tests, written before any other S3 code), =tests/test_loop_add_edge.py=
+(the =add_edge= move), and nine =tests/test_optimize_*.py= modules — one
+per production module — with =schedule= 11, =edits= 13, =seal= 9,
+=objective= 10, =runner= 17, =mutation= 6, =replay= 12, =claude= 14 and
+=cli= 18 tests.
+
+Baseline entering S3 was S2's *213 passed / 3 skipped / 9 warnings*.
+
+*A full, sequential =make check= at close-out — the first time the slow
+tier has ever been run for S3*, since Task 11's gate was =check-fast=
+only:
+
+#+begin_src bash
+$ ./.venv/bin/python -m ruff check tuxghost tests
+All checks passed!                                  # lint
+All checks passed!                                  # lint-patched
+$ ./.venv/bin/python -m mypy tuxghost tests
+Success: no issues found in 64 source files
+$ PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q
+347 passed, 4 skipped, 11 warnings in 238.62s (0:03:58)
+$ PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 ./.venv/bin/python -m pytest -q -m slow
+4 passed, 347 deselected, 1 warning in 53.89s
+EXIT=0
+#+end_src
+
+- *Fast tier: 347 passed, 4 skipped, 11 warnings.* 134 net new tests over
+  S2's 213. The 4th skip is new: Task 11 moved the =verify= round-trip
+  behind the =slow= marker.
+- *Slow tier: 4 passed, 347 deselected, 1 warning.* Up from S2's 3 —
+  that same round-trip test. This is S3's first slow-tier evidence of any
+  kind. The one warning is =test_golden.py='s expected =patch_series_id=
+  drift, and the =pytest_sessionfinish= tripwire reported no mismatch.
+- =mypy --strict= now covers *64* source files (was 42 at S2's close).
+- Run sequentially, one suite at a time, per the standing rule against
+  concurrent runs.
+
+*On runtime, because a wrong number here would mislead every future
+session*: the fast tier is *238.62 s (3:58)* on this host at a 1-minute
+load average of 15.3 falling to 5.1 over the run. Two earlier figures for
+the same tier should NOT be inherited:
+
+- =10:52= was measured at *336 tests*, before Task 11's fix round added
+  11 more (three of which boot the engine). Stale by count.
+- =41:54= (2514 s) was measured under a 1-minute load average of *35*,
+  from four unrelated pytest suites plus a VM in other repos — a
+  different repo and venv, so no =~/.tuxemon/cache/l18n= race and no
+  violation of the one-suite rule, but useless as a timing. That run also
+  motivated a warning, recorded during Task 11, that the fast tier now
+  exceeds a 600-second command cap. *That does not reproduce on a
+  quiescent host*: 238.62 s is well under it. The 600-second problem was
+  a property of the machine's load, not of the suite.
+
+The whole =make check= (all five targets) took roughly five minutes wall
+clock under the same falling load.
+
 * Next subsystem
 
-*S3* (offline optimizer), *S4* (ghost rendering), and *S5* (finish lines
-/ rewards) are next, in that order. Each gets its own spec — this
-project's spec covered only S1 (the trace/replay core); S2 (the CU-agent
-harness) has its own spec, now implemented, in the section above.
+*S4* (ghost rendering) and *S5* (finish lines / rewards) are next, in
+that order. Each gets its own spec — this project's original spec covered
+only S1 (the trace/replay core); S2 (the CU-agent harness) and S3 (the
+offline optimizer) each have their own, both now =#+STATUS: implemented=.
+
+S5 is where =ReachTile= gets replaced rather than extended: it supplies
+its own =Objective= and nothing in S3's loop, seal or edit vocabulary
+changes. The measured argument for doing that, rather than growing
+=ReachTile=, is in S3's section above — on the one parent trace this
+project has, a positional objective could not improve position at all.

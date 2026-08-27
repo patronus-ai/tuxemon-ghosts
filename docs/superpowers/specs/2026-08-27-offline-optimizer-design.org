@@ -1,6 +1,6 @@
 #+TITLE: S3 — offline trajectory optimizer for Tuxemon
 #+DATE: 2026-08-27
-#+STATUS: draft
+#+STATUS: implemented
 
 * What this is
 
@@ -108,12 +108,20 @@ class ActionScript:
   =settle=. It *refuses loudly* — never reinterprets — on an unreleased
   button, a release without a press, or overlapping holds.
 - =lower(script) -> InputSchedule= walks the actions from =lead_in=,
-  inserting each press and release through
-  =tuxghost.agent.runner._add_edge=, which is already the canonical
-  writer (append-not-assign, per-step sort). Not a reimplementation:
-  =_add_edge= moves to =tuxghost/optimize/schedule.py= and the runner
-  imports it from there, so there stays exactly one edge writer in the
-  project.
+  inserting each press and release through the project's one canonical
+  edge writer (append-not-assign, per-step sort). Not a
+  reimplementation.
+
+  *As implemented*: that writer is =tuxghost.loop.add_edge=, not
+  =tuxghost.agent.runner._add_edge= and not
+  =tuxghost/optimize/schedule.py=. Both homes this spec originally
+  considered create a backwards dependency (see "Open questions,
+  answered" below); =PRESSED=, =RELEASED= and =add_edge= moved verbatim
+  into =tuxghost/loop.py=, which already defines =InputSchedule= and
+  which both the agent harness and the optimizer already import. The
+  leading underscore went with the move — it is a cross-module name now.
+  =tuxghost/agent/runner.py= imports the three from there; its local
+  copies were deleted.
 
 Step indices are *recomputed* by =lower=, never edited by an editor. That
 structurally removes the off-by-one class this project keeps finding: an
@@ -139,7 +147,14 @@ questions".
 ** =tuxghost/optimize/seal.py= — compile, run, record
 
 =seal(script, parent, *, checkpoint, taints) -> CandidateResult= composes
-four existing primitives and adds nothing:
+four existing primitives and adds nothing.
+
+*As implemented*, the signature is
+=seal(script, parent, *, checkpoint=0, taints=(), model=None, max_cost=None)=.
+=max_cost= is an addition this spec never mentioned — see "Open
+questions, answered".
+
+The four primitives:
 
 1. =boot_from_save(parent.initial_state, seed=…, clock_epoch=…)= — the
    candidate inherits the parent's start, seed and epoch verbatim. A
@@ -169,6 +184,12 @@ A hazard =seal()= owns: =run_agent='s truncation guard (which declines to
 because =seal()= sets the budget to the script's exact cost — but it must
 =assert result.steps == script.cost()= anyway, because a silent clip
 would be scored as if it were the edit.
+
+*As implemented*, that assertion is backed by a step-counting hook that
+=seal= installs *even when =checkpoint == 0== — deliberately, because
+=checkpoint == 0= is the "do not sample" path and without the hook there
+would be nothing to count against. See Validation item 6 for why this is
+the only place the clipped-candidate refusal can be demonstrated from.
 
 ** =tuxghost/optimize/objective.py=
 
@@ -208,9 +229,13 @@ progressed, which is exactly where S5 takes over; S5 supplies its own
 #+begin_src python
 def optimize(
     parent: Trace, editor: Editor, objective: Objective, *,
-    rounds: int, patience: int, checkpoint: int,
+    rounds: int, patience: int, max_rejections: int, max_cost: int,
+    checkpoint: int = 0, model: str | None = None,
 ) -> OptimizeResult: ...
 #+end_src
+
+(=max_cost= and =model= are additions to the signature this spec first
+sketched; =max_cost= is argued in "Open questions, answered".)
 
 Round /n/: the editor proposes edits from the current best script and its
 =CandidateResult= and score → apply → =seal= → score → keep if strictly
@@ -220,7 +245,12 @@ STOP — reusing S2's =STOP= convention rather than inventing a second one.
 
 Round 0 is the *parent itself*, sealed and scored, so "did anything
 improve" is answered against a measured baseline rather than the parent's
-own recorded header.
+own recorded header. *As implemented*, round 0 is sealed WITHOUT
+=max_cost=: the parent is the baseline, not a proposal, and refusing it
+would leave the run with nothing to compare against. The same reasoning
+keeps =max_cost= off the CLI's closing re-seal of the winner, where
+passing it raised =OverBudget= uncaught and exited 1 for a plain
+=--max-cost 400= against the 442-step parent (measured, Task 11).
 
 An editor is untrusted input. A proposal that fails validation is a
 *rejected round*: logged with its reason, patience incremented, loop
@@ -302,22 +332,50 @@ a v2 header field, argued then.
 
 * CLI
 
+*As implemented* (this block is corrected; the first sketch had
+=--patience= optional and named neither =--max-rejections= nor
+=--max-cost=):
+
 #+begin_src bash
 tuxghost optimize --trace PARENT \
   --editor {scripted,mutation,replay,claude} \
   [--seed N] [--edits FILE] [--model M] \
   --objective reach-tile --target MAP:X,Y \
-  --rounds N [--patience K] [--checkpoint N] \
+  --rounds N --patience K --max-rejections K --max-cost N \
+  [--checkpoint N] \
   --out OUT --run-dir DIR
 #+end_src
+
+=--rounds=, =--patience=, =--max-rejections= and =--max-cost= are all
+*required*: no realistic value had been measured when the flags were
+added, and a default invented at that point would have been mistaken for
+one that had. =--checkpoint= defaults to 64; =0= means "do not sample"
+and is legal.
 
 Same exit-code contract as =agent=: *0 or 2 for every anticipated
 precondition; 1 is reserved for a genuine engine bug.* Like =agent=,
 =optimize= has nothing to diverge *from*, so no precondition failure may
-report 1. Anticipated refusals (exit 2): a parent trace that will not
-=lift=; =--editor scripted/replay= without =--edits=; =--editor replay=
-without =--model= (the same misattribution argument as =agent='s); a
-=--target= that does not parse; =rounds < 1=; a missing =anthropic= SDK.
+report 1. Anticipated refusals (exit 2), *as implemented* — the shipped list is
+longer than this spec's sketch:
+
+- a parent file that is missing, unreadable, not JSON, structurally
+  malformed, or refused by =tuxghost.trace.read='s own matrix (all four
+  routed through =cli._read_trace_or_refuse=; =allow_mismatch=False=,
+  and =optimize= exposes no flag to relax it);
+- a parent trace that will not =lift=;
+- =--editor scripted/replay= without =--edits=;
+- =--editor replay= without =--model= (the same misattribution argument
+  as =agent='s);
+- =--editor mutation= without =--seed=, *and* its converse — any other
+  editor *with* =--seed=, which is a refusal rather than a silent drop
+  because dropping it would still leave a bogus seed in =run.json=;
+- a =--target= that does not parse;
+- any of =--rounds=, =--patience=, =--max-rejections=, =--max-cost= below
+  1; =--checkpoint= below 0;
+- a missing =anthropic= SDK on =--editor claude=;
+- re-sealing the winning script reaching a different digest than the loop
+  recorded (a determinism failure, reported as a refusal rather than as
+  exit 1, because =optimize= has nothing to diverge *from*).
 
 The =anthropic= import stays *gated on =--editor claude=*, exactly the
 residual fix that landed in =61f63aa= — the other three editors never
@@ -328,8 +386,21 @@ its traceback replaced by =ModuleNotFoundError=.
 =optimize.jsonl= (one record per round: edits, score tuple, steps,
 digest, accepted/rejected and why) and =run.json= (parent digest,
 objective and target, editor, *editor* seed — the game seed is the
-parent's and is not S3's to choose — rounds, patience, max_rejections,
-best round, stop reason). No frames — S3 renders nothing.
+parent's and is not S3's to choose — model, rounds, patience,
+max_rejections, =max_cost=, best round, stop reason). No frames — S3
+renders nothing.
+
+*One honest negative about the winner's artifact*: the CLI re-seals the
+winning script to stamp its lineage taint, and that re-seal is
+*unfalsifiable from the file alone*. =Recorder.finish= never passes
+=recorded_at= — the only field that could carry a wall-clock
+discriminator — and is otherwise a pure function of the pinned
+seed/epoch and the reached state, so the only field differing between
+the loop's best trace and the re-seal is =taints=, exactly what a
+post-hoc =Provenance= patch would set. The re-seal is still worth doing
+(one trace writer, plus a free digest re-check that the winning script
+still reaches the score the loop recorded), but no assertion over the
+artifact can distinguish it from a patch, and none pretends to.
 
 =--objective reach-tile= is the only accepted value in v1; there is
 exactly one built-in objective and the flag exists so a second one does
@@ -412,6 +483,14 @@ today.
 
 * Known limitations, stated up front
 
+Every item below was written before implementation. Three more were
+*found by implementing it* and are recorded in =docs/STATUS.org='s S3
+section rather than duplicated here: the only committed parent trace ends
+mid-dialogue (so an appended action cannot move the player at all); the
+=ReachTile= =distance= term consequently never improved in any measured
+run, leaving the acceptance path it drives untested; and the winner's
+re-seal is unfalsifiable from the artifact alone.
+
 - *The objective is a proxy.* =ReachTile= measures position, not
   progress. Nothing in S3 knows what "finishing Tuxemon" means; that is
   S5's whole job, and a half-scorer here would be worse than none.
@@ -439,19 +518,56 @@ today.
 - *One machine.* Same caveat S1 and S2 carry: macOS 26.6.1 arm64, one
   Python, one SDL build.
 
-* Open questions
+* Open questions, answered
 
-- *Should =lead_in= become editable?* Keeping it fixed is simpler and
-  covers the traces that exist. A future "start sooner" objective would
-  need it, and adding it later is a new =Edit= variant, not a
-  restructuring — so v1 leaves it out.
+Each question below is closed by what shipped. The answers, not the
+questions, are what the tree does today.
+
+- *Should =lead_in= become editable?* *No, and it did not.* =lead_in= is
+  preserved exactly; no =Edit= variant touches it. This is unchanged from
+  the proposal above and remains a limitation, not an oversight (see
+  "Known limitations").
 - *Should =_add_edge= really move to =tuxghost/optimize/schedule.py=?*
-  The alternative is S3 importing it from =tuxghost.agent.runner=, which
-  puts an optimizer dependency on the agent harness for one function.
-  Moving it keeps one edge writer with no cross-subsystem import; the
-  cost is touching an S2 file. Decide during planning, with the
-  =lint-patched=/=mypy= gates as the check either way.
-- *How many rounds is a realistic default?* Unmeasured. =rounds= and
-  =patience= are required arguments in v1 rather than defaults invented
-  here; the implementation measures a sensible pair on =ReachTile= and
-  records the number in =docs/=.
+  *Neither option this spec offered was taken.* Both create a backwards
+  dependency: leaving it in =tuxghost/agent/runner.py= makes the
+  optimizer depend on the agent harness for one function, and moving it
+  into =tuxghost/optimize/schedule.py= makes the *agent harness depend on
+  the optimizer*, which is worse. A third option was taken instead:
+  =PRESSED=, =RELEASED= and =add_edge= moved verbatim to
+  =tuxghost/loop.py=, which already defines =InputSchedule= and which
+  both subsystems already import. One edge writer, no cross-subsystem
+  dependency, the underscore dropped because the name is now public
+  across modules. =tuxghost/agent/runner.py= imports the three from
+  there and its local copies were deleted;
+  =tests/test_loop_add_edge.py= is the move's own coverage.
+- *A cost ceiling this spec does not mention: =max_cost=.* Not an open
+  question the spec asked — an *addition* found while planning, recorded
+  here because it changes both =optimize()='s and =seal()='s contracts.
+  Nothing in the spec bounded how much an editor may grow a script, and
+  =HOLD_CAP=/=SETTLE_CAP= are 600 each, so a few thousand inserted
+  actions describes a multi-million-step candidate: hours of engine time
+  inside one =seal()= call, unobservable and uninterruptible — the exact
+  reasoning =tuxghost/agent/types.py= gives for capping a single action
+  at all. =optimize()= therefore takes a *required* =max_cost= and treats
+  an over-budget candidate as a *rejected round*, not a crash.
+  =seal()='s own =max_cost= is optional and refuses *before booting
+  anything*, raising =OverBudget= (a =ValueError= subclass, so existing
+  broad handlers keep working) so that "this candidate was too
+  expensive" stays distinguishable from "this parent trace does not
+  boot".
+- *How many rounds is a realistic default?* *Measured, and no default was
+  adopted.* =rounds=, =patience=, =max_rejections= and =max_cost= remain
+  required arguments. The measurement — =MutationEditor= against
+  =claude_town_1234= and =ReachTile= at seeds 1, 2, 3 and
+  rounds ∈ {8, 16, 32}, with the raw per-run table — is in
+  =docs/2026-08-27-optimizer-tuning.org=, and its headline is summarised
+  in =docs/STATUS.org='s S3 section. Read those, not this line.
+
+* Validation item 6, as re-specified
+
+Item 6 above ("=seal()= refuses a clipped candidate") is stated in its
+corrected form. The earlier draft — "construct a disagreeing script" —
+described a test nobody can write, because =seal= derives its budget
+FROM the script and so its input cannot be made inconsistent from
+outside. The real demonstration mutates =seal= itself, which is also why
+the step-counting hook is installed even when =checkpoint == 0=.

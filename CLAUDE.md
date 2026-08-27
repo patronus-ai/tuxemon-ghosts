@@ -70,8 +70,11 @@ downstream will ever know it existed.
 
 To change engine behavior: edit the applied tree, confirm the change
 does what you want, then regenerate the affected patch file from a
-pristine-vs-edited diff (see the patch files themselves and past task
-reports under `.superpowers/sdd/` for the mechanics — in particular,
+pristine-vs-edited diff (see the patch files themselves and the git
+history for the mechanics — plan workspaces under `.superpowers/sdd/` are
+deleted at each subsystem's close-out, so do not expect past task reports
+to still be there; `docs/STATUS.org` and the commits are the durable
+record — in particular,
 regenerate patches from real file snapshots, not through text-mode
 Python I/O, which has silently corrupted CRLF-native vendored files in
 this project before). Verify the regenerated series still applies
