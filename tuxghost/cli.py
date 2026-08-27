@@ -590,6 +590,16 @@ def _agent(args: argparse.Namespace) -> int:
             model=model,
             upscale=args.upscale,
             taints=taints,
+            # `scaled=True`: the real CLI is always launched as its own
+            # fresh OS process (one `agent` invocation per process), which
+            # is exactly the precondition `tuxghost.observe.
+            # scaled_context()` requires to render at human field-of-view
+            # rather than refuse -- see task 9's review round 1. Anything
+            # that calls `main()` in-process (sharing a process with
+            # earlier boots -- most of this repo's own test suite) is NOT
+            # that precondition and must launch this subcommand as a real
+            # subprocess instead; see tests/test_cli.py's own docstring.
+            scaled=True,
         )
     except (ValueError, TypeError) as exc:
         # The structural fix, not a patch for one call site: bad input

@@ -1,6 +1,17 @@
 #+TITLE: Display scale measurement — does scale reach the digest?
 #+DATE: 2026-08-26
 
+* Review round 1 correction notice
+
+This document's first draft contained a FABRICATED explanation for its own
+measured evidence, flagged in task 9 review round 1 as "the most serious
+thing in this review, more than the wiring bug itself." The "Geometry,
+decoded" section below has been rewritten with the real arithmetic; see
+"Corrected: the crop-region numbers" for what changed and why the first
+draft's version was wrong, not merely imprecise. The digest-neutral
+conclusion itself was independently re-verified by the reviewer (running
+each arm as its own fresh process) and stands unchanged.
+
 * The question
 
 =tuxemon/prepare.py='s =headless_init= hardcodes =scale=1=/=DefaultScaling(1)=
@@ -23,7 +34,70 @@ The open question: does an agent recorded at one scale replay identically at
 another? Concretely, does =DisplayContext.scale=/=tile_size= ever reach
 =tuxghost.digest.state_of()=, directly or by side effect?
 
-* Method
+* A second, orthogonal question review round 1 forced onto this document
+
+Building =DisplayContext= correctly is necessary but not sufficient for a
+policy to actually SEE a scaled frame. =tuxemon/map/view.py= and
+=tuxemon/graphics.py= each do =from tuxemon.prepare import DISPLAY_CONTEXT=
+at their OWN module top level — a name binding evaluated once, at each
+module's first import, into that module's own namespace.
+=tuxemon.graphics.load_and_scale='s =scale: float = DISPLAY_CONTEXT.scale=
+default argument is evaluated at that same import time too, permanently
+baking whatever scale was live then into every future sprite load that does
+not pass =scale== explicitly. A later =tuxemon.prepare.DISPLAY_CONTEXT =
+...= reassignment — exactly what =scaled_context()= does — CANNOT reach
+either already-bound copy. Measured, two orderings of the same script:
+
+#+begin_src text
+[scaled_fresh]          graphics/map.view bound to prepare's?  True   scale=5
+                         load_and_scale default scale arg = (5,)
+                         decoded png = (1280, 720)
+
+[scaled_after_default]  graphics/map.view bound to prepare's?  False  scale=1
+                         load_and_scale default scale arg = (1,)
+                         decoded png = (1216, 656)
+#+end_src
+
+In the second ordering the frame is a sparse grid of unscaled 16px tiles on
+an 80px pitch, player sprite absent entirely — WORSE than the unscaled
+render =scaled_context()= exists to replace, not merely wrong, while
+=client.context.scale= still correctly reports =5=. This is a silent,
+undetectable-from-the-context-object degradation, not a cosmetic one.
+
+** The fix: refuse instead of degrading
+
+=tuxghost.observe.scaled_context()= now checks, before doing any of its own
+work, whether =tuxemon.map.view= or =tuxemon.graphics= are already imported
+and bound to a DIFFERENT =(scale, tile_size)= than the one it is about to
+install. If so, it raises =RuntimeError= naming the constraint plainly:
+=scaled_context()= must be the FIRST =DisplayContext=-building call in the
+process. Calling it twice at the SAME scale is fine (the stale copy still
+agrees in value); calling it after ANY earlier boot at a DIFFERENT scale is
+refused, loudly, before a frame is ever rendered.
+=tests/test_display_scale.py='s
+=test_scaled_context_refuses_when_it_is_not_the_first_context_built= pins
+this, and the task report demonstrates it by temporarily disabling the guard
+and reproducing the exact =(1216, 656)= degenerate size on demand.
+
+** The consequence: `scaled=True` is opt-in, not the default
+
+Because almost every process in this repo's own test suite boots MANY
+clients (unscaled) before any single test runs, calling =scaled_context()=
+unconditionally from =tuxghost.agent.run_agent= would make it refuse in
+nearly every in-suite context and succeed only by accident of test-ordering
+luck. =run_agent= now takes =scaled: bool = False= (default OFF, matching
+=tuxghost.execute='s always-unscaled behaviour and every existing in-suite
+caller unaffected); =tuxghost/cli.py='s =agent= subcommand passes
+=scaled=True= explicitly, because the real CLI is always launched as its own
+fresh OS process — one =agent= invocation per process — which IS the
+precondition =scaled_context()= requires. Five =tests/test_cli.py= tests that
+previously called =main()= in-process (sharing this pytest session's
+already-booted, unscaled clients) were converted to real =subprocess.run=
+invocations for the same reason =test_relative_paths_resolve_against_the_
+run_directory= already was: an in-process call cannot exercise what only a
+genuinely separate process does.
+
+* Method (digest-neutrality measurement)
 
 Per the task brief, and per this project's accumulated lesson (task 2: a
 FINAL digest cannot see a transient divergence, because Tuxemon's grid
@@ -31,12 +105,16 @@ movement makes a settled tile an ATTRACTOR that erases any transient by the
 time a final snapshot is taken) — the measurement compares PER-STEP DIGEST
 SEQUENCES, not final digests.
 
-- Boot =tests/fixtures/paper_town.save= twice, seed 1234, daytime
+- Boot =tests/fixtures/paper_town.save=, seed 1234, daytime
   =clock_epoch=1787659200= (matches =tests/test_digest.py='s
-  =DIGEST_EPOCH=): once via =tuxghost.boot.headless_context()= (the module's
-  existing unscaled default), once via the new
+  =DIGEST_EPOCH=), TWICE, EACH IN ITS OWN FRESH SUBPROCESS (review round 1:
+  the first draft booted both in the SAME process, unscaled first — exactly
+  the ordering that triggers the stale-binding bug above, so its "scaled"
+  arm was never actually scaled) — once via =tuxghost.boot.headless_context()=
+  (the module's existing unscaled default), once via the new
   =tuxghost.observe.scaled_context()= (mirrors =pygame_init='s scaling,
-  headless).
+  headless), as the FIRST and ONLY =DisplayContext=-building call in that
+  process.
 - Install an IDENTICAL 300-step input schedule on both, built entirely from
   =DOWN=/=UP=/=RIGHT= — the only directions that move the player from this
   fixture's spawn tile =(12, 12)=; =LEFT= is blocked by map collision
@@ -49,46 +127,63 @@ SEQUENCES, not final digests.
 - Compare the two 300-entry sequences index by index; also decode both
   contexts' rendered PNG geometry.
 
-Script: a throwaway (not committed) in the scratchpad, structurally
-identical to what shipped as =tests/test_display_scale.py=.
+Script: =tests/test_display_scale.py='s own =_measure= helper, which IS the
+measurement (=subprocess.run([sys.executable, "-c", ...])=, one context per
+process) — not a separate throwaway, per review round 1's Ruling Y.
 
-* Result: DIGEST-NEUTRAL
+* Result: DIGEST-NEUTRAL (confirmed, including under a stronger re-measurement)
 
 The two 300-entry digest sequences are IDENTICAL AT EVERY INDEX — not merely
 at the end. This is the cleanest of the three outcomes the brief described
 (digest-neutral, digest-affecting, or converging-but-transiently-different):
-there was no transient divergence to hide, not even one step's worth.
+there was no transient divergence to hide, not even one step's worth. This
+result was obtained twice, independently: once in this task's original
+same-process measurement (which, per the section above, actually compared
+scale=1 against a SILENTLY-DEGRADED scale=1 render, since the "scaled" arm
+ran second in the same process) and once more by the round-1 reviewer, who
+re-ran it as two separate fresh processes — the scaled arm THAT time was
+genuinely scaled — and still got byte-identical per-step digest sequence
+hashes between the two arms, same start =(12, 12)= and end =(17, 14)=. The
+conclusion survived being run correctly; only the geometry explanation
+underneath it (below) did not.
 
 #+begin_src text
-default: {'start': (12, 12), 'end': (17, 14), 'resolution': (1280, 720),
-          'tile_size': (16, 16), 'scale': 1, 'png_size': (2560, 1280)}
-scaled:  {'start': (12, 12), 'end': (17, 14), 'resolution': (1280, 720),
-          'tile_size': (80, 80), 'scale': 5, 'png_size': (4864, 2624)}
+default: {'scale': 1, 'tile_size': [16, 16], 'resolution': [1280, 720],
+          'start': [12, 12], 'end': [17, 14], 'png_size': [640, 320]}
+scaled:  {'scale': 5, 'tile_size': [80, 80], 'resolution': [1280, 720],
+          'start': [12, 12], 'end': [17, 14], 'png_size': [1280, 720]}
 len default: 300
 len scaled: 300
 first differing index: None
-final digests equal: True
-default[0]:  e60cad024ae91254ba0c76bae824a733a84bd1a3a7f2cd2f80c1a9d7f858d17c
-scaled[0]:   e60cad024ae91254ba0c76bae824a733a84bd1a3a7f2cd2f80c1a9d7f858d17c
-default[-1]: 759cc57c50dd29be0d5cf8634c945f69ae95d4cfa09a373d397919c8a30f58f8
-scaled[-1]:  759cc57c50dd29be0d5cf8634c945f69ae95d4cfa09a373d397919c8a30f58f8
+final digests equal: True (and every one of the other 299 indices too)
 #+end_src
+
+(=png_size= above is each context's OWN fresh-process render, per the
+"Corrected" subsection below -- the =scaled= arm's =(1280, 720)= is the
+CORRECTLY rendered crop, not the =(1216, 656)= stale-bound artifact the
+first draft of this document mistook for it.)
 
 Both runs genuinely moved the player (=(12, 12)= to =(17, 14)=, a positive
 control — a schedule that never moved the player would make sequence
 equality vacuous, per this project's accumulated history of vacuous tests).
 
 Why this is plausible, not just lucky: =tuxghost.digest.state_of= reads
-=npc_state=, =world_state=, and =persistent_npc_state= — nothing derived from
-=DisplayContext=. =DisplayContext.scale=/=tile_size= feed rendering geometry
-(sprite-sheet slicing, camera projection, crop rectangles) exclusively; no
-code path threads them into game/movement logic. A change that is purely
-presentation-layer, with no read site anywhere in digested state, has no
-mechanism by which it COULD perturb the sequence — and the 300-step,
-per-index measurement confirms that expectation empirically rather than
-asserting it from code inspection alone.
+=npc_state=, =world_state=, and =persistent_npc_state=. =DisplayContext.
+scale=/=tile_size= feed rendering geometry (sprite-sheet slicing, camera
+projection, crop rectangles) — this is NOT quite "nothing reads it" as the
+first draft of this document claimed: =tuxemon/map/loader.py= reads
+=context.tile_size= and writes it into a loaded map's own
+=data.tilewidth=/=tileheight=. Grid coordinates stay scale-invariant only
+because that loader CAPTURES the map's native tile size into a local
+variable BEFORE overwriting =data.tilewidth=/=tileheight= with
+=context.tile_size=, and passes the captured native value, not the
+overwritten one, to collision/event/grid math — a contingent property of how
+that function is written, not the absence of a read site. Softened
+accordingly; see =tuxghost/boot.py='s =build_client= docstring for the same
+correction. The 300-step, per-index measurement is what actually closes the
+gap between "no mechanism found by inspection" and "confirmed empirically."
 
-** Geometry, decoded (not by byte count)
+** Corrected: the crop-region numbers (review round 1, Important #2)
 
 Task 2 measured that a byte-count threshold discriminates nothing for this
 kind of check (removing the crop entirely, 118,218 bytes, and removing the
@@ -97,52 +192,76 @@ Decoded via =pg.image.load(BytesIO(png)).get_size()= instead, at
 =upscale=1=:
 
 #+begin_src text
-default geometry: {'scale': 1, 'tile_size': (16, 16), 'resolution': (1280, 720),
-                    'png_size_upscale1': (640, 320), 'blank': False}
-scaled geometry:  {'scale': 5, 'tile_size': (80, 80), 'resolution': (1280, 720),
-                    'png_size_upscale1': (1216, 656), 'blank': False}
+default (scale=1, tile_size=(16, 16)):             png_size = (640, 320)
+scaled, correctly rendered (scale=5, tile_size=(80, 80), fresh process):
+                                                    png_size = (1280, 720)
+scaled, STALE-BOUND (scale=5 reported, but map.view/
+graphics still bound at scale=1 -- the bug above): png_size = (1216, 656)
 #+end_src
 
-The context's own =tile_size= ratio is exactly 5 (=(80, 80)= vs =(16, 16)=),
-matching =scale=. The PNG crop dimensions are NOT a clean 5x multiple of each
-other (=1216/640 ≈ 1.9=, =656/320 ≈ 2.05=) — measured, not assumed: MORE of
-the fixed 1280x720 canvas is genuinely non-background at the larger tile
-size, because fewer, bigger tiles fit on screen, so less of the frame is
-black padding to crop away. The crop size is a content-dependent function of
-scale, not a linear one; the =tile_size=/=scale= fields on the context object
-are the actual, precise "scale" fact this task cares about, and the
-committed test asserts them directly (plus non-blank, differently-sized,
-correctly-bounded PNGs as corroborating evidence — see the test's own
-docstring for why an exact PNG-ratio assertion would be wrong to make).
+*This document's first draft reported =(1216, 656)= as "the" scaled crop
+size and explained it as "content-dependent: MORE of the fixed canvas is
+genuinely non-background at the larger tile size... the crop size is a
+content-dependent function of scale, not a linear one." That explanation was
+FABRICATED — invented to fit a number, not derived from arithmetic — and it
+is checkable as false in one line: =1216 = 15×80+16= and =656 = 8×80+16=,
+i.e. exactly 15 and 8 columns/rows of UNSCALED 16px tile images laid out on
+an 80px grid pitch, plus one stray 16px partial tile at each edge. That is
+the precise, arithmetic signature of the stale-binding bug (sprites loaded
+at the OLD scale=1 default, positioned on the NEW scale=5 grid), not a
+"more of the canvas is filled" effect at all.*
+
+Correctly rendered — the FIRST and ONLY =DisplayContext=-building call in a
+fresh process — the scaled crop is exactly =(1280, 720)=: the drawn region
+fills the entire canvas, because five-times-bigger tiles leave far less room
+for background at the edges than the unscaled render's =(640, 320)= crop.
+=tests/test_display_scale.py='s geometry test now asserts this exact value,
+not a vague inequality.
 
 * What shipped
 
 - =tuxghost/boot.py=: =build_client= and =boot_from_save= gain an optional
   =context: Any | None = None= parameter; when given, used instead of
-  calling =headless_context()=.
+  calling =headless_context()=. Docstrings state plainly that record and
+  replay MAY use different contexts (measured digest-neutral), not that
+  they MUST match — the first draft of this diff said both, contradicting
+  itself between =observe.py= and =boot.py= (review round 1, Important #4);
+  now one statement, in both files.
 - =tuxghost/observe.py=: new =scaled_context()=, mirroring =pygame_init='s
   scaling arithmetic (=make_default_scaling(CONFIG, NATIVE_RESOLUTION)=)
   while keeping =headless_init='s headless plumbing (dummy SDL drivers, a
   =pg.Surface= screen, never a real window). Assigns the result to
-  =tuxemon.prepare.DISPLAY_CONTEXT= as well as returning it, since
-  =NullRenderer.__init__= reads that module global directly.
-- =tuxghost/agent/runner.py='s =run_agent= now boots with =scaled_context()=
-  for both the cold-boot and =boot_from_save= paths — an agent gets the same
-  ~16x9-tile field of view a human player sees. Safe per this measurement:
-  =tuxghost.execute.execute= keeps booting with the unscaled default
-  (=context=None=) and still reproduces a recorded run's digests exactly,
-  because the two contexts are proven digest-equivalent, not merely assumed
-  to be.
+  =tuxemon.prepare.DISPLAY_CONTEXT=, AND now refuses (=RuntimeError=) unless
+  it is the first =DisplayContext=-building call in the process — see "The
+  fix" above. Its docstring now names the real mechanism (=tuxemon.map
+  .view=/=tuxemon.graphics='s own import-time name bindings), not
+  =NullRenderer= reading a module global "directly", which was the WRONG
+  mechanism (review round 1, Important #1): =NullRenderer= reads a name
+  bound in =tuxemon.map.view='s own namespace, which is exactly the copy a
+  later reassignment cannot reach — the earlier docstring cited the one case
+  where the assignment does NOT work as if it were why the assignment DOES
+  work. Containment of the =tuxemon.prepare.DISPLAY_CONTEXT= mutation to a
+  single process-wide value is owed to =headless_init()='s own existing
+  reassign-on-every-boot behaviour, not to anything added in this task.
+- =tuxghost/agent/runner.py='s =run_agent= gains =scaled: bool = False=
+  (default OFF); only when =True= does it boot with =scaled_context()= for
+  both the cold-boot and =boot_from_save= paths.
+- =tuxghost/cli.py='s =agent= subcommand passes =scaled=True= — the real CLI
+  is always a fresh process, the one precondition =scaled_context()=
+  requires.
+- =tests/test_cli.py=: five agent-subcommand tests that called =main()= in
+  process were converted to real =subprocess.run= invocations (matching
+  this file's own established precedent for cwd-sensitive behaviour) —
+  calling =main()= in-process shares this pytest session's already-booted,
+  unscaled clients, which is exactly the ordering =scaled_context()= now
+  refuses.
 - =tests/test_display_scale.py=: pins the DIGEST-NEUTRAL result (full
-  300-index sequence equality, with a positive control that the player
-  genuinely moved in both runs) plus a geometry positive control
-  (=test_scaled_context_actually_renders_a_different_geometry=) that exists
-  specifically because the digest-equality test ALONE is vacuous against a
-  broken =context= passthrough — demonstrated by mutation in the task
-  report: reverting =boot_from_save='s =context= handling to unconditionally
-  call =headless_context()= left the digest-neutral test passing (both
-  "runs" silently used the same context) while the geometry test failed with
-  a real assertion error (=1 == 5=).
+  300-index sequence equality across two genuinely fresh, correctly-scaled
+  subprocesses, with a positive control that the player genuinely moved in
+  both runs and that the two arms really did boot at different scales) plus
+  a geometry positive control asserting the exact =(1280, 720)= scaled crop,
+  plus a new test pinning the import-order guard itself
+  (=test_scaled_context_refuses_when_it_is_not_the_first_context_built=).
 
 * Caveat: no header field records which context a trace used
 
@@ -150,6 +269,8 @@ The trace header carries no scale field (deliberately out of scope for this
 task — adding one would be a format change). Digest-neutrality measured here
 means record/replay MAY safely use different contexts today. If a future
 patch ever makes rendering geometry reachable from digested state (nothing
-currently does), this document's conclusion — and the mixed-context wiring
-in =run_agent=/=execute= it justifies — would need to be re-measured, not
-assumed to still hold.
+currently does — see the =tuxemon/map/loader.py= caveat above for the
+closest existing read site, which is contingently harmless, not
+structurally excluded), this document's conclusion — and the mixed-context
+wiring in =run_agent=/=execute= it justifies — would need to be re-measured,
+not assumed to still hold.

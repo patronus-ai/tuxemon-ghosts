@@ -211,6 +211,7 @@ def run_agent(
     taints: Sequence[str] = (),
     claimed_outcome: str | None = None,
     digest_every: int = 0,
+    scaled: bool = False,
 ) -> RunResult:
     """Run `policy` from `save_data` for at most `step_budget` steps.
 
@@ -240,18 +241,31 @@ def run_agent(
     than silently overridden by the policy's own value (task 5 review
     round 1).
 
-    Boots with `tuxghost.observe.scaled_context()`, not the module
-    default `headless_context()`: task 9 measured a 300-step per-step
-    digest sequence (not just a final digest) identical at every index
-    between the two contexts, on a schedule that keeps the player moving
-    through the end of the window -- `DisplayContext` only ever feeds
-    rendering geometry, never anything `tuxghost.digest.state_of` reads
-    -- so an agent gets the same ~16x9-tile field of view a human player
-    sees (measured scale 5 on this repo's `~/.tuxemon/tuxemon.yaml`, not
-    the scale 4 / ~20x11 tiles the task brief assumed before measuring),
-    at no digest cost, and `tuxghost.execute` (which keeps the
-    unscaled default) still reproduces a run's digests exactly. See
+    `scaled=True` boots with `tuxghost.observe.scaled_context()` instead
+    of the module default `headless_context()`: task 9 measured a
+    300-step per-step digest sequence (not just a final digest) identical
+    at every index between the two contexts, on a schedule that keeps the
+    player moving through the end of the window -- so an agent gets the
+    same ~16x9-tile field of view a human player sees (measured scale 5
+    on this repo's `~/.tuxemon/tuxemon.yaml`, not the scale 4 / ~20x11
+    tiles the task brief assumed before measuring), at no digest cost,
+    and `tuxghost.execute` (which always boots unscaled) still reproduces
+    a run's digests exactly. See
     `docs/2026-08-26-display-scale-measurement.org` for the raw numbers.
+
+    Default `scaled=False`, deliberately NOT the digest-neutral finding's
+    default: `scaled_context()` refuses (a loud `RuntimeError`) unless it
+    is the FIRST `DisplayContext`-building call in the whole process --
+    `tuxemon.map.view`/`tuxemon.graphics` each bind their own copy of
+    `tuxemon.prepare.DISPLAY_CONTEXT` at import time (see
+    `scaled_context()`'s docstring), so calling it after ANY earlier
+    client has booted in the same process silently would have rendered a
+    WORSE frame than the unscaled default (measured: a sparse grid of
+    unscaled tiles, player sprite missing). That is true of essentially
+    every test process in this repo's suite, which boots many clients
+    per process -- only a genuinely fresh process (this project's CLI,
+    launched as its own OS process per invocation) can safely pass
+    `scaled=True`; `tuxghost/cli.py`'s `agent` subcommand does.
     """
     if step_budget < 1:
         raise ValueError(f"step_budget must be >= 1, got {step_budget!r}")
@@ -261,7 +275,7 @@ def run_agent(
             "start from somewhere, and starting from both is not a thing"
         )
 
-    context = scaled_context()
+    context = scaled_context() if scaled else None
     if cold_boot:
         # The title screen. Honest computer-use territory -- the intro's
         # name-entry keyboard is exactly the hard case -- and the only

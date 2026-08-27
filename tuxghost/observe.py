@@ -21,6 +21,7 @@ state -- drawing here never calls `update`.
 from __future__ import annotations
 
 import os
+import sys
 from io import BytesIO
 from typing import Any
 
@@ -61,30 +62,83 @@ def scaled_context() -> Any:
     real window; this project never may) nor `headless_init` (hardcodes
     `scale=1`) can be called as-is to get both properties at once.
 
-    Assigns the result to `tuxemon.prepare.DISPLAY_CONTEXT` as well as
-    returning it: `NullRenderer.__init__` reads that module global
-    DIRECTLY (not a parameter passed to it), so a `NullRenderer`
-    constructed after this call -- e.g. inside `headless_world` via
-    `build_client(..., context=scaled_context())` -- would otherwise
-    still see whatever context was assigned there last, unscaled or not.
+    MUST BE THE FIRST DISPLAYCONTEXT-BUILDING CALL IN THE PROCESS (task 9
+    review round 1, Important #1 -- the earlier version of this docstring
+    named the wrong mechanism). Assigning to `tuxemon.prepare.
+    DISPLAY_CONTEXT` below does NOT reach `tuxemon.map.view` or
+    `tuxemon.graphics`: both do `from tuxemon.prepare import
+    DISPLAY_CONTEXT` at their OWN module top level -- a name binding
+    evaluated once, at each module's first import, into ITS OWN
+    namespace. A later `tuxemon.prepare.DISPLAY_CONTEXT = ...`
+    reassignment cannot reach an already-bound copy of that name sitting
+    in a different module's namespace; only importing those modules
+    fresh, AFTER this assignment, does. `tuxemon.graphics` compounds
+    this: `load_and_scale`'s `scale: float = DISPLAY_CONTEXT.scale`
+    default argument is evaluated at that same import time too,
+    permanently baking whatever scale was live then into every future
+    sprite load that does not pass `scale=` explicitly. If either module
+    was already imported at a DIFFERENT scale before this call, the
+    render measurably gets WORSE than the unscaled default it was meant
+    to replace: measured a sparse grid of unscaled 16px tiles on an 80px
+    pitch, player sprite absent entirely -- not merely wrong, worse. The
+    guard below refuses instead of producing that silently.
 
-    Callers needing this context must pass it explicitly to
-    `tuxghost.boot.build_client`/`boot_from_save` (their `context`
-    parameter) -- this function does not call either of those itself, so
-    a caller that wants scaled AND a booted client makes both calls.
-    Whichever context a recording uses, replay of that trace MUST use
-    the same one: the trace header carries no scale field, so nothing
-    else enforces this.
+    Practically: call this before ANYTHING else in the process boots a
+    client -- `headless_context()`/`pygame_init()`/`build_client()`/
+    `boot_from_save()` all transitively import both modules the first
+    time any of them runs.
     """
     os.environ["SDL_VIDEODRIVER"] = "dummy"
     os.environ["SDL_AUDIODRIVER"] = "dummy"
 
-    import pygame as pg
-    from tuxemon.platform import platform
     from tuxemon.platform.const.sizes import NATIVE_RESOLUTION
     from tuxemon.platform.const.sizes import TILE_SIZE as NATIVE_TILE_SIZE
     from tuxemon.scaling import make_default_scaling
     from tuxemon.user_config import CONFIG
+
+    scaling = make_default_scaling(CONFIG, NATIVE_RESOLUTION)
+    expected_scale = scaling._scale
+    expected_tile_size = scaling.scale_point(NATIVE_TILE_SIZE)
+
+    # See this function's own docstring: tuxemon.map.view and
+    # tuxemon.graphics each bind their OWN copy of DISPLAY_CONTEXT at
+    # import time, which a later reassignment to
+    # tuxemon.prepare.DISPLAY_CONTEXT cannot reach. If either is already
+    # imported at a scale/tile_size that disagrees with what this call is
+    # about to install, refuse loudly rather than silently degrade.
+    # (Importing the same scale twice -- e.g. calling scaled_context()
+    # more than once in a process -- is fine: the stale copy still agrees
+    # in VALUE even though it is a different object, and nothing here
+    # depends on object identity.)
+    stale = []
+    for name in ("tuxemon.map.view", "tuxemon.graphics"):
+        mod = sys.modules.get(name)
+        bound = getattr(mod, "DISPLAY_CONTEXT", None) if mod is not None else None
+        if bound is not None and (
+            (bound.scale, bound.tile_size) != (expected_scale, expected_tile_size)
+        ):
+            stale.append((name, bound.scale, bound.tile_size))
+    if stale:
+        details = "; ".join(
+            f"{name} bound at scale={scale!r}, tile_size={tile_size!r}"
+            for name, scale, tile_size in stale
+        )
+        raise RuntimeError(
+            "scaled_context() must be the FIRST DisplayContext-building "
+            "call in this process -- it was not: "
+            f"{details} (wanted scale={expected_scale!r}, "
+            f"tile_size={expected_tile_size!r}). Reassigning "
+            "tuxemon.prepare.DISPLAY_CONTEXT cannot reach a module that "
+            "already imported its own copy of that name; the render "
+            "would silently degrade instead of scaling (see this "
+            "function's docstring). Call scaled_context() before "
+            "anything else in this process boots a client -- e.g. as "
+            "literally the first statement in a fresh interpreter/"
+            "subprocess."
+        )
+
+    import pygame as pg
+    from tuxemon.platform import platform
 
     from tuxemon import prepare
 
@@ -99,7 +153,6 @@ def scaled_context() -> Any:
     # matching comment. The dummy driver opens no real window.
     pg.display.set_mode(CONFIG.resolution)
 
-    scaling = make_default_scaling(CONFIG, NATIVE_RESOLUTION)
     screen = pg.Surface(CONFIG.resolution)
     rect = screen.get_rect()
 
@@ -107,12 +160,17 @@ def scaled_context() -> Any:
         screen=screen,
         rect=rect,
         resolution=CONFIG.resolution,
-        tile_size=scaling.scale_point(NATIVE_TILE_SIZE),
-        scale=scaling._scale,
+        tile_size=expected_tile_size,
+        scale=expected_scale,
         scaling=scaling,
     )
-    # NullRenderer.__init__ reads this module global directly -- see this
-    # function's own docstring.
+    # Only reaches tuxemon.prepare's OWN namespace -- see this function's
+    # docstring for why that is necessary but not sufficient, and the
+    # guard above for what makes it safe anyway. Harmless, and matches
+    # headless_init()'s own existing behaviour (it reassigns this same
+    # global on every unscaled boot; containment of that mutation to a
+    # single process-wide value has always been owed to headless_init's
+    # own code, not to anything added here).
     prepare.DISPLAY_CONTEXT = context
     return context
 
@@ -201,12 +259,17 @@ class FrameRenderer:
         """The current frame as PNG bytes: cropped to the drawn region and
         integer-upscaled.
 
-        Cropped because the headless display context is built at
-        `scale=1` (`tuxemon/prepare.py`'s `headless_init`), so a small map
-        renders as an island in a large `BACKGROUND` field -- sending a
-        model a mostly-black 1280x720 image wastes tokens. Upscaled with
-        nearest-neighbour (`scale_by`, verified to preserve corner colour)
-        because resampling pixel art into mush is worse than not scaling.
+        Cropped because at `headless_context()`'s unscaled `scale=1`
+        (`tuxemon/prepare.py`'s `headless_init`), a small map renders as
+        an island in a large `BACKGROUND` field -- sending a model a
+        mostly-black 1280x720 image wastes tokens. At
+        `tuxghost.observe.scaled_context()`'s scale (measured 5 on this
+        repo's config), this crop is closer to a no-op: measured, a
+        correctly-scaled frame's drawn region already fills the entire
+        1280x720 canvas, so there is little or no background left to crop
+        away. Upscaled with nearest-neighbour (`scale_by`, verified to
+        preserve corner colour) because resampling pixel art into mush is
+        worse than not scaling.
 
         A blank frame (nothing drawn at all -- legitimate between map
         loads) is encoded whole rather than cropped to nothing, and flagged

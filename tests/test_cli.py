@@ -553,18 +553,35 @@ def _write_actions(tmp_path: Path) -> Path:
 
 
 def test_agent_writes_a_trace_and_a_run_directory(tmp_path: Path) -> None:
+    """A real SUBPROCESS, not an in-process `main()` call (task 9 review
+    round 1): the `agent` subcommand boots with `scaled_context()`
+    (`scaled=True`, `tuxghost/cli.py`), which refuses unless it is the
+    FIRST `DisplayContext`-building call in the process. In-process, this
+    pytest session has already booted many unscaled clients by the time
+    this test runs, so `main()` called directly here would hit that
+    refusal -- not because the CLI is broken, but because an in-process
+    call is not the fresh-process precondition `scaled_context()`
+    requires. A real subprocess IS that precondition, and is also the
+    only honest way to test what the production CLI path actually does
+    (see this file's `test_relative_paths_resolve_against_the_run_
+    directory` for the established precedent)."""
     out = tmp_path / "run.tuxghost"
     run_dir = tmp_path / "rundir"
-    code = main(
+    result = subprocess.run(
         [
+            sys.executable, "-m", "tuxghost.cli",
             "agent", "--policy", "scripted",
             "--actions", str(_write_actions(tmp_path)),
             "--seed", "1234", "--clock-epoch", "1787659200",
             "--from-save", str(FIXTURE), "--steps", "300",
             "--out", str(out), "--run-dir", str(run_dir),
-        ]
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    assert code == 0
+    assert result.returncode == 0, (result.stdout, result.stderr)
     assert out.exists()
     assert (run_dir / "decisions.jsonl").exists()
     assert list((run_dir / "frames").glob("*.png"))
@@ -586,9 +603,7 @@ def test_agent_refuses_an_unreadable_save(tmp_path: Path) -> None:
     assert code == 2
 
 
-def test_agent_accepts_a_relative_out_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_agent_accepts_a_relative_out_path(tmp_path: Path) -> None:
     """The vacuous-test lesson from CLAUDE.md: every path in the old CLI
     test was an absolute tmp_path, so a real bug -- chdir into tuxemon/
     BEFORE parsing args, breaking every relative path a user would type --
@@ -605,28 +620,42 @@ def test_agent_accepts_a_relative_out_path(
     `_write_actions(tmp_path)`'s own absolute return value -- the last of
     `_PATH_ARGS["agent"]`'s four entries never exercised as a relative
     path. Written directly here, relative, rather than through that
-    helper, to close it."""
-    monkeypatch.chdir(tmp_path)
+    helper, to close it.
+
+    A real SUBPROCESS with `cwd=tmp_path` (task 9 review round 1), not
+    `monkeypatch.chdir` + an in-process `main()` call: see
+    `test_agent_writes_a_trace_and_a_run_directory`'s docstring for why
+    -- `scaled_context()` (this subcommand's `scaled=True`) refuses
+    unless it is the first `DisplayContext`-building call in the process,
+    which an in-process call sharing this pytest session cannot promise."""
     (tmp_path / "save.json").write_text(FIXTURE.read_text())
     (tmp_path / "actions.jsonl").write_text(
         json.dumps({"actions": [{"button": 2, "hold": 30, "settle": 10}]})
     )
-    code = main(
+    result = subprocess.run(
         [
+            sys.executable, "-m", "tuxghost.cli",
             "agent", "--policy", "scripted",
             "--actions", "actions.jsonl",
             "--seed", "1234", "--clock-epoch", "1787659200",
             "--from-save", "save.json", "--steps", "120",
             "--out", "relative.tuxghost", "--run-dir", "reldir",
-        ]
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    assert code == 0
+    assert result.returncode == 0, (result.stdout, result.stderr)
     assert (tmp_path / "relative.tuxghost").exists()
 
 
 def test_agent_cold_boot_needs_no_save(tmp_path: Path) -> None:
-    code = main(
+    """A real subprocess -- see `test_agent_writes_a_trace_and_a_run_
+    directory`'s docstring (task 9 review round 1)."""
+    result = subprocess.run(
         [
+            sys.executable, "-m", "tuxghost.cli",
             "agent", "--policy", "scripted",
             "--actions", str(_write_actions(tmp_path)),
             "--cold-boot",
@@ -634,9 +663,13 @@ def test_agent_cold_boot_needs_no_save(tmp_path: Path) -> None:
             "--steps", "200",
             "--out", str(tmp_path / "cold.tuxghost"),
             "--run-dir", str(tmp_path / "colddir"),
-        ]
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    assert code == 0
+    assert result.returncode == 0, (result.stdout, result.stderr)
 
 
 # --- Review round 1, Critical: `run_agent(...)` had no exception
@@ -677,19 +710,27 @@ def test_agent_replay_writes_a_trace(tmp_path: Path) -> None:
     """The positive-path counterpart the review flagged as entirely
     missing: before this round, no committed test ever exercised
     `--policy replay` at all, which is exactly what let the malformed-
-    transcript defect below through undetected."""
+    transcript defect below through undetected.
+
+    A real subprocess -- see `test_agent_writes_a_trace_and_a_run_
+    directory`'s docstring (task 9 review round 1)."""
     out = tmp_path / "replay.tuxghost"
     run_dir = tmp_path / "replaydir"
-    code = main(
+    result = subprocess.run(
         [
+            sys.executable, "-m", "tuxghost.cli",
             "agent", "--policy", "replay",
             "--actions", str(_write_actions(tmp_path)),
             "--cold-boot",
             "--seed", "1234", "--clock-epoch", "1787659200", "--steps", "300",
             "--out", str(out), "--run-dir", str(run_dir),
-        ]
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    assert code == 0
+    assert result.returncode == 0, (result.stdout, result.stderr)
     assert out.exists()
     assert (run_dir / "decisions.jsonl").exists()
 
@@ -700,18 +741,33 @@ def test_agent_refuses_a_transcript_that_fails_mid_run(tmp_path: Path) -> None:
     record missing `settle` raised `ValueError` from
     `ReplayPolicy.decide()` (called from `run_agent`'s loop), uncaught,
     exiting 1. Fixed with a `try/except (ValueError, TypeError)` boundary
-    around the `run_agent(...)` call in `_agent`."""
-    code = main(
+    around the `run_agent(...)` call in `_agent`.
+
+    Now genuinely run as a real subprocess (task 9 review round 1), not
+    merely described as one: this run reaches `run_agent`'s
+    `scaled_context()` call before ever reaching the malformed record, so
+    an in-process `main()` call sharing this pytest session's already-
+    booted clients would raise `scaled_context()`'s OWN refusal first --
+    exit code 2 either way, but for the wrong reason, silently no longer
+    testing the malformed-transcript defect this test exists to pin. See
+    `test_agent_writes_a_trace_and_a_run_directory`'s docstring."""
+    result = subprocess.run(
         [
+            sys.executable, "-m", "tuxghost.cli",
             "agent", "--policy", "replay",
             "--actions", str(_write_malformed_replay_transcript(tmp_path)),
             "--cold-boot",
             "--seed", "1234", "--clock-epoch", "1787659200", "--steps", "300",
             "--out", str(tmp_path / "o.tuxghost"),
             "--run-dir", str(tmp_path / "d"),
-        ]
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    assert code == 2
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert "run failed" in result.stderr
 
 
 def test_agent_refuses_a_non_object_actions_line(tmp_path: Path) -> None:

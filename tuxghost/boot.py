@@ -144,20 +144,32 @@ def build_client(
 
     `context`, if given, is used INSTEAD of calling `headless_context()`
     (the module's own unscaled, `scale=1` context). This exists for two
-    callers: task 9's scale measurement, and `tuxghost.agent.run_agent`,
-    which boots with `tuxghost.observe.scaled_context()` for human
-    field-of-view (~16x9 tiles, measured, versus the ~80x45-tile view
-    `headless_context()` produces). MEASURED digest-neutral: a 300-step
-    per-step digest sequence (`tuxghost.digest.digest_of`, not just the
-    final digest) was identical at every index between the two contexts
-    on a schedule that keeps the player moving through the end of the
-    window -- `DisplayContext` only ever feeds rendering geometry, never
-    anything `state_of` reads. So a recording and its replay boot with
-    DIFFERENT contexts today (`run_agent` scaled, `tuxghost.execute`
-    unscaled) without that being a hazard; see
+    callers: task 9's scale measurement, and `tuxghost.agent.run_agent`'s
+    opt-in `scaled=True`, which boots with `tuxghost.observe
+    .scaled_context()` for human field-of-view (~16x9 tiles, measured,
+    versus the ~80x45-tile view `headless_context()` produces) --
+    `scaled_context()` itself refuses (a loud `RuntimeError`, not a
+    silent degradation) if it is not the first `DisplayContext`-building
+    call in the process, so this is only safe from a fresh process; see
+    its docstring.
+
+    RECORD AND REPLAY MAY USE DIFFERENT CONTEXTS: MEASURED
+    digest-neutral. A 300-step per-step digest sequence
+    (`tuxghost.digest.digest_of`, not just the final digest) was
+    identical at every index between the two contexts, on a schedule
+    that keeps the player moving through the end of the window. This is
+    a measured result, not an architectural guarantee -- one read site
+    is already known (`tuxemon/map/loader.py` reads `context.tile_size`
+    into a loaded map's own `tilewidth`/`tileheight`; grid coordinates
+    stay scale-invariant only because that loader captures the map's
+    NATIVE tile size first, a contingent property of upstream code, not
+    the absence of a read site) -- so today a recording and its replay
+    can safely boot with DIFFERENT contexts (`run_agent(scaled=True)`
+    scaled, `tuxghost.execute` unscaled) without that being a hazard; see
     `docs/2026-08-26-display-scale-measurement.org` for the raw numbers.
-    This would stop being true the day something reads `client.context`
-    into digested state -- nothing currently does.
+    This would need re-measuring, not assuming, the day something reads
+    `client.context` into what `tuxghost.digest.state_of` actually
+    digests -- nothing currently does.
 
     `clock_epoch`, if given, pins the wall clock (`tuxghost.determinism
     .pin_clock`) and resets the session's own elapsed-time bookkeeping
@@ -293,9 +305,9 @@ def boot_from_save(
     measured result: task 9's 300-step digest-sequence measurement found
     scale digest-neutral, so `tuxghost.execute.execute` (this function's
     one caller in the executor path) can keep passing no context at all
-    (the module default, unscaled) even though `tuxghost.agent.run_agent`
-    records with `tuxghost.observe.scaled_context()` -- the mismatch does
-    not perturb `digest_of`. See
+    (the module default, unscaled) even though `tuxghost.agent.run_agent
+    (scaled=True)` records with `tuxghost.observe.scaled_context()` -- the
+    mismatch does not perturb `digest_of`. See
     `docs/2026-08-26-display-scale-measurement.org`.
 
     `clock_epoch`: see the matching parameter on `build_client` -- same
