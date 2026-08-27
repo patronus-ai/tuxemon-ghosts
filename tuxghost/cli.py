@@ -99,7 +99,9 @@ mapped to exit 2 before the engine boots:
     recording a default would misattribute provenance -- the same M8
     reasoning `--policy replay` above already follows); `--editor
     mutation` without `--seed` (a default would make an unreproducible
-    run look reproducible).
+    run look reproducible); and any OTHER editor WITH a `--seed`, since
+    only `mutation` draws from one and recording an unused seed in the
+    winner's lineage taint and `run.json` would misattribute the run.
   * an unreadable/malformed `--trace`, or a malformed `--edits` file.
     The parent goes through `_read_trace_or_refuse`, not a bare `read`:
     `tuxghost.trace.read` starts with an unguarded `json.loads` and ends
@@ -118,7 +120,19 @@ mapped to exit 2 before the engine boots:
   * a re-seal of the winning script that reaches a different digest than
     the loop scored (see `_optimize`: the winner is re-sealed through
     `Recorder`, this project's one trace writer, rather than having its
-    sealed provenance patched).
+    sealed provenance patched). That re-seal deliberately does NOT pass
+    `max_cost`: `optimize()` seals round 0 -- the parent -- without it by
+    design, so the winning script may legally be an over-budget parent,
+    and enforcing a proposal budget against a script the loop already
+    accepted turned a plain `--max-cost 400` into an uncaught
+    `OverBudget` and exit 1 (measured, task 11 review round 1).
+  * an `anthropic.AnthropicError` out of a `--editor claude` run
+    (`RateLimitError`, `AuthenticationError`, ...). These derive from
+    `Exception`, not `ValueError`/`TypeError`, so neither
+    `tuxghost.optimize.runner._propose`'s rejected-round boundary nor
+    the `(ValueError, TypeError)` arm below sees them; a second arm,
+    gated on `args.editor == "claude"` and re-raising anything else,
+    maps them to 2. Exactly `_agent`'s shape, for exactly its reason.
 
 That `optimize(...)` boundary is `except (ValueError, TypeError)` and
 deliberately not `except Exception`: measured during task 11, widening it
@@ -945,6 +959,25 @@ def _optimize(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # The converse, and a REFUSAL rather than a silent drop (Task 11
+    # review round 1, Important 5): `mutation` is the only editor that
+    # draws from a seed, so `--editor replay --seed 7` used to write
+    # `derived by offline-agent (replay, seed 7)` into the winner's
+    # lineage taint and `"seed": 7` into `run.json` -- a seed no editor
+    # ever used, recorded as if it had produced the run. That is the same
+    # misattribution this module already refuses `--editor replay`
+    # without `--model` to avoid, so it gets the same answer. Refusing
+    # rather than just dropping the taint clause: dropping it would still
+    # leave the bogus seed in `run.json`, and silently ignoring a flag
+    # the user deliberately typed teaches them it did something.
+    if args.editor != "mutation" and args.seed is not None:
+        print(
+            f"refused: --editor {args.editor} has no use for --seed "
+            f"(got {args.seed!r}); only --editor mutation draws from one, "
+            "and recording an unused seed would misattribute the run",
+            file=sys.stderr,
+        )
+        return 2
 
     # Task 11 review of the plan's own code: the plan read the parent with
     # a bare `read(args.trace)` under `except (OSError, Refused)`, which
@@ -1019,20 +1052,18 @@ def _optimize(args: argparse.Namespace) -> int:
         # unreachable fourth case below says so instead of quietly
         # treating "anything else" as claude.
         try:
-            # The suppression below carries its reason, per CLAUDE.md
-            # (and is written on the import line itself: quoting the
-            # directive inside a comment makes ruff parse it as a real,
-            # malformed one -- measured). Unlike
-            # `_agent`'s identical import (which is genuinely used again
-            # in its `except Exception` arm's `isinstance` check), this
-            # binding is a PRECONDITION CHECK and nothing else --
-            # importing it here is the whole point, so ruff's
-            # unused-import finding is correct about the binding and
-            # wrong about the intent. `ClaudeEditor` imports `anthropic`
-            # lazily inside `_ensure_client`, deep inside the loop, so
-            # without this check a missing SDK would raise there,
-            # uncaught, and exit 1 = "diverged".
-            import anthropic  # noqa: F401
+            # No unused-import suppression here any more (review round
+            # 1): this binding is a real precondition check AND the name
+            # is genuinely used again later in this same function scope,
+            # in the gated `except Exception` arm's
+            # `isinstance(exc, anthropic.AnthropicError)` below -- ruff's
+            # unused-import check is scope-wide, not per-binding, so it
+            # no longer considers this import unused at all. Exactly the
+            # arrangement `_agent` arrived at. `ClaudeEditor` imports
+            # `anthropic` lazily inside `_ensure_client`, deep inside the
+            # loop, so without this check a missing SDK would raise
+            # there, uncaught, and exit 1 = "diverged".
+            import anthropic
         except ImportError as exc:
             print(
                 f"refused: --editor claude needs the anthropic SDK "
@@ -1070,7 +1101,44 @@ def _optimize(args: argparse.Namespace) -> int:
         # must stay a visible crash.
         print(f"refused: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        # Task 11 review round 1, Important 2 -- the same arm, with the
+        # same gate, that `_agent` grew in the 61f63aa residual fix, and
+        # for the identical reason. `ClaudeEditor.propose` calls the
+        # `anthropic` SDK's `messages.create` from inside
+        # `tuxghost.optimize.runner._propose`, whose own boundary is
+        # `(ValueError, TypeError)` -- and every error that call can
+        # raise (`RateLimitError`, `APIConnectionError`,
+        # `AuthenticationError`, a missing/invalid API key, ...) derives
+        # from `anthropic.AnthropicError(Exception)`, none of them a
+        # `ValueError` or `TypeError`. So none of them is a rejected
+        # round, none is caught by the arm above, and left alone each one
+        # exits 1 = "diverged" for what is plainly an API problem.
+        #
+        # Gated on `args.editor == "claude"`, NOT import-guarded: this
+        # `try` is shared by all four editors, `anthropic.AnthropicError`
+        # can only originate from `ClaudeEditor`, and `make check` does
+        # not install the SDK -- so an unconditional import here would
+        # replace a genuine engine crash's traceback on `--editor
+        # mutation` with `ModuleNotFoundError` raised while handling it.
+        # That is exactly the defect 61f63aa fixed. The bare `raise`
+        # keeps every other editor's real exception unmodified.
+        if args.editor != "claude":
+            raise
+        import anthropic
 
+        if not isinstance(exc, anthropic.AnthropicError):
+            raise
+        print(
+            f"refused: --editor claude call to the Anthropic API failed: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # The seed clause is reachable only for `--editor mutation` now (see
+    # the refusal above); the `is not None` guard stays as the local,
+    # readable statement of that rather than an assumption about a check
+    # 80 lines up.
     lineage = (
         f"derived by offline-agent ({args.editor}"
         + (f", seed {args.seed}" if args.seed is not None else "")
@@ -1084,13 +1152,27 @@ def _optimize(args: argparse.Namespace) -> int:
     # run is also a free re-confirmation that the winning script still
     # reaches the score it won with; the check below is that
     # confirmation.
+    # NO `max_cost=` here, deliberately -- do not "restore consistency"
+    # by adding it back (Task 11 review round 1, Critical). `max_cost`
+    # bounds what an EDITOR MAY PROPOSE, not what the parent already IS:
+    # `optimize()`'s round 0 seals the parent WITHOUT it by design
+    # (`tuxghost/optimize/runner.py`, pinned by
+    # `tests/test_optimize_runner.py::test_round_zero_is_sealed_without_
+    # max_cost`), because refusing the baseline would leave the run with
+    # nothing to compare against. So `best_script` can legally be an
+    # over-budget PARENT script, and this re-seal sits OUTSIDE the
+    # `except (ValueError, TypeError)` boundary above -- passing
+    # `max_cost` here raised `OverBudget` uncaught and exited 1 for a
+    # plain `--max-cost 400` against the 442-step parent, measured. This
+    # call is not a proposal; it is a re-run of a script the loop already
+    # accepted, and `_prepare` enforced the budget on every accepted
+    # candidate at the point where the budget means something.
     final = seal(
         result.best_script,
         parent,
         checkpoint=args.checkpoint,
         taints=(lineage,),
         model=model,
-        max_cost=args.max_cost,
     )
     if final.trace.header.final_digest != result.best.trace.header.final_digest:
         print(
