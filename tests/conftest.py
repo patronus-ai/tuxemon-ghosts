@@ -65,6 +65,12 @@ _TRACKED_FILES = (
     # live-capture fixture going stale FAILS here instead of quietly
     # joining the ambient noise.
     "tests/test_live_capture.py::",
+    # No pinned entries below for this file either: it reads no committed
+    # trace (both traces it compares are built live, in-process, from
+    # `tests/fixtures/paper_town.save`), so it must warn ZERO times about
+    # `patch_series_id`. Tracking it means a future seventh patch fails
+    # loudly here rather than joining the ambient noise (task 1, S3 plan).
+    "tests/test_convention_alignment.py::",
 )
 _EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS: dict[str, int] = {
     "tests/test_golden.py::test_golden_trace_still_reaches_its_recorded_digest": 1,
