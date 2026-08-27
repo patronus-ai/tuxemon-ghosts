@@ -84,6 +84,12 @@ env var. (Count updated in the final fix wave: nine new tests pin the
 three must-fix defects below plus the =--checkpoint= flag; the slow
 count is unchanged.)
 
+This section is S1's own count, left as it was measured at the time.
+*S2 has since raised the fast tier to 203 passed / 3 skipped* (75 net
+new tests), slow tier unchanged at 3 passed / 203 deselected — see
+"S2 — CU-agent harness, delivered" below for the current whole-suite
+number and what backs it.
+
 * Measured determinism results, with real digests
 
 - *Golden trace* (=tests/golden/walk_1234.tuxghost=, seed 1234, 900
@@ -185,8 +191,206 @@ count is unchanged.)
   =dt= or a bare =ZeroDivisionError= — but it is still an external input
   nothing in this repo controls).
 
+* S2 — CU-agent harness, delivered
+
+An agent sees a rendered game frame, answers with a
+=(button, hold, settle)= action, and the run is recorded through the
+*same* =tuxghost.record.Recorder= S1 already ships, as a
+=provenance.recorder = "cu-agent"= trace that the S1 executor verifies
+unchanged. Spec: =docs/superpowers/specs/2026-08-26-cu-agent-harness-design.org=
+(=#+STATUS: implemented=). Full task history:
+=.superpowers/sdd/2026-08-26-cu-agent-harness.org/=.
+
+** No seventh patch
+
+The patch series stays at six. Every seam S2 needed — a real
+~MapRenderer~ installed via ~BaseClient.set_renderer~, drawn through
+upstream's ~StateDrawer~ — was already public. The discriminating
+measurement: the stock headless ~NullRenderer~'s frame of a loaded map
+sampled to *1* distinct colour (pure black); the same
+~WorldState.draw(surface)~ call with a real ~MapRenderer~ installed
+sampled to *48* distinct colours (floor, bed, furniture, player sprite).
+That gap is the entire justification for installing a renderer at all,
+and it is pinned by a regression test (Task 2), not just asserted once.
+=git -C tuxemon status --short= / =git -C tuxemon diff --stat= confirm
+the tree is still exactly the same 18 files changed / 265 insertions(+)
+/ 63 deletions(-), plus the same 2 untracked files
+(=tuxemon/core/clock.py=, =tuxemon/core/ids.py=), as S1 left it —
+re-measured as part of this close-out task, not carried forward from
+memory. =tuxghost/digest.py='s =EXEMPTIONS= remains =={}=. =patches/=
+still holds exactly six files.
+
+** The fixture
+
+The committed start-fixture (=tests/fixtures/paper_town.save=, built by
+=tests/fixtures/make_paper_town_save.py=) spawns =npc_red= on
+=spyder_paper_town.tmx= at tile =(12, 12)= with a two-monster party
+(=rockitten=, =budaye=). Spawn =(12, 12)= is leavable in =DOWN=, =UP=
+and =RIGHT= only — =LEFT= is blocked by collision. One tile of walking
+measures as *16 steps* (raw per-tile deltas =[2, 16, 16, 16, 16]=; the
+leading =2= is a start-position edge effect), corroborated by
+=STEP_RATE 60 / player_walkrate 3.75 = 16=.
+
+** Two S1 defects found and fixed by S2's work, neither reachable by S1's own 131-test suite
+
+- An unresolvable =npc_state.current_map= escaped as an uncaught
+  =OSError=, so =verify()= raised instead of returning its documented
+  exit 2, and the CLI would have reported exit 1 ("diverged") for what
+  was actually a refusal. Fixed: =resolve_map_asset= now mirrors the
+  engine loader's own leniency (=map/loader.py= stems the name and
+  re-appends =.tmx=) and requires an existing =.tmx= FILE, so =""=,
+  ="."= and ="../db"= are refusals rather than directory hits.
+- A player restored by =boot_from_save= was never registered on
+  =client.npc_manager= and never movement-unlocked, so it *could not
+  move at all*. Upstream's own =load_game.py= re-teleports after
+  =load_state= precisely to trigger those side effects; =boot_from_save=
+  restores directly, so nothing did. The two calls must stay AFTER
+  =push_state=, because =change_map= runs =_clear_npcs()= synchronously
+  and would wipe an earlier registration.
+
+*Why S1's suite could not have caught the second one*: the committed
+golden trace's 80 inputs are ALL button 64 (=A=). Despite its name,
+=walk_1234.tuxghost= never presses a direction, so no existing test
+could detect a movement regression. This bounds what "the suite is
+green" actually meant for anything movement-related, before S2.
+
+** The digest's measured blind spot
+
+On the =paper_town= fixture, 600 idle ticks leave =state_of()=
+BYTE-IDENTICAL. =state_of= covers map, tile_pos, facing, state_stack
+(NAMES only), npc_state, world_state and persistent_npc_state; none
+advances on an idle =client.update(dt)=. What an idle tick *does*
+change, all invisible to the digest: the harness's own scheduled-input
+step cursor; the map renderer's per-step animation clocks
+(=camera_manager.update= / =map_animations.update_all=); live state
+internals beyond names; and event-engine timers in flight.
+*Operational consequence*: any future "observation must not perturb
+state" test needs a PENDING SCHEDULED INPUT, not an idle schedule, or it
+proves nothing — this project already had one test built on the idle
+version before that was caught.
+
+** Settled end states cannot detect a perturbation in this game
+
+Grid movement makes a tile an attractor, so a change to WHEN something
+happens but not WHERE it ends is invisible to a final-digest comparison.
+Measured: against an injected =client.update(1.0/60)= in the render
+pass, per-step digest sequences diverged at step 1 and stayed diverged
+through index 56 of 59 before re-converging — 56 differing steps that a
+final-digest assertion alone would have read as identical. Three of this
+plan's own gates had to be rewritten to compare SEQUENCES rather than
+endpoints because of this.
+
+** The agent's FRAMES are wall-clock dependent, and =clock_epoch= does not fix it
+
+=pyscroll/data.py:132= (a third-party dependency, reached through
+~MapRenderer~) drives tile animation from =time.time() * 1000=;
+=pin_clock= pins the engine's own clock module (patch 0004), not =time=
+inside a third-party package. Two back-to-back ~png()~ calls of the same
+state differed about one run in three because of it. This does NOT
+break trace replay — nothing pyscroll touches enters =state_of()=, and
+inputs are ground truth once recorded — but it does mean the same agent
+at the same seed and epoch can be shown two different images of the same
+state, so a live model run is unreproducible for a reason that would
+persist at temperature zero. Not fixed here, by choice: pinning
+=time.time= process-wide would mean either vendoring pyscroll into the
+patch series (=patches/= is not for that) or a global monkeypatch every
+consumer inherits, for a guarantee (frame reproducibility) this project
+never promised. See the spec's Known Limitations for the full reasoning.
+
+** No live-model evidence
+
+The entire Anthropic wire contract — request-shape acceptance, the real
+model's JSON-fencing reliability, the real response object's
+=.content=/=.type=/=.text= shape, and token sufficiency — has NO live
+capture behind it. Every =ClaudePolicy= test uses an injected stub. A
+reader must not mistake stub coverage for a real run; if a live capture
+happens later, record its model id here.
+
+** Display scale: measured digest-neutral, real scale is 5
+
+=headless_init= hardcodes =scale=1=; the real game computes
+=int(1280 / 256)= (256 = =NATIVE_RESOLUTION[0]=) = *scale 5*, not the 4
+an earlier draft of the spec and plan asserted unmeasured. At scale 5,
+=tile_size (16,16) -> (80,80)=, and the visible camera shrinks from
+roughly 80x45 tiles to roughly 16x9 — a human-comparable field of view.
+
+Measured *digest-neutral*: per-step digest sequences over a 300-step
+moving route (=DOWN=/=UP=/=RIGHT=, not idle — see the digest blind spot
+above) are byte-identical at every index between an unscaled (=scale=1=)
+and a scaled boot, re-confirmed independently in two separate processes
+with matching sequence hashes. Because of this, agent runs can opt into
+the scaled, human-FOV context (=run_agent(scaled=True)=, which the CLI
+passes; the library default stays =False=) without affecting anything
+=tuxghost.execute= does — the trace header carries no scale field and
+gains none, so digest-neutrality is exactly what makes the
+record-scaled/replay-unscaled asymmetry safe. If a future patch ever
+makes rendering geometry digest-reachable, this must be re-measured, not
+assumed.
+
+=scaled_context()= *refuses loudly* if it is not the first context built
+in the process, because =tuxemon/graphics.py= and =tuxemon/map/view.py=
+bind =DISPLAY_CONTEXT= by name at import time. Before that guard
+existed, a later call in a contaminated process silently produced a
+frame *worse* than the unscaled default: decoded =(1216, 656)=, 16px
+tiles on an 80px pitch, mostly black, player sprite absent. The guard
+turns that failure mode from a silent degraded frame into a loud
+refusal.
+
+*The renderer install surviving a map change is now measured, not
+inferred.* An earlier spec draft called this "expected to survive —
+unmeasured" (reasoning from ~reset_renderer()~ being a no-op on
+~BaseClient~ and ~MapRenderer~ holding managers rather than a map).
+Task 2's =test_installed_renderer_survives_a_map_change= passed on its
+first real run against a real teleport: the installed renderer does
+survive a map change, and =reset_renderer()= does not clobber it. The
+spec has been corrected to say so (Step 4 of this close-out).
+
+** The CLI's exit codes: 0 or 2 only, never 1
+
+=tuxghost agent= never returns exit 1 — there is nothing for a recording
+to diverge *from*. Four separate exit-1 paths were found and closed
+during Task 8: a dead =except ImportError= around =ClaudePolicy=
+construction (the import is lazy, so a missing =anthropic= would have
+escaped from deep inside =run_agent=); a =--policy replay= transcript
+whose record is malformed *mid-run* (=ReplayPolicy= parses lazily inside
+=decide()=, unlike =ScriptedPolicy= whose actions the CLI pre-parses); a
+non-object line in a =--policy scripted= actions file; and an invalid
+=--upscale=. The =run_agent= call is now bounded by
+=except (ValueError, TypeError)= *only* — deliberately not =Exception=,
+so a genuine engine invariant failure stays a visible crash instead of
+being laundered into a tidy "refused".
+
+** New test counts
+
+Fast tier: *203 passed, 3 skipped* (was 128 passed / 3 skipped at the
+end of S1 — 75 net new tests). Slow tier: *3 passed, 203 deselected*
+(unchanged from S1). Both measured as part of this close-out task's
+=make check= run, on this tree, sequentially, per =CLAUDE.md='s standing
+rule against concurrent suites. All other gates (=ruff=, =lint-patched=,
+=mypy --strict= over 41 source files) green in the same run.
+
+** Honest limits
+
+- *Model sampling is not determinism.* A live =ClaudePolicy= run is not
+  reproducible from seed alone — the same seed and prompts can yield
+  different actions. What IS reproducible is the trace once recorded;
+  that is the guarantee this project actually makes. =ReplayPolicy=
+  exists so a model-driven run CAN be re-executed decision-for-decision
+  from a captured transcript.
+- *Rendered pixels are an unmeasured cross-platform surface.* Same
+  single-machine caveat as S1 (macOS 26.6.1 arm64, Python 3.12, one SDL
+  build), now sharper: font rasterisation and blit paths need not be
+  byte-identical across platforms, and nothing in S2 measures this.
+  Frames are an observation, never a digested input, so this cannot
+  corrupt a trace — but a policy's behaviour could differ on another
+  machine even where the trace format holds.
+- *=--goal= has no evaluator.* It is free text that goes into the prompt
+  and the run directory; nothing in S2 checks whether it was achieved.
+  Scoring is S5's job, and a half-scorer here would be worse than none.
+
 * Next subsystem
 
-*S2, the CU-agent harness*, is next. S3 (offline optimizer), S4 (ghost
-rendering), and S5 (finish lines / rewards) follow. Each gets its own
-spec — this project's spec covered only S1 (this trace/replay core).
+*S3* (offline optimizer), *S4* (ghost rendering), and *S5* (finish lines
+/ rewards) are next, in that order. Each gets its own spec — this
+project's spec covered only S1 (the trace/replay core); S2 (the CU-agent
+harness) has its own spec, now implemented, in the section above.

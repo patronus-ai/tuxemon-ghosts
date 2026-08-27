@@ -1,6 +1,6 @@
 #+TITLE: S2 — CU-agent harness for Tuxemon
 #+DATE: 2026-08-26
-#+STATUS: design, approved in outline; awaiting spec review
+#+STATUS: implemented
 
 * What this is
 
@@ -77,15 +77,18 @@ is the part that matters: it walks ~state_manager.active_states~ and draws
 bottom-to-top with the same occlusion rule the real game uses, so a frame
 we render is the frame a human would see.
 
-*Why the renderer install is expected to survive — unmeasured.*
-~reset_renderer()~ is a no-op on ~BaseClient~ (only ~LocalPygameClient~
-overrides it), so nothing in the engine should swap our ~MapRenderer~ back
-out on a map change; and ~MapRenderer~ holds *managers*, not a map
-(~draw()~ takes ~current_map~ as an argument), so it should stay correct
-across teleports. Both of those are read off constructor signatures and
-call sites, *not* probed: no probe crossed a map boundary with a real
-renderer installed. Gate 4 in Validation is what turns them into
-knowledge.
+*Why the renderer install survives a map change — now measured, not
+inferred.* ~reset_renderer()~ is a no-op on ~BaseClient~ (only
+~LocalPygameClient~ overrides it), so nothing in the engine swaps our
+~MapRenderer~ back out on a map change; and ~MapRenderer~ holds
+*managers*, not a map (~draw()~ takes ~current_map~ as an argument), so
+it stays correct across teleports. That reasoning was originally read
+off constructor signatures and call sites alone, with no probe crossing
+a map boundary with a real renderer installed — Task 2's Gate 4 test,
+~test_installed_renderer_survives_a_map_change~, is what turned it into
+knowledge: it passed on its first real run against a real teleport, with
+no code change needed. The installed renderer does survive a map
+change, and ~reset_renderer()~ does not clobber it.
 
 *Where animation time comes from.* ~WorldState.update(dt)~ already calls
 ~self.client.map_renderer.update(dt)~ every step. So once a real renderer
@@ -212,16 +215,29 @@ earlier draft of this spec said 4, unmeasured; ~make_default_scaling~
 computes ~int(1280 / 256)~, where 256 is ~NATIVE_RESOLUTION[0]~, not 320).
 The consequence is not cosmetic: at ~scale=1~ the camera shows roughly
 80x45 tiles where a human sees roughly *16x9*, so the probe's frames were a small native-scale
-island in a large black field. Implementation *measures* whether booting
-the scaled context changes ~digest_of~ against ~scale=1~ on a fixed
-route, and the result is recorded in =docs/= either way:
+island in a large black field. *Measured result*: booting the scaled
+context is digest-neutral against ~scale=1~ on a 300-step moving route
+(=DOWN=/=UP=/=RIGHT=, not idle — an idle route would prove nothing, see
+Known limitations) — per-step digest sequences match at every index,
+independently re-confirmed across two separate processes with matching
+sequence hashes. See =docs/2026-08-26-display-scale-measurement.org= for
+the full measurement and =docs/STATUS.org='s S2 section for the summary.
 
-- If scale is digest-neutral, agent runs boot the scaled, human-FOV
-  context and =tuxghost.execute= is unaffected.
-- If scale is digest-affecting, then scale is a *boot constant* shared by
-  record and replay, and a trace recorded at one scale must never be
-  replayable at another — the header has no scale field and gains none in
-  S2, so the constant is the only safe answer.
+Because the result came back digest-neutral: agent runs opt into the
+scaled, human-FOV context via ~run_agent(scaled=True)~, which the CLI
+passes; the library default stays ~scaled=False~. =tuxghost.execute= is
+unaffected either way — the trace header has no scale field and gains
+none in S2, so a trace recorded at either scale replays identically.
+~scaled_context()~ additionally *refuses loudly* if it is not the first
+context built in the process (=tuxemon/graphics.py= and
+=tuxemon/map/view.py= bind ~DISPLAY_CONTEXT~ by name at import time, so a
+later call in a contaminated process would otherwise silently produce a
+frame worse than the unscaled default — measured: decoded =(1216, 656)=,
+16px tiles on an 80px pitch, mostly black, player sprite absent). Had the
+result come back digest-affecting instead, scale would have had to become
+a boot constant shared by record and replay, since nothing in the header
+could distinguish a trace recorded at one scale from one recorded at
+another — that branch was not needed.
 
 Either way the frame handed to a model is cropped to the drawn region and
 integer-upscaled (nearest-neighbour, no smoothing) — pixel art must not
