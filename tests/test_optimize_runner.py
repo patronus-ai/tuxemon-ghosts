@@ -27,6 +27,7 @@ trivially satisfied, which would pass while proving nothing.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,7 @@ from tuxemon.platform.const import buttons
 
 from tuxghost.agent.types import Action
 from tuxghost.optimize.editors.scripted import ScriptedEditor
-from tuxghost.optimize.edits import Delete, Insert, Replace
+from tuxghost.optimize.edits import Delete, Edit, Insert, Replace
 from tuxghost.optimize.objective import ReachTile
 from tuxghost.optimize.runner import optimize
 from tuxghost.optimize.schedule import ActionScript, lift
@@ -329,6 +330,126 @@ def test_an_objective_with_an_unstable_score_length_is_refused() -> None:
             rounds=2,
             patience=2,
             max_rejections=1,
+            max_cost=10_000,
+        )
+
+
+def test_round_zero_is_sealed_without_max_cost() -> None:
+    """`max_cost` bounds what an EDITOR may describe; the parent is the
+    baseline, not a proposal.
+
+    Review round 1, Important 1: every other `max_cost` in this file
+    (10_000, 500, 0) sits either above the parent's 442-step cost or
+    below the `>= 1` bound check, so passing `max_cost` through at round
+    0 would have left the whole suite green and a reasoned decision
+    deletable by a "consistency" cleanup. `max_cost=100` is below 442, so
+    it separates the two: round 0 must still be sealed and SCORED, while
+    round 1's 416-step candidate is refused.
+    """
+    parent = _parent()
+    result = optimize(
+        parent,
+        ScriptedEditor(_delete_last(_n_actions(parent), 2)),
+        TARGET,
+        rounds=2,
+        patience=2,
+        max_rejections=1,
+        max_cost=100,
+    )
+    assert result.rounds[0].score is not None
+    assert result.rounds[0].steps == 442  # the parent ran in full
+    assert result.rounds[0].accepted is True
+    assert result.rounds[1].accepted is False
+    assert result.rounds[1].score is None
+    assert "max_cost" in (result.rounds[1].rejected_reason or "")
+    assert result.best_round == 0
+
+
+class _BrokenThenGoodEditor:
+    """Raises on its first proposal, then proposes a real improvement.
+
+    Stands in for Task 10's `ClaudeEditor`, whose `parse_response` raises
+    `ValueError` when a model reply carries no JSON fence -- and
+    `json.JSONDecodeError` is itself a `ValueError` subclass.
+    """
+
+    def __init__(self, edit: Edit) -> None:
+        self._edit = edit
+        self.calls = 0
+
+    def propose(
+        self,
+        script: ActionScript,
+        candidate: CandidateResult,
+        score: tuple[float, ...],
+    ) -> Sequence[Edit]:
+        del script, candidate, score
+        self.calls += 1
+        if self.calls == 1:
+            raise ValueError("no JSON fence in the model's reply")
+        return [self._edit]
+
+
+def test_a_propose_failure_is_a_rejected_round_not_the_end_of_the_run() -> None:
+    """Review round 1, Important 2. The spec makes containment a
+    requirement: "An editor is untrusted input. A proposal that fails
+    validation is a rejected round ... one malformed answer must not kill
+    a 20-round run." `propose` was outside every boundary, so it did.
+
+    A raised proposal must NOT be routed through the STOP path either: it
+    counts toward `max_rejections`/`patience` and the loop continues.
+    """
+    parent = _parent()
+    editor = _BrokenThenGoodEditor(Delete(_n_actions(parent) - 1))
+    result = optimize(
+        parent,
+        editor,
+        TARGET,
+        rounds=2,
+        patience=2,
+        max_rejections=2,
+        max_cost=10_000,
+    )
+    assert editor.calls == 2
+    assert result.rounds[1].accepted is False
+    assert result.rounds[1].score is None
+    assert result.rounds[1].edits == ()
+    reason = result.rounds[1].rejected_reason or ""
+    assert "no JSON fence" in reason
+    assert "propose" in reason
+    # NOT the STOP path: the run survived and the next round was scored.
+    assert reason != "STOP"
+    assert result.stop_reason == "rounds exhausted"
+    assert len(result.rounds) == 3
+    assert result.rounds[2].accepted is True
+    assert result.best_round == 2
+
+
+def test_an_editor_raising_a_programming_error_still_crashes() -> None:
+    """The boundary is `(ValueError, TypeError)`, not `Exception`. An
+    `AttributeError` from a buggy editor is a programming error; a tidy
+    rejected round would hide it for the whole run."""
+
+    class Buggy:
+        def propose(
+            self,
+            script: ActionScript,
+            candidate: CandidateResult,
+            score: tuple[float, ...],
+        ) -> Sequence[Edit]:
+            del script, candidate, score
+            raise AttributeError(
+                "'NoneType' object has no attribute 'actions'"
+            )
+
+    with pytest.raises(AttributeError):
+        optimize(
+            _parent(),
+            Buggy(),
+            TARGET,
+            rounds=2,
+            patience=2,
+            max_rejections=2,
             max_cost=10_000,
         )
 

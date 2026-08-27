@@ -5,16 +5,36 @@ against something this process actually ran rather than against a digest
 recorded by another one.
 
 An editor is UNTRUSTED INPUT -- `ClaudeEditor` parses a language model's
-JSON. A proposal that fails validation is a rejected round: logged with
-its reason, patience incremented, loop continues, because one malformed
-answer must not kill a 20-round run.
+JSON. A malformed answer is a rejected round: logged with its reason,
+patience and the consecutive-rejection counter incremented, loop
+continues, because one malformed answer must not kill a 20-round run
+(the spec states this as a requirement, not a nicety).
+
+That containment covers BOTH ways an editor can be malformed, and the
+distinction is not academic:
+
+  * `propose` itself raising -- `_propose` below. `json.JSONDecodeError`
+    IS a `ValueError` subclass, and Task 10's `ClaudeEditor` raises
+    `ValueError` for a model reply with no JSON fence, so an uncontained
+    `propose` would let one bad reply end a whole run.
+  * a proposal that parses but does not validate -- `_prepare` below,
+    out of `apply_edits`.
+
+A rejected `propose` is NOT routed through the STOP path: an empty
+proposal is a deliberate "stop now" answer, a raise is a broken answer,
+and reporting the second as the first would make a crashing editor look
+like a satisfied one.
 
 WHICH exceptions mean "the editor is at fault" is the whole subtlety
-here, and it is why `_prepare` below has TWO `try` blocks rather than one
-(see its docstring). `objective.score` is deliberately called OUTSIDE
-both of them: a malformed `final_state` is not the editor's fault
-either, and `ReachTile.score` refuses such a state with a `ValueError`
-rather than inventing a position.
+here, and it is why `_prepare` has TWO `try` blocks rather than one (see
+its docstring). Both editor boundaries catch exactly
+`(ValueError, TypeError)` and NOT `Exception`: an `AttributeError` out
+of an editor is a programming error, and laundering it into a tidy
+rejected round would hide it for the whole run. `seal`'s boundary stays
+narrower still -- `OverBudget` alone. `objective.score` is deliberately
+called outside every handler: a malformed `final_state` is not the
+editor's fault either, and `ReachTile.score` refuses such a state with a
+`ValueError` rather than inventing a position.
 """
 
 from __future__ import annotations
@@ -69,6 +89,33 @@ class _Rejection:
     EDITOR's fault by construction -- see `_prepare`."""
 
     reason: str
+
+
+def _propose(
+    editor: Editor,
+    best_script: ActionScript,
+    best: CandidateResult,
+    best_score: tuple[float, ...],
+) -> tuple[Edit, ...] | _Rejection:
+    """Ask the editor, or say why asking failed.
+
+    `ClaudeEditor` parses a language model's reply here, and
+    `json.JSONDecodeError` is a `ValueError` subclass -- so without this
+    boundary one un-fenced model reply ends a 20-round run, which the
+    spec explicitly forbids.
+
+    `(ValueError, TypeError)` only, deliberately NOT `Exception`: an
+    `AttributeError` from a buggy editor is a programming error and must
+    stay a visible crash. An EMPTY tuple is a valid answer (STOP) and is
+    handled by the caller, not here -- a raise and a deliberate stop are
+    different events and must not be reported as the same one.
+    """
+    try:
+        return tuple(editor.propose(best_script, best, best_score))
+    except (ValueError, TypeError) as exc:
+        return _Rejection(
+            f"editor.propose raised {type(exc).__name__}: {exc}"
+        )
 
 
 def _prepare(
@@ -175,23 +222,33 @@ def optimize(
     consecutive_rejections = 0
 
     for index in range(1, rounds + 1):
-        proposal = tuple(editor.propose(best_script, best, best_score))
-        if not proposal:
-            stop_reason = "editor returned STOP"
-            log.append(Round(index=index, edits=(), rejected_reason="STOP"))
-            break
+        proposed = _propose(editor, best_script, best, best_score)
+        outcome: tuple[ActionScript, CandidateResult] | _Rejection
+        if isinstance(proposed, _Rejection):
+            # A raise is a broken answer, not a STOP: it is logged as a
+            # rejected round with no edits and the run continues.
+            entry = Round(index=index, edits=())
+            log.append(entry)
+            outcome = proposed
+        else:
+            if not proposed:
+                stop_reason = "editor returned STOP"
+                log.append(
+                    Round(index=index, edits=(), rejected_reason="STOP")
+                )
+                break
 
-        entry = Round(index=index, edits=proposal)
-        log.append(entry)
+            entry = Round(index=index, edits=proposed)
+            log.append(entry)
+            outcome = _prepare(
+                best_script,
+                proposed,
+                parent,
+                checkpoint=checkpoint,
+                model=model,
+                max_cost=max_cost,
+            )
 
-        outcome = _prepare(
-            best_script,
-            proposal,
-            parent,
-            checkpoint=checkpoint,
-            model=model,
-            max_cost=max_cost,
-        )
         if isinstance(outcome, _Rejection):
             entry.rejected_reason = outcome.reason
             consecutive_rejections += 1
