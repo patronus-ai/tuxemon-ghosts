@@ -14,9 +14,123 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from pathlib import Path
+from typing import Literal
+
+import pytest
 
 TUXEMON_DIR = Path(__file__).resolve().parent.parent / "tuxemon"
 
 sys.path.insert(0, str(TUXEMON_DIR))
 os.chdir(TUXEMON_DIR)
+
+
+# --- Parked minor 7, whole-branch review: pin the ambient
+# `patch_series_id` warning count -------------------------------------
+#
+# `tests/golden/walk_1234.tuxghost`'s header pins the `patch_series_id`
+# that was live when it was recorded; `patches/` has grown since, so
+# every `read()` of it warns (by design -- `tuxghost/trace.py` warns
+# rather than refuses on this field). That is currently 7 ambient
+# warnings in the fast tier (8 real `read(GOLDEN)` call sites total --
+# 5 in `test_golden.py`, 3 in `test_execute.py`, ZERO in `test_trace.py`,
+# correcting an earlier ledger entry that miscounted both the total and
+# which files it came from -- 1 of the 5 in `test_golden.py` is behind
+# the `slow` skip). Left alone, this is exactly the kind of "expected"
+# noise a REAL regression -- a call site that stops warning because the
+# golden trace quietly got re-recorded, or a new call site in one of
+# these two files that reads it without being added here -- could hide
+# inside without anyone noticing, which is a bad property for a
+# determinism project's own test suite to have. Pinned per-nodeid, both
+# directions: too few warnings from a known site, or ANY warning from an
+# unpinned site IN THESE TWO FILES, both fail.
+#
+# Scoped to `test_golden.py`/`test_execute.py` only, deliberately:
+# `test_trace.py` has its own tests that DELIBERATELY construct a
+# mismatched `patch_series_id` and assert (via `recwarn`) that it warns
+# -- e.g. `test_differing_patch_series_id_warns_rather_than_refuses` --
+# that is the warning working as designed, already checked at its own
+# call site, not ambient noise this tripwire owns. A first version of
+# this check flagged those as "unexpected" too, which is wrong: it
+# would have made this tripwire fail on ANY committed test of the
+# warning path itself, in any file, forever.
+_TRACKED_FILES = ("tests/test_golden.py::", "tests/test_execute.py::")
+_EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS: dict[str, int] = {
+    "tests/test_golden.py::test_golden_trace_still_reaches_its_recorded_digest": 1,
+    "tests/test_golden.py::test_golden_trace_verifies": 1,
+    "tests/test_golden.py::test_golden_trace_reaches_a_nonempty_party": 1,
+    "tests/test_golden.py::test_golden_trace_round_trips_through_record_execute_record": 1,
+    "tests/test_golden.py::test_long_horizon_trace_is_stable": 1,
+    "tests/test_execute.py::test_execute_boots_a_save_whose_current_map_omits_the_extension": 2,
+    "tests/test_execute.py::test_verify_refuses_a_trace_whose_map_cannot_be_resolved": 1,
+}
+
+_patch_series_id_warning_counts: dict[str, int] = {}
+_executed_nodeids: set[str] = set()
+
+
+def pytest_warning_recorded(
+    warning_message: warnings.WarningMessage,
+    when: Literal["config", "collect", "runtest"],
+    nodeid: str,
+    location: tuple[str, int, str] | None,
+) -> None:
+    del when, location
+    if "patch_series_id" in str(warning_message.message):
+        _patch_series_id_warning_counts[nodeid] = (
+            _patch_series_id_warning_counts.get(nodeid, 0) + 1
+        )
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    if report.when == "call":
+        _executed_nodeids.add(report.nodeid)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """A `pytest_sessionfinish` hook, deliberately NOT a fixture teardown:
+    `_pytest.warnings.catch_warnings_for_item` wraps `pytest_runtest_
+    protocol` (setup+call+teardown together) and only flushes captured
+    warnings through `pytest_warning_recorded` in ITS OWN `finally`, which
+    runs AFTER that whole wrapped protocol returns -- including after any
+    session-scoped fixture's teardown that happens to finalize during the
+    last item's teardown phase. A `_patch_series_id_warning_tripwire`
+    fixture (an earlier version of this check) reliably saw 6 of 7
+    warnings and silently missed the 7th for exactly this reason,
+    confirmed with a debug print showing the hook fire AFTER the
+    fixture's own teardown had already run and asserted. `pytest_session
+    finish` fires once, strictly after every item's `pytest_runtest_
+    protocol` -- and therefore every warning flush -- has completed."""
+    del exitstatus
+    mismatches = []
+    seen = dict(_patch_series_id_warning_counts)
+    for nodeid, expected in _EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS.items():
+        if nodeid not in _executed_nodeids:
+            continue  # not selected this run -- nothing to check
+        got = seen.pop(nodeid, 0)
+        if got != expected:
+            mismatches.append(
+                f"{nodeid}: expected {expected} patch_series_id "
+                f"warning(s), got {got}"
+            )
+    for nodeid, got in seen.items():
+        if not nodeid.startswith(_TRACKED_FILES):
+            continue  # e.g. test_trace.py's OWN deliberate warning tests
+        mismatches.append(
+            f"{nodeid}: {got} unexpected patch_series_id warning(s) -- "
+            f"not in the pinned list; a new stale-fixture read appeared"
+        )
+    if mismatches:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        message = (
+            "ambient patch_series_id warnings drifted from the pinned "
+            "count (parked minor 7, whole-branch review -- this stops "
+            "being safe to ignore the moment it changes):\n  "
+            + "\n  ".join(mismatches)
+        )
+        if reporter is not None:
+            reporter.write_line(message, red=True, bold=True)
+        else:  # pragma: no cover -- always present under a normal pytest run
+            print(message, file=sys.stderr)
+        session.exitstatus = 1

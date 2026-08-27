@@ -1,8 +1,12 @@
 """ClaudePolicy's prompt building and response parsing, with no network.
 
 These two functions are the parts most likely to rot silently, so they are
-pure and tested directly; `ReplayPolicy` covers them again end to end
-against a captured transcript.
+pure and tested directly, with stub responses, here. `ReplayPolicy` does
+NOT exercise either of them: `ReplayPolicy.decide` calls
+`actions_from_json` directly and never `parse_response` (see
+`tuxghost/agent/replay.py`), so fence parsing and prompt building have no
+transcript-replay coverage -- these stub tests are the only coverage
+either gets.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ import pytest
 from tuxemon.platform.const import buttons
 
 from tuxghost.agent.claude import MAX_TOKENS, SYSTEM, ClaudePolicy
-from tuxghost.agent.types import Action, Observation
+from tuxghost.agent.types import WALK_ONE_TILE, Action, Observation
 
 OBS = Observation(
     step=42,
@@ -32,6 +36,15 @@ def test_messages_carry_the_frame_as_an_image_block() -> None:
     kinds = [b["type"] for b in blocks]
     assert "image" in kinds, "the frame IS the observation; it must be sent"
     assert any("leave town" in b.get("text", "") for b in blocks)
+
+
+def test_system_prompt_names_walk_one_tile() -> None:
+    """M4, whole-branch review: `SYSTEM` interpolates `HOLD_CAP`/
+    `SETTLE_CAP` but, before this fix, only said "holding a direction for
+    too few steps does not move you a whole tile" -- leaving a live model
+    to find `WALK_ONE_TILE` (16) by trial rather than being told. Pinned
+    so a future prompt edit cannot silently drop the number again."""
+    assert str(WALK_ONE_TILE) in SYSTEM
 
 
 def test_messages_do_not_leak_the_state_stack_to_the_model() -> None:

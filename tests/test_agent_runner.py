@@ -137,6 +137,34 @@ def test_observations_carry_a_real_frame_when_observing() -> None:
     assert first.frame_bytes > 1000, "expected a real PNG, not an empty frame"
 
 
+def test_observation_tolerates_no_worldstate_and_no_active_map() -> None:
+    """M1, whole-branch review: `client.get_map_name()` sat OUTSIDE the
+    `except ValueError` guard `_observation` already has to tolerate a
+    missing `WorldState` -- but `MapManager.get_map_name` raises its OWN
+    `ValueError` ("Name of the map requested when no map is active") in
+    exactly the same no-active-map situation, so an observation taken
+    between map loads crashed instead of degrading the way `tile_pos`
+    already does (`tile_pos=(-1, -1)`). Forces that state directly (pop
+    `WorldState`, clear `current_map`) rather than chasing a real
+    map-transition window that may or may not land on the right step."""
+    from tuxemon.states.world_state import WorldState
+
+    from tuxghost.agent.runner import _observation
+    from tuxghost.boot import boot_from_save
+    from tuxghost.determinism import seed_all
+
+    seed_all(1234)
+    client, _session = boot_from_save(_save(), seed=1234, clock_epoch=EPOCH)
+    world = client.get_state_by_name(WorldState)
+    client.pop_state(world)
+    client.map_manager.current_map = None
+
+    obs, png = _observation(client, 0, None)
+    assert obs.map_name == ""
+    assert obs.tile_pos == (-1, -1)
+    assert png == b""
+
+
 def test_step_budget_is_never_exceeded() -> None:
     """A policy that always asks for more must be stopped by the budget,
     and the trace's step_count must match what actually ran.
@@ -163,6 +191,23 @@ def test_step_budget_is_never_exceeded() -> None:
     )
     assert result.steps <= budget
     assert result.trace.header.step_count == result.steps
+    # M2+M3, whole-branch review: this exact run ends via the truncation
+    # guard `break` -- one of the two paths that used to leave a run
+    # directory with no way to say WHY the run ended at all.
+    assert result.stop_reason == "step budget"
+
+
+def test_stop_reason_names_a_policy_that_answered_stop() -> None:
+    """M2+M3, whole-branch review, the other of the two silent `break`
+    paths: `_walk_policy()` has exactly three decisions and no
+    `repeat_last`, so its fourth `decide()` call returns `STOP` well
+    before `step_budget=400` is reached -- this run's `stop_reason` must
+    say so, not fall back to the budget-shaped default."""
+    result = run_agent(
+        policy=_walk_policy(), save_data=_save(), seed=1234,
+        clock_epoch=EPOCH, step_budget=400,
+    )
+    assert result.stop_reason == "policy returned STOP"
 
 
 def test_cold_boot_run_records_a_verifiable_trace() -> None:
@@ -311,3 +356,25 @@ def test_digest_every_zero_records_nothing() -> None:
         clock_epoch=EPOCH, step_budget=400,
     )
     assert result.digests == []
+
+
+def test_digest_every_never_samples_absolute_step_zero() -> None:
+    """M5, whole-branch review: `run_agent`'s digest sampling must match
+    `tuxghost.execute.execute`'s checkpoint convention exactly --
+    `execute`'s `hook`'s `if checkpoint and i and i % checkpoint == 0`
+    never fires at absolute step 0 (`i` is falsy there), but an earlier
+    version of `run_agent`'s `sample` had no such guard, so
+    `digest_every=1` recorded a step-0 entry `execute` with
+    `checkpoint=1` never would. Nothing compares the two sequences today,
+    but a future S3 comparison would be off by one entry at the very
+    start of every run. `digest_every=1` makes every OTHER absolute step
+    sample, so a step-0 entry surviving would be easy to miss among many
+    correct ones -- checked explicitly here rather than only inferred
+    from a count."""
+    result = run_agent(
+        policy=_walk_policy(), save_data=_save(), seed=1234,
+        clock_epoch=EPOCH, step_budget=400, digest_every=1,
+    )
+    steps_sampled = [step for step, _digest in result.digests]
+    assert 0 not in steps_sampled
+    assert steps_sampled == list(range(1, len(steps_sampled) + 1))

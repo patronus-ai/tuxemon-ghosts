@@ -252,10 +252,16 @@ class Policy(Protocol):
 
 - *ScriptedPolicy* — a fixed action list. Drives every harness test in
   the gate. Deterministic by construction.
-- *ReplayPolicy* — replays canned model responses from a JSONL captured
-  from a real ~ClaudePolicy~ run. This is what gives prompt-building and
-  response-parsing — the code most likely to rot silently — real gate
-  coverage without a network call.
+- *ReplayPolicy* — replays canned model responses from a JSONL
+  transcript. The transcripts committed to this repo are SYNTHETIC test
+  fixtures, not captured from a real ~ClaudePolicy~ run, and
+  ~ReplayPolicy.decide~ returns ~actions_from_json(record.get("actions",
+  []))~ directly — it never calls ~parse_response~. So this gives
+  ~actions_from_json~ (the validation the two policies share) real gate
+  coverage without a network call, but prompt-building (~build_messages~)
+  and the fence-parsing half of ~parse_response~ — the code most likely
+  to rot silently — are covered only by the stub-client tests in
+  ~tests/test_agent_claude.py~, not by any replayed transcript.
 - *ClaudePolicy* — the Anthropic SDK, vision, one frame per turn.
 
 *Context management: sliding window plus agent notes.* The last K

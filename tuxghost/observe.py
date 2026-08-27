@@ -208,19 +208,25 @@ class FrameRenderer:
         import pygame as pg
         from tuxemon.map.view import DebugRenderer, MapRenderer
         from tuxemon.state.draw import StateDrawer
+        from tuxemon.user_config import CONFIG
 
         if upscale < 1:
             raise ValueError(f"upscale must be >= 1, got {upscale!r}")
 
-        # MapRenderer.draw() gates its DebugRenderer on exactly this flag
-        # (tuxemon/map/view.py:522) -- wiring one in below is otherwise
-        # inert only by accident of the default config. A True value would
-        # silently burn collision boxes and a red centre line into every
-        # frame this class produces: a frame that quietly differs from
-        # what a human player sees, and the whole module docstring's claim
-        # ("no debug overlay") would be false without anyone changing a
-        # line in this file.
-        if client.config.collision_map:
+        # MapRenderer.draw() gates its DebugRenderer on the process-global
+        # `tuxemon.user_config.CONFIG.collision_map` (tuxemon/map/
+        # view.py:522), NOT on `client.config` -- a per-client deep copy
+        # made at boot time (see `tuxghost/boot.py`'s `CONFIG.copy()`).
+        # The two agree at boot by construction, but checking the copy
+        # verifies a proxy: if `CONFIG` is ever mutated after boot (or a
+        # future boot path stops copying it), this guard would read a
+        # stale value while the real renderer keeps consulting the global
+        # -- silently letting collision boxes and a red centre line into
+        # every frame this class produces, contradicting the module
+        # docstring's "no debug overlay" guarantee. Read the SAME global
+        # `MapRenderer.draw()` actually reads (parked minor 1, whole-
+        # branch review).
+        if CONFIG.collision_map:
             raise ValueError(
                 "FrameRenderer refuses to run with config.collision_map "
                 "True: MapRenderer.draw() would draw upstream's debug "

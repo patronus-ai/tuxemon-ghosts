@@ -45,10 +45,17 @@ provenance (`tuxghost.trace.Provenance`) and their recorded `inputs`/
 `initial_state`, and reports FINDINGS -- any taint either trace already
 carries (a tainted replay, a replay-of-a-replay, a wall-clock source: any
 string `tuxghost.trace.read`/a recorder chose to put in
-`Provenance.taints`), plus a specific check for a human-recorded trace,
-whose `step_count` came from elapsed real time rather than a deterministic
-schedule. Findings are informational, not divergences: only a difference
-in `initial_state` or `inputs` moves the exit code to 1.
+`Provenance.taints`), plus a specific check for `recorder="human"`. That
+kind covers TWO things this format does not otherwise distinguish: a real
+human play session (`step_count` came from elapsed real time, not a
+deterministic schedule) and a `--policy scripted` agent run
+(`tuxghost.cli._agent` deliberately reuses this same kind for a fixed,
+already-deterministic action list rather than adding a fourth
+`RecorderKind`) -- M7, whole-branch review, on an earlier version of this
+finding that named only the human-loop half unconditionally, which is
+simply wrong for a scripted-agent trace. Findings are informational, not
+divergences: only a difference in `initial_state` or `inputs` moves the
+exit code to 1.
 
 `agent` (drives a policy against a live session and records what it did,
 via `tuxghost.agent.runner.run_agent`) returns 0 or 2 ONLY, like `execute`
@@ -58,7 +65,16 @@ defect the old CLI shipped -- an uncaught exception (e.g. a missing
 `--from-save` file) reports exit 1, indistinguishable from a real
 divergence, so every precondition `_agent`/`_agent_save_or_refuse` can
 detect is checked explicitly and mapped to exit 2 before anything can
-raise.
+raise. This ALSO covers `--policy claude`: `ClaudePolicy.decide` calls the
+`anthropic` SDK's `messages.create` from inside `run_agent`'s loop, and
+every error that call can raise (`RateLimitError`, `APIConnectionError`,
+`AuthenticationError`, a missing/invalid API key, ...) derives from
+`anthropic.AnthropicError(Exception)`, not `ValueError`/`TypeError` --
+`_agent`'s `except (ValueError, TypeError)` boundary alone does NOT catch
+any of them. A second, import-guarded `except Exception` arm around the
+same `run_agent(...)` call re-raises anything that is not actually an
+`AnthropicError` (a genuine engine bug must stay a visible crash), and
+maps a real one to exit 2 with its own distinct message.
 """
 
 from __future__ import annotations
@@ -173,7 +189,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_agent.add_argument("--clock-epoch", type=int, required=True, dest="clock_epoch")
     p_agent.add_argument("--steps", type=int, required=True)
     p_agent.add_argument("--goal", default="")
-    p_agent.add_argument("--model", default="claude-sonnet-5")
+    # No default here (M8, whole-branch review): `--policy claude` falls
+    # back to `tuxghost.agent.claude.DEFAULT_MODEL` explicitly in `_agent`
+    # below when this is `None`, but `--policy replay` must NOT silently
+    # record whatever that default happens to be -- a replayed transcript
+    # was produced by some specific model (or none at all, for a
+    # synthetic test fixture), and recording an unrelated default as
+    # `model` would misattribute provenance the trace format claims to be
+    # honest about. `--policy replay` refuses instead when this is
+    # `None`, requiring the caller to say which model the transcript is
+    # actually of.
+    p_agent.add_argument("--model", default=None)
     p_agent.add_argument("--upscale", type=int, default=4)
     p_agent.add_argument("--out", type=Path, required=True)
     p_agent.add_argument("--run-dir", type=Path, required=True, dest="run_dir")
@@ -292,10 +318,27 @@ def _compare(path_a: Path, path_b: Path, allow_mismatch: bool) -> int:
         for taint in trace.provenance.taints:
             print(f"finding: {name} is tainted: {taint}")
         if trace.provenance.recorder == "human":
+            # M7, whole-branch review: `recorder="human"` covers TWO
+            # different things this format does not distinguish in any
+            # other field -- a real human play session (`record`
+            # subcommand), whose step count genuinely comes from elapsed
+            # real time and is NOT a deterministic schedule, and a
+            # `--policy scripted` agent run (`tuxghost.cli._agent`), which
+            # deliberately reuses this same recorder kind for a fixed,
+            # already-deterministic action list rather than adding a
+            # fourth `RecorderKind` (an S1 trace-format change). The
+            # earlier wording here asserted the human-loop half
+            # unconditionally, which is simply wrong for a scripted-agent
+            # trace. Reworded to name the ambiguity honestly instead of
+            # guessing which one produced this trace.
             print(
-                f"finding: {name} was recorded from a human loop, whose "
-                f"step count comes from elapsed real time, not a "
-                f"deterministic schedule"
+                f"finding: {name} is recorded as \"human\" -- either a "
+                f"real human play session (step count from elapsed real "
+                f"time, not a deterministic schedule) or a `--policy "
+                f"scripted` agent run (a fixed, already-deterministic "
+                f"action list recorded under the same recorder kind); "
+                f"this format does not distinguish the two in any other "
+                f"field"
             )
 
     field = first_difference(a.initial_state, b.initial_state)
@@ -530,6 +573,22 @@ def _agent(args: argparse.Namespace) -> int:
         policy = ScriptedPolicy(decisions)
         kind = "human"
     elif args.policy == "replay":
+        # M8, whole-branch review: `--model` has NO default (see
+        # `_build_parser`) specifically so this cannot silently record
+        # some unrelated default as the model that produced this
+        # transcript. A transcript carries no `model` field of its own to
+        # read it back from (records are `{"actions": ..., "notes": ...,
+        # "raw": ..., "claimed_outcome": ...}` -- see
+        # `tuxghost/agent/replay.py`), so the honest fix is requiring the
+        # caller to say which model this is, not guessing.
+        if args.model is None:
+            print(
+                "refused: --policy replay requires --model (the id of "
+                "the model whose transcript this is; the transcript "
+                "itself carries no model field to read it back from)",
+                file=sys.stderr,
+            )
+            return 2
         try:
             policy = ReplayPolicy(args.actions)
         except (OSError, json.JSONDecodeError, TypeError) as exc:
@@ -563,7 +622,15 @@ def _agent(args: argparse.Namespace) -> int:
         # the network (a missing package fails before any client is
         # constructed).
         try:
-            import anthropic  # noqa: F401
+            # No unused-import suppression comment needed here (unlike an
+            # earlier version of this line): this `anthropic` binding is
+            # a real precondition check on its own, AND the name is
+            # genuinely used again later in this same function scope, in
+            # the `except Exception` arm around `run_agent(...)` below
+            # (`isinstance(exc, anthropic.AnthropicError)`) -- ruff's
+            # unused-import check is scope-wide, not per-binding, so it
+            # no longer considers this import unused at all.
+            import anthropic
         except ImportError as exc:
             print(
                 f"refused: --policy claude needs the anthropic SDK "
@@ -572,11 +639,18 @@ def _agent(args: argparse.Namespace) -> int:
             )
             return 2
 
-        from tuxghost.agent.claude import ClaudePolicy
+        from tuxghost.agent.claude import DEFAULT_MODEL, ClaudePolicy
 
-        policy = ClaudePolicy(model=args.model, goal=args.goal)
+        # `--model` has no argparse default (M8, whole-branch review, see
+        # `_build_parser`) so `--policy replay` cannot silently borrow it;
+        # `--policy claude` still gets a sensible default here instead,
+        # resolved explicitly rather than via `ClaudePolicy`'s own
+        # `model: str = DEFAULT_MODEL` parameter default -- `args.model`
+        # would otherwise pass `None` through it, which that parameter's
+        # own type does not accept.
+        model = args.model if args.model is not None else DEFAULT_MODEL
+        policy = ClaudePolicy(model=model, goal=args.goal)
         kind = "cu-agent"
-        model = args.model
 
     try:
         result = run_agent(
@@ -623,6 +697,45 @@ def _agent(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    except Exception as exc:
+        # Important #2, whole-branch review: `--policy claude`'s
+        # `ClaudePolicy.decide` calls `messages.create(...)` from inside
+        # `run_agent`'s loop, and every error the `anthropic` SDK can
+        # raise for that call -- `RateLimitError`, `APIConnectionError`,
+        # `AuthenticationError`, a missing/invalid API key, ... -- derives
+        # from `anthropic.AnthropicError(Exception)`, none of them
+        # `ValueError`/`TypeError`, so the boundary above never catches
+        # any of them. Left uncaught, any of them exits 1 = "diverged",
+        # the one code this module's docstring says `agent` must never
+        # produce.
+        #
+        # `anthropic` is imported LAZILY here, inside the handler, rather
+        # than unconditionally in `_agent` or at module scope: `make
+        # check` installs no network SDK, and `--policy scripted`/
+        # `replay` (everything the gate runs) never raise an
+        # `AnthropicError`, so this whole arm must stay reachable, and
+        # inert, without the package present.
+        #
+        # Deliberately NOT a bare `except Exception: return 2` in effect
+        # either: anything that is not, in fact, an `AnthropicError` is
+        # RE-RAISED immediately, as the visible crash a genuine internal
+        # engine invariant failure must stay -- the identical tradeoff
+        # the `except (ValueError, TypeError)` arm above already makes.
+        # No `except ImportError` guard around this import: `anthropic`
+        # cannot fail to import here in practice (constructing
+        # `ClaudePolicy` above already required it, and it is now cached
+        # in `sys.modules`), and catching-then-immediately-re-raising an
+        # exception that cannot occur would only be a no-op.
+        import anthropic
+
+        if not isinstance(exc, anthropic.AnthropicError):
+            raise
+        print(
+            f"refused: --policy claude call to the Anthropic API failed: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return 2
     write(result.trace, args.out)
 
     frames_dir = args.run_dir / "frames"
@@ -638,6 +751,29 @@ def _agent(args: argparse.Namespace) -> int:
             # reassigns the exact list `asdict` already built.
             record = dataclasses.asdict(decision)
             handle.write(json.dumps(record) + "\n")
+
+    # M2+M3, whole-branch review: `--goal` never reached the run
+    # directory despite the spec/STATUS claiming it did, and neither
+    # `break` path in `run_agent`'s loop ever reaches `decisions.append`,
+    # so nothing in the run directory could say WHY a run ended. One
+    # small artifact closes both: `result.stop_reason` (see
+    # `tuxghost.agent.runner.RunResult`) names the reason, and everything
+    # else here is exactly what a person re-reading this run later would
+    # need and could not otherwise reconstruct from `decisions.jsonl`
+    # alone (the goal was never IN any decision; the seed/clock_epoch/
+    # policy/model are process arguments, not part of the trace's own
+    # per-step record).
+    run_info = {
+        "goal": args.goal,
+        "seed": args.seed,
+        "clock_epoch": args.clock_epoch,
+        "step_budget": args.steps,
+        "policy": args.policy,
+        "model": model,
+        "steps": result.steps,
+        "stop_reason": result.stop_reason,
+    }
+    (args.run_dir / "run.json").write_text(json.dumps(run_info, indent=2))
 
     print(f"wrote {args.out} ({result.steps} steps) and {args.run_dir}")
     return 0

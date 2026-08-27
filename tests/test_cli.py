@@ -212,6 +212,15 @@ def test_info_allow_mismatch_downgrades_a_version_mismatch(tmp_path: Path) -> No
 def test_compare_reports_a_human_recorder_as_a_finding(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """M7, whole-branch review: `recorder="human"` covers both a real
+    human play session AND a `--policy scripted` agent run (which
+    deliberately reuses this recorder kind rather than adding a fourth
+    one), and this format has no other field to tell them apart -- the
+    finding text must say so honestly rather than assert the human-loop
+    half unconditionally (the earlier wording, "recorded from a human
+    loop, whose step count comes from elapsed real time", was flatly
+    wrong for a scripted-agent trace, which this exact fixture could
+    equally be)."""
     from tuxghost.boot import build_client
     from tuxghost.determinism import pin_clock, seed_all
     from tuxghost.record import Recorder
@@ -229,7 +238,11 @@ def test_compare_reports_a_human_recorder_as_a_finding(
 
     assert main(["compare", str(a), str(b)]) == 0
     out = capsys.readouterr().out
-    assert "finding:" in out and "human loop" in out
+    assert "finding:" in out and 'recorded as "human"' in out
+    assert "scripted" in out, (
+        "the finding must name the scripted-agent possibility, not just "
+        "the human-play-session one"
+    )
     assert "traces agree" in out
 
 
@@ -574,6 +587,7 @@ def test_agent_writes_a_trace_and_a_run_directory(tmp_path: Path) -> None:
             "--actions", str(_write_actions(tmp_path)),
             "--seed", "1234", "--clock-epoch", "1787659200",
             "--from-save", str(FIXTURE), "--steps", "300",
+            "--goal", "leave town",
             "--out", str(out), "--run-dir", str(run_dir),
         ],
         cwd=tmp_path,
@@ -585,6 +599,45 @@ def test_agent_writes_a_trace_and_a_run_directory(tmp_path: Path) -> None:
     assert out.exists()
     assert (run_dir / "decisions.jsonl").exists()
     assert list((run_dir / "frames").glob("*.png"))
+
+    # M2+M3, whole-branch review: `--goal` must reach the run directory
+    # (it never did before), and the run directory must say WHY the run
+    # ended -- `_write_actions` gives `ScriptedPolicy` exactly 3
+    # decisions (120 steps) and no `repeat_last`, well under `--steps
+    # 300`, so its 4th `decide()` call returns `STOP` -- this run ends
+    # via the policy, not the budget.
+    run_info = json.loads((run_dir / "run.json").read_text())
+    assert run_info["goal"] == "leave town"
+    assert run_info["seed"] == 1234
+    assert run_info["clock_epoch"] == 1787659200
+    assert run_info["step_budget"] == 300
+    assert run_info["policy"] == "scripted"
+    assert run_info["model"] is None
+    assert run_info["steps"] == 120
+    assert run_info["stop_reason"] == "policy returned STOP"
+
+    # Important #1, whole-branch review: no test before this one ever
+    # replayed a trace the `agent` subcommand actually wrote. Every other
+    # trace-verifying test takes a DIFFERENT path -- `test_agent_runner.py
+    # ::test_recorded_trace_verifies` calls `run_agent` in-process at the
+    # library default `scaled=False`, and the CLI's other verifying test
+    # (below, via `_record_trace`) uses the `record` subcommand, which has
+    # no policy, no renderer, and no scaling at all. The composite the
+    # production CLI actually produces -- `scaled_context()` at scale 5
+    # AND a real `MapRenderer` running `update(dt)` every step, both
+    # measured digest-neutral only in ISOLATION from each other -- had
+    # never been replayed together until this assertion.
+    verify_result = subprocess.run(
+        [sys.executable, "-m", "tuxghost.cli", "verify", str(out)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verify_result.returncode == 0, (
+        verify_result.stdout,
+        verify_result.stderr,
+    )
 
 
 def test_agent_refuses_an_unreadable_save(tmp_path: Path) -> None:
@@ -653,6 +706,7 @@ def test_agent_accepts_a_relative_out_path(tmp_path: Path) -> None:
 def test_agent_cold_boot_needs_no_save(tmp_path: Path) -> None:
     """A real subprocess -- see `test_agent_writes_a_trace_and_a_run_
     directory`'s docstring (task 9 review round 1)."""
+    out = tmp_path / "cold.tuxghost"
     result = subprocess.run(
         [
             sys.executable, "-m", "tuxghost.cli",
@@ -661,7 +715,7 @@ def test_agent_cold_boot_needs_no_save(tmp_path: Path) -> None:
             "--cold-boot",
             "--seed", "1234", "--clock-epoch", "1787659200",
             "--steps", "200",
-            "--out", str(tmp_path / "cold.tuxghost"),
+            "--out", str(out),
             "--run-dir", str(tmp_path / "colddir"),
         ],
         cwd=tmp_path,
@@ -670,6 +724,23 @@ def test_agent_cold_boot_needs_no_save(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
+
+    # Important #1, whole-branch review -- see the identical block in
+    # `test_agent_writes_a_trace_and_a_run_directory` for why this must
+    # be a real `verify` on the trace this subcommand just wrote, not a
+    # trace built any other way. Covers the cold-boot path specifically,
+    # not just `--from-save`.
+    verify_result = subprocess.run(
+        [sys.executable, "-m", "tuxghost.cli", "verify", str(out)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verify_result.returncode == 0, (
+        verify_result.stdout,
+        verify_result.stderr,
+    )
 
 
 # --- Review round 1, Critical: `run_agent(...)` had no exception
@@ -723,6 +794,7 @@ def test_agent_replay_writes_a_trace(tmp_path: Path) -> None:
             "--actions", str(_write_actions(tmp_path)),
             "--cold-boot",
             "--seed", "1234", "--clock-epoch", "1787659200", "--steps", "300",
+            "--model", "synthetic-fixture",
             "--out", str(out), "--run-dir", str(run_dir),
         ],
         cwd=tmp_path,
@@ -733,6 +805,37 @@ def test_agent_replay_writes_a_trace(tmp_path: Path) -> None:
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert out.exists()
     assert (run_dir / "decisions.jsonl").exists()
+
+    # M8, whole-branch review: the trace must record the MODEL THIS TEST
+    # PASSED, not some unrelated default -- `--model` has no argparse
+    # default specifically so this can't silently drift.
+    from tuxghost.trace import read
+
+    assert read(out).provenance.model == "synthetic-fixture"
+
+
+def test_agent_replay_requires_model(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M8, whole-branch review: a `--policy replay` trace previously
+    recorded `model` from `--model`'s argparse default regardless of what
+    actually produced the transcript -- misattributing provenance on
+    exactly the field this format exists to keep honest. `--model` now
+    has no default at all, so omitting it refuses with a specific
+    message, distinguishable from every other refusal this subcommand can
+    produce."""
+    code = main(
+        [
+            "agent", "--policy", "replay",
+            "--actions", str(_write_actions(tmp_path)),
+            "--cold-boot",
+            "--seed", "1234", "--clock-epoch", "1787659200", "--steps", "60",
+            "--out", str(tmp_path / "o.tuxghost"),
+            "--run-dir", str(tmp_path / "d"),
+        ]
+    )
+    assert code == 2
+    assert "requires --model" in capsys.readouterr().err
 
 
 def test_agent_refuses_a_transcript_that_fails_mid_run(tmp_path: Path) -> None:
@@ -758,6 +861,7 @@ def test_agent_refuses_a_transcript_that_fails_mid_run(tmp_path: Path) -> None:
             "--actions", str(_write_malformed_replay_transcript(tmp_path)),
             "--cold-boot",
             "--seed", "1234", "--clock-epoch", "1787659200", "--steps", "300",
+            "--model", "synthetic-fixture",
             "--out", str(tmp_path / "o.tuxghost"),
             "--run-dir", str(tmp_path / "d"),
         ],
@@ -847,14 +951,29 @@ def test_agent_refuses_invalid_upscale(
 
 
 def test_agent_replay_refuses_a_non_object_record(tmp_path: Path) -> None:
+    """Parked minor 3 (whole-branch review): the bad record must NOT sit
+    at index 0. Two well-formed records precede it here, so a regression
+    that short-circuited `ReplayPolicy.__init__`'s validation loop after
+    the first record would still be caught -- the earlier version of this
+    test, with the bad record at index 0, could not tell that apart from
+    the loop working correctly."""
     path = tmp_path / "bad_replay.jsonl"
-    path.write_text(json.dumps([1, 2, 3]))
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps({"actions": []}),
+                json.dumps({"actions": []}),
+                json.dumps([1, 2, 3]),
+            ]
+        )
+    )
     code = main(
         [
             "agent", "--policy", "replay",
             "--actions", str(path),
             "--cold-boot",
             "--seed", "1234", "--clock-epoch", "1787659200", "--steps", "60",
+            "--model", "synthetic-fixture",
             "--out", str(tmp_path / "o.tuxghost"),
             "--run-dir", str(tmp_path / "d"),
         ]

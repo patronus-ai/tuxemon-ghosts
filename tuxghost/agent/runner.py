@@ -99,6 +99,15 @@ class RunResult:
     decisions: list[Decision] = field(default_factory=list)
     steps: int = 0
     frames: list[bytes] = field(default_factory=list)
+    #: WHY the loop ended -- "policy returned STOP" (an empty `actions`
+    #: answer) or "step budget" (the loop's own `while step < step_budget`
+    #: condition went false, OR the truncation guard refused to start an
+    #: action that would run past it). M2+M3, whole-branch review: neither
+    #: break path in `run_agent`'s loop reaches `decisions.append`, so
+    #: without this field a run directory could not say why a run ended
+    #: at all -- see `tuxghost.cli._agent`, which writes this into
+    #: `run_dir/run.json`.
+    stop_reason: str = "step budget"
 
 
 def _add_edge(
@@ -174,22 +183,32 @@ def _observation(
     try:
         world = client.get_state_by_name(WorldState)
         tile = (int(world.player.tile_pos[0]), int(world.player.tile_pos[1]))
+        map_name = client.get_map_name()
     except ValueError:
         # `StateManager.get_state_by_name` raises ValueError("Missing state
         # ...") when nothing on the stack matches -- verified in
-        # `tuxemon/state/manager.py`. A client with no WorldState is a
-        # legitimate moment (between map loads), and an observation must
-        # still be produced or the run would die on a frame the agent
-        # could perfectly well have acted on. Caught narrowly, by the exact
-        # exception type, so a genuine engine failure still propagates.
+        # `tuxemon/state/manager.py`. `MapManager.get_map_name` raises its
+        # OWN ValueError ("Name of the map requested when no map is
+        # active") in exactly the same no-map moment -- verified in
+        # `tuxemon/map/manager.py` -- so it must be covered by the SAME
+        # guard, not called after it (parked/whole-branch review M1: an
+        # earlier version of this function called `get_map_name()` outside
+        # this `try`, so it raised, uncaught, in precisely the situation
+        # this guard exists to tolerate). A client with no WorldState/no
+        # active map is a legitimate moment (between map loads), and an
+        # observation must still be produced or the run would die on a
+        # frame the agent could perfectly well have acted on. Caught
+        # narrowly, by the exact exception type, so a genuine engine
+        # failure still propagates.
         tile = (-1, -1)
+        map_name = ""
     return (
         Observation(
             step=step,
             frame_png=png,
             frame_is_blank=blank,
             state_stack=tuple(client.active_state_names),
-            map_name=client.get_map_name(),
+            map_name=map_name,
             tile_pos=tile,
         ),
         png,
@@ -311,11 +330,18 @@ def run_agent(
     decisions: list[Decision] = []
     frame_log: list[bytes] = []
     step = 0
+    #: M2+M3, whole-branch review: default covers BOTH ways the loop can
+    #: end without the policy ever answering STOP -- the truncation-guard
+    #: `break` just below, and the `while step < step_budget` condition
+    #: itself going false after the last completed action. Overwritten
+    #: below only on the one path that is genuinely a policy decision.
+    stop_reason = "step budget"
 
     while step < step_budget:
         obs, png = _observation(client, step, frames)
         actions = validate_actions(policy.decide(obs))
         if not actions:
+            stop_reason = "policy returned STOP"
             break
 
         cost = sum(a.hold + a.settle for a in actions)
@@ -335,8 +361,18 @@ def run_agent(
             base = step
 
             def sample(i: int, _base: int = base) -> None:
-                if digest_every and (_base + i) % digest_every == 0:
-                    digests.append((_base + i, digest_of(session)))
+                # `(_base + i) and ...`, not just `% digest_every == 0`,
+                # to match `tuxghost.execute.execute`'s own checkpoint
+                # convention EXACTLY: `hook`'s `if checkpoint and i and i
+                # % checkpoint == 0` there never samples absolute step 0
+                # either. Nothing compares the two sequences today (M5,
+                # whole-branch review), but a future S3 comparison would
+                # otherwise be off by one entry at the start of every run
+                # -- `execute` would never have a step-0 digest to line up
+                # against one `run_agent` recorded.
+                absolute = _base + i
+                if digest_every and absolute and absolute % digest_every == 0:
+                    digests.append((absolute, digest_of(session)))
 
             run_steps(
                 client,
@@ -376,4 +412,5 @@ def run_agent(
         decisions=decisions,
         steps=step,
         frames=frame_log,
+        stop_reason=stop_reason,
     )

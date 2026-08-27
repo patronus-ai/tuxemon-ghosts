@@ -140,17 +140,27 @@ def test_frame_renderer_rejects_upscale_below_one() -> None:
 
 
 def test_frame_renderer_refuses_a_collision_map_enabled_config() -> None:
-    """`MapRenderer.draw()` gates its `DebugRenderer` on exactly
-    `config.collision_map` (`tuxemon/map/view.py:522`) -- wiring one into
-    every `FrameRenderer` is inert only by accident of the default config
-    being False. If it were ever True, every frame this class produces
-    would silently gain collision boxes and a red centre line: a frame
-    that quietly differs from what a human player sees. Refusing
-    construction is cheaper than a policy trained on a debug overlay."""
+    """`MapRenderer.draw()` gates its `DebugRenderer` on the
+    process-global `tuxemon.user_config.CONFIG.collision_map`
+    (`tuxemon/map/view.py:522`) -- NOT on `client.config`, a per-client
+    `model_copy(deep=True)` made at boot (`tuxemon/config.py`'s
+    `TuxemonConfig.copy`). `FrameRenderer.__init__` must check the SAME
+    global the real renderer consults (parked minor 1, whole-branch
+    review): mutating only `client.config` -- as this test did before
+    that fix -- would leave the global untouched and this refusal would
+    never fire, exactly the scenario the finding warned about. Mutates
+    the real global and restores it in `finally`, since `CONFIG` is a
+    process-wide singleton other tests in this session also read."""
+    from tuxemon.user_config import CONFIG
+
     client, _session = _boot_fixture()
-    client.config.config_model.display.collision_map = True
-    with pytest.raises(ValueError, match="collision_map"):
-        FrameRenderer(client)
+    original = CONFIG.config_model.display.collision_map
+    CONFIG.config_model.display.collision_map = True
+    try:
+        with pytest.raises(ValueError, match="collision_map"):
+            FrameRenderer(client)
+    finally:
+        CONFIG.config_model.display.collision_map = original
 
 
 def test_rendering_does_not_change_the_digest() -> None:
@@ -179,7 +189,7 @@ def test_rendering_does_not_change_the_digest() -> None:
     POSITIVE CONTROL (review round 1, Ruling K): the equality assertion
     above is only meaningful if the pending press is real and reachable,
     which depends on the step cursor living inside `install_schedule`'s
-    closure (`tuxghost/loop.py:44,57`) rather than, say, `run_steps`. If
+    closure (`tuxghost/loop.py:43,46,55`) rather than, say, `run_steps`. If
     that cursor's home ever moved, the equality assertion could revert to
     silently vacuous exactly like the six historic examples; this makes
     the test prove its own instrument is live on every run.

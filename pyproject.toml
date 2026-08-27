@@ -36,3 +36,15 @@ target-version = "py312"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["slow: drives a real game loop for minutes; opt-in"]
+# Parked minor 7 (whole-branch review): forces "always" (never Python's
+# default once-per-location dedup) specifically for the ambient
+# patch_series_id mismatch warning `tuxghost/trace.py` emits on every
+# `read()` of the committed golden trace. Without this, the warning's
+# module+lineno never changes across call sites, so Python's default
+# filter can silently suppress all but the first occurrence within a
+# session -- exactly the kind of thing that would let a REAL regression
+# (a warning that stops firing, or a new one that starts) hide among
+# what looks like consistent, expected noise. `tests/conftest.py`'s
+# `_patch_series_id_warning_tripwire` fixture is the thing that actually
+# checks the count; this filter is what makes that count trustworthy.
+filterwarnings = ["always:patch_series_id:UserWarning"]

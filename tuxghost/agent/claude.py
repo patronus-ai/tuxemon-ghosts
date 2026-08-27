@@ -7,10 +7,14 @@ pure functions below.
 
 `build_messages` and `parse_response` are deliberately pure and separately
 tested: they are the parts most likely to rot silently as prompts and
-response shapes change, and `ReplayPolicy` re-covers `parse_response` end
-to end against a captured transcript. Context is a sliding window of the
-last `window` turns plus a notes block carried forward verbatim -- no
-summarisation call, whose output would silently steer the run and be a
+response shapes change, and are covered directly, with stub responses, by
+`tests/test_agent_claude.py`. `ReplayPolicy` does NOT exercise either of
+them -- it calls `actions_from_json` directly and never `parse_response`
+(see `tuxghost/agent/replay.py`) -- so it re-covers only that shared
+validation against SYNTHETIC transcripts; fence parsing and prompt
+building have no transcript-replay coverage. Context is a sliding window
+of the last `window` turns plus a notes block carried forward verbatim --
+no summarisation call, whose output would silently steer the run and be a
 second prompt to maintain.
 """
 
@@ -28,6 +32,7 @@ from tuxghost.agent.types import (
     HOLD_CAP,
     SETTLE_CAP,
     STOP,
+    WALK_ONE_TILE,
     Action,
     Observation,
 )
@@ -49,8 +54,9 @@ A confirms and talks; B cancels and backs out.
 The game runs at 60 steps per second. Every action holds a button for
 `hold` steps, releases it, then lets `settle` steps pass before you see
 the next frame. Holding a direction for too few steps does not move you a
-whole tile; a dialog needs A pressed and released. `hold` must be between
-1 and {HOLD_CAP}; `settle` between 0 and {SETTLE_CAP}.
+whole tile -- crossing one tile takes {WALK_ONE_TILE} steps of that
+direction held; a dialog needs A pressed and released. `hold` must be
+between 1 and {HOLD_CAP}; `settle` between 0 and {SETTLE_CAP}.
 
 Reply with exactly one fenced json block:
 
@@ -194,9 +200,13 @@ class ClaudePolicy:
         `tuxghost/agent/replay.py`).
 
         Routes actions through `actions_from_json`, the SAME validation
-        `ReplayPolicy` uses, so a captured transcript can never be
-        accepted where the live answer that produced it would have been
-        rejected.
+        `ReplayPolicy` uses directly (never through this method -- see
+        `tuxghost/agent/replay.py`), so a transcript record is checked by
+        the same rules a live answer would be. This method's OWN fence
+        parsing above (`_JSON_BLOCK`, last-block selection, the
+        `json.loads` and non-object-payload checks) is exercised only by
+        the stub-client tests in `tests/test_agent_claude.py`, never by a
+        replayed transcript.
         """
         blocks = _JSON_BLOCK.findall(text)
         if not blocks:

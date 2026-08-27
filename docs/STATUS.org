@@ -355,10 +355,28 @@ escaped from deep inside =run_agent=); a =--policy replay= transcript
 whose record is malformed *mid-run* (=ReplayPolicy= parses lazily inside
 =decide()=, unlike =ScriptedPolicy= whose actions the CLI pre-parses); a
 non-object line in a =--policy scripted= actions file; and an invalid
-=--upscale=. The =run_agent= call is now bounded by
-=except (ValueError, TypeError)= *only* — deliberately not =Exception=,
-so a genuine engine invariant failure stays a visible crash instead of
-being laundered into a tidy "refused".
+=--upscale=. The =run_agent= call is bounded by
+=except (ValueError, TypeError)= for exactly those four cases —
+deliberately not =Exception=, so a genuine engine invariant failure stays
+a visible crash instead of being laundered into a tidy "refused".
+
+A *fifth* exit-1 path was found by the whole-branch review (Important
+#2) and closed the same way: =ClaudePolicy.decide= calls the =anthropic=
+SDK's =messages.create= from inside =run_agent='s loop, and every error
+that call can raise (=RateLimitError=, =APIConnectionError=,
+=AuthenticationError=, a missing/invalid API key, ...) derives from
+=anthropic.AnthropicError(Exception)=, not =ValueError=/=TypeError= — the
+boundary above never caught any of them, so =--policy claude= alone
+among the three policies could still exit 1. A second, import-guarded
+=except Exception= arm around the same =run_agent(...)= call now
+re-raises anything that is not actually an =AnthropicError= (a genuine
+engine bug still crashes) and maps a real one to exit 2 with its own
+message. No committed test exercises =--policy claude= (it would require
+a live API call), so this was verified BY HAND: a fake =anthropic= module
+injected into =sys.modules= plus a stubbed =run_agent= that raises the
+fake =AnthropicError= — =_agent= returned 2 with the expected message; the
+same stub raising a plain =RuntimeError= instead propagated uncaught, as
+a real bug should.
 
 ** New test counts
 
@@ -368,6 +386,17 @@ end of S1 — 75 net new tests). Slow tier: *3 passed, 203 deselected*
 =make check= run, on this tree, sequentially, per =CLAUDE.md='s standing
 rule against concurrent suites. All other gates (=ruff=, =lint-patched=,
 =mypy --strict= over 41 source files) green in the same run.
+
+*Updated by the final whole-branch fix wave*: fast tier is now *208
+passed, 3 skipped, 9 warnings* (=make check-fast=, measured on this
+tree; five new regression tests, each demonstrated to fail against the
+defect it pins and pass once fixed — see that task's report at
+=.superpowers/sdd/2026-08-26-cu-agent-harness.org/final-fix-report.md=).
+=ruff=, =lint-patched=, and =mypy= over the same 41 source files all
+green in the same run. The 9-warning count is unchanged from before the
+wave — parked minor 7's fix pins that count as a tripwire rather than
+reducing it (=tests/conftest.py=), so a future divergence in it fails
+the suite instead of hiding in "expected" noise.
 
 ** Honest limits
 

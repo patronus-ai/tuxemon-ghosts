@@ -1,8 +1,15 @@
 """Replays a captured model transcript.
 
-This is what gives `ClaudePolicy`'s response PARSING real gate coverage
-without a network call: the records are raw model answers captured from a
-live run, so a parsing regression fails here rather than in production.
+`ReplayPolicy.decide` returns `actions_from_json(record.get("actions",
+[]))` directly -- it never calls `ClaudePolicy.parse_response`. So this
+module re-covers `actions_from_json` (the validation the two policies
+share) end to end without a network call, but NOT `parse_response`'s own
+fence parsing (`_JSON_BLOCK`, last-block selection, the json-decode and
+non-object-payload checks) or prompt building -- those are covered only
+by the stub-client tests in `tests/test_agent_claude.py`. The
+transcripts this project commits are SYNTHETIC test fixtures, not
+captured from a live `ClaudePolicy` run.
+
 It deliberately does NOT loop when exhausted -- a transcript that silently
 restarted would make a replayed run diverge from the run it claims to
 reproduce, which is the one thing a replay must not do.
