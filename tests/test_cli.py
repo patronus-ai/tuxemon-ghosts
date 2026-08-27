@@ -598,13 +598,23 @@ def test_agent_accepts_a_relative_out_path(
     the first draft of this test left `--from-save` as the absolute
     `FIXTURE` constant, covering only `--out`/`--run-dir` and repeating
     the exact shape of blind spot this test exists to close, just for two
-    of `_PATH_ARGS["agent"]`'s four entries instead of all of them."""
+    of `_PATH_ARGS["agent"]`'s four entries instead of all of them.
+
+    `--actions` is ALSO typed relative here (review round 2, minor): the
+    round-1 fix closed `--from-save` but left `--actions` absolute via
+    `_write_actions(tmp_path)`'s own absolute return value -- the last of
+    `_PATH_ARGS["agent"]`'s four entries never exercised as a relative
+    path. Written directly here, relative, rather than through that
+    helper, to close it."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "save.json").write_text(FIXTURE.read_text())
+    (tmp_path / "actions.jsonl").write_text(
+        json.dumps({"actions": [{"button": 2, "hold": 30, "settle": 10}]})
+    )
     code = main(
         [
             "agent", "--policy", "scripted",
-            "--actions", str(_write_actions(tmp_path)),
+            "--actions", "actions.jsonl",
             "--seed", "1234", "--clock-epoch", "1787659200",
             "--from-save", "save.json", "--steps", "120",
             "--out", "relative.tuxghost", "--run-dir", "reldir",
@@ -729,13 +739,28 @@ def test_agent_refuses_a_non_object_actions_line(tmp_path: Path) -> None:
     assert code == 2
 
 
-def test_agent_refuses_invalid_upscale(tmp_path: Path) -> None:
+def test_agent_refuses_invalid_upscale(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Review round 1, Critical, case 3 of 3. Reproduced by the reviewer:
     `--upscale 0` raised `ValueError` from `FrameRenderer.__init__`
     (called from `run_agent`), uncaught, exiting 1. `--upscale` is a bad
     ARGUMENT with a knowable valid range (>= 1) -- it should never reach
     `run_agent` in the first place, so it is refused eagerly in `_agent`'s
-    precondition block, before `seed_all`/anything else runs."""
+    precondition block, before `seed_all`/anything else runs.
+
+    Review round 2: `--upscale 0` is ALSO caught by the `run_agent(...)`
+    boundary below (`FrameRenderer.__init__` raises the identical
+    `ValueError` if this ever reached it), so `assert code == 2` alone
+    cannot tell which of the two guards actually fired -- confirmed in
+    round 1's report by removing only the precondition and watching this
+    test still pass. The two guards' messages are textually distinct
+    (the precondition never says "run failed"; the boundary always does
+    -- see `_agent`'s `except (ValueError, TypeError)` handler), so
+    asserting on the exact wording is what isolates the precondition
+    specifically, the same way an earlier task in this plan used a
+    message match to distinguish two exception paths that shared an
+    exception type."""
     code = main(
         [
             "agent", "--policy", "scripted",
@@ -743,6 +768,37 @@ def test_agent_refuses_invalid_upscale(tmp_path: Path) -> None:
             "--cold-boot",
             "--seed", "1234", "--clock-epoch", "1787659200", "--steps", "60",
             "--upscale", "0",
+            "--out", str(tmp_path / "o.tuxghost"),
+            "--run-dir", str(tmp_path / "d"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "refused: --upscale must be >= 1, got 0" in err
+    assert "run failed" not in err
+
+
+# --- Review round 2, Critical (still open): the SAME non-object-record
+# defect fixed for `--policy scripted` in round 1 was left live for
+# `--policy replay`. `ReplayPolicy.__init__` never checked record shape,
+# so a transcript line that is valid JSON but not an object constructed
+# cleanly and `decide()`'s unconditional `record.get("notes")` raised
+# `AttributeError` lazily, mid-run -- not caught by the (deliberately
+# narrow) `run_agent(...)` boundary, exiting 1. Fixed in
+# `ReplayPolicy.__init__` itself (Ruling X): validated at construction,
+# not lazily inside `decide()`, so a malformed transcript is refused
+# before the game ever boots.
+
+
+def test_agent_replay_refuses_a_non_object_record(tmp_path: Path) -> None:
+    path = tmp_path / "bad_replay.jsonl"
+    path.write_text(json.dumps([1, 2, 3]))
+    code = main(
+        [
+            "agent", "--policy", "replay",
+            "--actions", str(path),
+            "--cold-boot",
+            "--seed", "1234", "--clock-epoch", "1787659200", "--steps", "60",
             "--out", str(tmp_path / "o.tuxghost"),
             "--run-dir", str(tmp_path / "d"),
         ]

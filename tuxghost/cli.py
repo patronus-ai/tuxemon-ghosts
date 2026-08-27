@@ -532,7 +532,13 @@ def _agent(args: argparse.Namespace) -> int:
     elif args.policy == "replay":
         try:
             policy = ReplayPolicy(args.actions)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, json.JSONDecodeError, TypeError) as exc:
+            # `TypeError` here is `ReplayPolicy.__init__`'s own
+            # record-shape check (task 8 review round 2): every parsed
+            # record must be a dict, checked at CONSTRUCTION so a
+            # malformed transcript is refused before the game ever boots,
+            # not caught by the narrower `run_agent(...)` boundary below
+            # (which deliberately does NOT catch `AttributeError`).
             print(f"refused: bad --actions file: {exc}", file=sys.stderr)
             return 2
         kind = "cu-agent"

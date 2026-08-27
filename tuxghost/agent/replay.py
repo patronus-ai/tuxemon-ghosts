@@ -46,11 +46,34 @@ def actions_from_json(raw: Any) -> tuple[Action, ...]:
 
 class ReplayPolicy:
     def __init__(self, transcript: Path) -> None:
-        self._records = [
+        records = [
             json.loads(line)
             for line in Path(transcript).read_text().splitlines()
             if line.strip()
         ]
+        # Validated HERE, at construction, not lazily inside `decide()`
+        # (task 8 review round 2's Ruling X): a malformed transcript is
+        # knowable at load time, so failing now -- before the game ever
+        # boots -- saves a pointless run and matches how `--policy
+        # scripted` already behaves (the CLI pre-parses its whole
+        # `--actions` file up front). Without this, a record that is
+        # valid JSON but not an object (e.g. `[1, 2, 3]`) constructs
+        # cleanly and `decide()`'s unconditional `record.get("notes")`
+        # raises `AttributeError` lazily, mid-run -- not one of this
+        # project's own `ValueError`/`TypeError` input-validation
+        # exceptions, so it is not (and must not be) caught by
+        # `tuxghost.cli._agent`'s `run_agent(...)` boundary, which is
+        # deliberately narrow: an `AttributeError` there almost always
+        # signals a programming error, not bad user input, and widening
+        # the boundary to swallow it would launder a genuine bug into a
+        # tidy "refused".
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                raise TypeError(
+                    f"record {index} must be a JSON object, got "
+                    f"{type(record).__name__}"
+                )
+        self._records = records
         self._index = 0
         self.last_notes: str | None = None
         self.last_raw: str | None = None
