@@ -1,48 +1,55 @@
-# Tuxemon Deterministic Trace Core (S1) Implementation Plan
+#+TITLE: S1 — Tuxemon deterministic trace core implementation plan
+#+DATE: 2026-08-25
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+* For agentic workers
 
-**Goal:** Build a portable, step-indexed Tuxemon trace format and an offline headless executor that replays a trace and verifies it reached the same state.
+*REQUIRED SUB-SKILL*: use =superpowers:subagent-driven-development= (recommended) or
+=superpowers:executing-plans= to implement this plan task-by-task. Steps use
+checkbox (=- [ ]=) syntax for tracking.
 
-**Architecture:** Upstream Tuxemon stays a vendored checkout at `59a34164f442ddecbaee4c436e3f1a5ba9474e29`, modified only by a numbered patch series in `patches/`. All new code lives in a separate `tuxghost/` package that imports Tuxemon, owns the single stepping loop, and provides the trace format, recorder, executor and CLI.
+*Goal:* Build a portable, step-indexed Tuxemon trace format and an offline headless executor that replays a trace and verifies it reached the same state.
 
-**Tech Stack:** Python 3.12, pygame-ce 2.5.7 (dummy SDL drivers), pydantic v2, pytest, mypy (strict), ruff. Dependency management via `uv`.
+*Architecture:* Upstream Tuxemon stays a vendored checkout at =59a34164f442ddecbaee4c436e3f1a5ba9474e29=, modified only by a numbered patch series in =patches/=. All new code lives in a separate =tuxghost/= package that imports Tuxemon, owns the single stepping loop, and provides the trace format, recorder, executor and CLI.
 
-**Spec:** `docs/superpowers/specs/2026-08-25-tuxemon-trace-core-design.org`
+*Tech Stack:* Python 3.12, pygame-ce 2.5.7 (dummy SDL drivers), pydantic v2, pytest, mypy (strict), ruff. Dependency management via =uv=.
 
-**Evidence:** `docs/2026-08-25-determinism-spike.org` — every determinism claim in this plan was measured there.
+*Spec:* =docs/superpowers/specs/2026-08-25-tuxemon-trace-core-design.org=
 
-## Global Constraints
+*Evidence:* =docs/2026-08-25-determinism-spike.org= — every determinism claim in this plan was measured there.
 
-- Upstream commit is `59a34164f442ddecbaee4c436e3f1a5ba9474e29`. Never edit `tuxemon/` directly; every engine change is a file in `patches/` applied by `make patch`.
-- Docs are org-mode (`.org`). Plans and code comments are the exception; this plan is `.md` per the skill default.
-- Trace format is **version 1**. Any other value is rejected outright, never coerced.
-- Traces are **step-indexed, never wall-clock-indexed**. `step_rate` is 60 (upstream's existing `FIXED_DT = 1/60`).
-- Never run the game without `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`, or it opens a window.
-- All game runs must set `PYTHONHASHSEED=0` in tests for reproducible reporting, even though the spike showed hash seed does not affect state.
-- **A regression test must be demonstrated to fail against the bug it pins.** Mutate, watch it fail, restore, watch it pass, report real values. An honest gap beats hollow coverage.
-- `mypy --strict`, `ruff check` at zero warnings, and `pytest` all block. No `# type: ignore` or `# noqa` without a written reason.
-- Python is invoked as `./.venv/bin/python`; the venv already exists at repo root.
+* Global Constraints
 
----
+- Upstream commit is =59a34164f442ddecbaee4c436e3f1a5ba9474e29=. Never edit =tuxemon/= directly; every engine change is a file in =patches/= applied by =make patch=.
+- Docs are org-mode (=.org=), plans included — =CLAUDE.md= is the project's
+  one named exception. (This plan was originally written as =.md= per the
+  skill default, in violation of that rule, and converted to =.org= on
+  2026-08-27; nothing else about its content changed.)
+- Trace format is *version 1*. Any other value is rejected outright, never coerced.
+- Traces are *step-indexed, never wall-clock-indexed*. =step_rate= is 60 (upstream's existing =FIXED_DT = 1/60=).
+- Never run the game without =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy=, or it opens a window.
+- All game runs must set =PYTHONHASHSEED=0= in tests for reproducible reporting, even though the spike showed hash seed does not affect state.
+- *A regression test must be demonstrated to fail against the bug it pins.* Mutate, watch it fail, restore, watch it pass, report real values. An honest gap beats hollow coverage.
+- =mypy --strict=, =ruff check= at zero warnings, and =pytest= all block. No =# type: ignore= or =# noqa= without a written reason.
+- Python is invoked as =./.venv/bin/python=; the venv already exists at repo root.
 
-### Task 1: Repo scaffold, CI gates, and the test harness
 
-**Files:**
-- Create: `pyproject.toml`
-- Create: `Makefile`
-- Create: `tuxghost/__init__.py`
-- Create: `tests/__init__.py`
-- Create: `tests/conftest.py`
-- Create: `tests/test_scaffold.py`
+* Task 1: Repo scaffold, CI gates, and the test harness
 
-**Interfaces:**
+*Files:*
+- Create: =pyproject.toml=
+- Create: =Makefile=
+- Create: =tuxghost/__init__.py=
+- Create: =tests/__init__.py=
+- Create: =tests/conftest.py=
+- Create: =tests/test_scaffold.py=
+
+*Interfaces:*
 - Consumes: nothing.
-- Produces: `tuxghost` importable package; `make check` runs mypy + ruff + pytest as one blocking gate.
+- Produces: =tuxghost= importable package; =make check= runs mypy + ruff + pytest as one blocking gate.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] *Step 1: Write the failing test*
 
-```python
+#+begin_src python
 # tests/test_scaffold.py
 def test_package_imports() -> None:
     import tuxghost
@@ -59,23 +66,23 @@ def test_tuxemon_submodules_are_importable() -> None:
 
     assert tuxemon.__file__ is not None
     assert local_session is not None
-```
+#+end_src
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] *Step 2: Run test to verify it fails*
 
-Run: `./.venv/bin/python -m pytest tests/test_scaffold.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'tuxghost'`
+Run: =./.venv/bin/python -m pytest tests/test_scaffold.py -v=
+Expected: FAIL with =ModuleNotFoundError: No module named 'tuxghost'=
 
-- [ ] **Step 3: Create the package and config**
+- [ ] *Step 3: Create the package and config*
 
-```python
+#+begin_src python
 # tuxghost/__init__.py
 """Deterministic trace core for Tuxemon."""
 
 __version__ = "0.1.0"
-```
+#+end_src
 
-```python
+#+begin_src python
 # tests/conftest.py
 """Make the vendored Tuxemon importable and its assets findable.
 
@@ -99,9 +106,9 @@ TUXEMON_DIR = Path(__file__).resolve().parent.parent / "tuxemon"
 
 sys.path.insert(0, str(TUXEMON_DIR))
 os.chdir(TUXEMON_DIR)
-```
+#+end_src
 
-```toml
+#+begin_src toml
 # pyproject.toml
 [project]
 name = "tuxghost"
@@ -130,9 +137,9 @@ target-version = "py312"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["slow: drives a real game loop for minutes; opt-in"]
-```
+#+end_src
 
-```makefile
+#+begin_src makefile
 # Makefile
 PY := ./.venv/bin/python
 
@@ -153,39 +160,38 @@ slow:
 	# exit 5 means "no tests collected", which is correct until Task 6 adds
 	# the first slow test. Any other non-zero status is a real failure.
 	PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 $(PY) -m pytest -q -m slow || [ $$? -eq 5 ]
-```
+#+end_src
 
-- [ ] **Step 4: Install dev deps and run the gate**
+- [ ] *Step 4: Install dev deps and run the gate*
 
-Run: `VIRTUAL_ENV=.venv uv pip install -e ".[dev]" && make check-fast`
+Run: =VIRTUAL_ENV=.venv uv pip install -e ".[dev]" && make check-fast=
 Expected: ruff clean, mypy clean, 1 test PASSES.
 
-- [ ] **Step 5: Commit**
+- [ ] *Step 5: Commit*
 
-```bash
+#+begin_src bash
 git add pyproject.toml Makefile tuxghost tests
 git commit -m "feat: scaffold the tuxghost package with blocking CI gates"
-```
+#+end_src
 
----
 
-### Task 2: Patch 0001 — make headless able to load graphics
+* Task 2: Patch 0001 — make headless able to load graphics
 
-Stock `headless_init()` calls neither `pg.init()` nor `pg.display.set_mode()`, so the first sprite load raises `pygame.error: No convert format has been set` and `pygame_menu` asserts `pygame is not initialized`. Creating the player NPC loads a sprite sheet, so **stock headless cannot create a player at all**.
+Stock =headless_init()= calls neither =pg.init()= nor =pg.display.set_mode()=, so the first sprite load raises =pygame.error: No convert format has been set= and =pygame_menu= asserts =pygame is not initialized=. Creating the player NPC loads a sprite sheet, so *stock headless cannot create a player at all*.
 
-**Files:**
-- Create: `patches/0001-headless-init-graphics.patch`
-- Create: `tuxghost/boot.py`
-- Create: `tests/test_boot.py`
-- Modify (via patch): `tuxemon/tuxemon/prepare.py` in `headless_init()`
+*Files:*
+- Create: =patches/0001-headless-init-graphics.patch=
+- Create: =tuxghost/boot.py=
+- Create: =tests/test_boot.py=
+- Modify (via patch): =tuxemon/tuxemon/prepare.py= in =headless_init()=
 
-**Interfaces:**
+*Interfaces:*
 - Consumes: nothing.
-- Produces: `tuxghost.boot.headless_context() -> DisplayContext` — initialises pygame headlessly and returns upstream's `DisplayContext`.
+- Produces: =tuxghost.boot.headless_context() -> DisplayContext= — initialises pygame headlessly and returns upstream's =DisplayContext=.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] *Step 1: Write the failing test*
 
-```python
+#+begin_src python
 # tests/test_boot.py
 def test_headless_context_can_convert_surfaces() -> None:
     """A converted surface is what sprite loading needs; without set_mode
@@ -199,16 +205,16 @@ def test_headless_context_can_convert_surfaces() -> None:
     surface = pg.Surface((8, 8), pg.SRCALPHA)
     converted = surface.convert_alpha()
     assert converted.get_size() == (8, 8)
-```
+#+end_src
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] *Step 2: Run test to verify it fails*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_boot.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'tuxghost.boot'`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_boot.py -v=
+Expected: FAIL with =ModuleNotFoundError: No module named 'tuxghost.boot'=
 
-- [ ] **Step 3: Write the patch**
+- [ ] *Step 3: Write the patch*
 
-```diff
+#+begin_src diff
 --- a/tuxemon/prepare.py
 +++ b/tuxemon/prepare.py
 @@ def headless_init() -> DisplayContext:
@@ -226,11 +232,11 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'tuxghost.boot'`
 +    pg.display.set_mode(CONFIG.resolution)
 +
      screen = pg.Surface(CONFIG.resolution)
-```
+#+end_src
 
-- [ ] **Step 4: Write the boot module**
+- [ ] *Step 4: Write the boot module*
 
-```python
+#+begin_src python
 # tuxghost/boot.py
 """Headless bootstrap for Tuxemon."""
 
@@ -256,45 +262,44 @@ def headless_context() -> Any:
     from tuxemon.prepare import headless_init
 
     return headless_init()
-```
+#+end_src
 
-- [ ] **Step 5: Apply the patch and run the test**
+- [ ] *Step 5: Apply the patch and run the test*
 
-Run: `cd tuxemon && git apply ../patches/0001-headless-init-graphics.patch && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_boot.py -v`
+Run: =cd tuxemon && git apply ../patches/0001-headless-init-graphics.patch && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_boot.py -v=
 Expected: PASS
 
-- [ ] **Step 6: Prove the patch is load-bearing (mutation gate)**
+- [ ] *Step 6: Prove the patch is load-bearing (mutation gate)*
 
-Run: `cd tuxemon && git stash && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_boot.py -v; cd tuxemon && git stash pop`
-Expected: FAIL without the patch. **Record the real error text in the commit message.** If it passes without the patch, the test is not pinning anything — stop and fix the test.
+Run: =cd tuxemon && git stash && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_boot.py -v; cd tuxemon && git stash pop=
+Expected: FAIL without the patch. *Record the real error text in the commit message.* If it passes without the patch, the test is not pinning anything — stop and fix the test.
 
-- [ ] **Step 7: Commit**
+- [ ] *Step 7: Commit*
 
-```bash
+#+begin_src bash
 git add patches/0001-headless-init-graphics.patch tuxghost/boot.py tests/test_boot.py
 git commit -m "feat: patch 0001 so headless can load graphics"
-```
+#+end_src
 
----
 
-### Task 3: Boot from a save (patch 0006) — a defined starting world
+* Task 3: Boot from a save (patch 0006) — a defined starting world
 
-The spike started the game via `GameLauncher`, which lands on the intro map and leaves a blocking `InputMenu`. Popping states to get past it broke twice with `ValueError: Missing state SinkState`, because the intro script later runs `unlock_controls`, which looks that state up by name. The executor must start from a **saved world** instead.
+The spike started the game via =GameLauncher=, which lands on the intro map and leaves a blocking =InputMenu=. Popping states to get past it broke twice with =ValueError: Missing state SinkState=, because the intro script later runs =unlock_controls=, which looks that state up by name. The executor must start from a *saved world* instead.
 
-**Files:**
-- Create: `patches/0006-headless-entry-from-save.patch`
-- Modify: `tuxghost/boot.py`
-- Modify: `tests/test_boot.py`
+*Files:*
+- Create: =patches/0006-headless-entry-from-save.patch=
+- Modify: =tuxghost/boot.py=
+- Modify: =tests/test_boot.py=
 
-**Interfaces:**
-- Consumes: `tuxghost.boot.headless_context()`.
+*Interfaces:*
+- Consumes: =tuxghost.boot.headless_context()=.
 - Produces:
-  - `tuxghost.boot.build_client(seed: int) -> tuple[Any, Any]` returning `(client, session)`.
-  - `tuxghost.boot.boot_from_save(save: SaveData, seed: int) -> tuple[Any, Any]` — loads a save into a headless client and pushes `WorldState`.
+  - =tuxghost.boot.build_client(seed: int) -> tuple[Any, Any]= returning =(client, session)=.
+  - =tuxghost.boot.boot_from_save(save: SaveData, seed: int) -> tuple[Any, Any]= — loads a save into a headless client and pushes =WorldState=.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] *Step 1: Write the failing test*
 
-```python
+#+begin_src python
 # append to tests/test_boot.py
 def test_boot_from_save_restores_position_and_party() -> None:
     from tuxghost.boot import boot_from_save, build_client, snapshot_save
@@ -306,16 +311,16 @@ def test_boot_from_save_restores_position_and_party() -> None:
     client2, session2 = boot_from_save(saved, seed=1234)
     assert [m.slug for m in session2.player.monsters] == ["rockitten"]
     assert session2.player.tile_pos == session.player.tile_pos
-```
+#+end_src
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] *Step 2: Run test to verify it fails*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_boot.py::test_boot_from_save_restores_position_and_party -v`
-Expected: FAIL with `ImportError: cannot import name 'boot_from_save'`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_boot.py::test_boot_from_save_restores_position_and_party -v=
+Expected: FAIL with =ImportError: cannot import name 'boot_from_save'=
 
-- [ ] **Step 3: Add the upstream entry point as patch 0006**
+- [ ] *Step 3: Add the upstream entry point as patch 0006*
 
-```diff
+#+begin_src diff
 --- a/tuxemon/main.py
 +++ b/tuxemon/main.py
 @@
@@ -330,11 +335,11 @@ Expected: FAIL with `ImportError: cannot import name 'boot_from_save'`
 +    client = HeadlessClient(config, context)
 +    local_session.set_client(client)
 +    return client
-```
+#+end_src
 
-- [ ] **Step 4: Implement the boot helpers**
+- [ ] *Step 4: Implement the boot helpers*
 
-```python
+#+begin_src python
 # append to tuxghost/boot.py
 def build_client(seed: int) -> tuple[Any, Any]:
     """Build a headless client on a fresh game at the given seed."""
@@ -390,41 +395,40 @@ def boot_from_save(save_data: Any, seed: int) -> tuple[Any, Any]:
     )
     local_session.load_state(save_data)
     return client, local_session
-```
+#+end_src
 
-- [ ] **Step 5: Run the test**
+- [ ] *Step 5: Run the test*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_boot.py -v`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_boot.py -v=
 Expected: PASS, 2 tests.
 
-- [ ] **Step 6: Commit**
+- [ ] *Step 6: Commit*
 
-```bash
+#+begin_src bash
 git add patches/0006-headless-entry-from-save.patch tuxghost/boot.py tests/test_boot.py
 git commit -m "feat: boot a headless world from a SaveData, not a state unwind"
-```
+#+end_src
 
----
 
-### Task 4: The single stepping loop and step-indexed input
+* Task 4: The single stepping loop and step-indexed input
 
-Upstream's `HeadlessClient.main()` derives its accumulator from `time.time()` and calls `time.sleep(0.001)`, so it cannot be used for reproducible execution. `InputManager.process_events()` in playback mode yields **one event per frame** regardless of when it was recorded, destroying timing. This task replaces both with one loop that both recording and execution use.
+Upstream's =HeadlessClient.main()= derives its accumulator from =time.time()= and calls =time.sleep(0.001)=, so it cannot be used for reproducible execution. =InputManager.process_events()= in playback mode yields *one event per frame* regardless of when it was recorded, destroying timing. This task replaces both with one loop that both recording and execution use.
 
-**Files:**
-- Create: `tuxghost/loop.py`
-- Create: `tests/test_loop.py`
+*Files:*
+- Create: =tuxghost/loop.py=
+- Create: =tests/test_loop.py=
 
-**Interfaces:**
-- Consumes: `build_client` from Task 3.
+*Interfaces:*
+- Consumes: =build_client= from Task 3.
 - Produces:
-  - `tuxghost.loop.InputSchedule` — `dict[int, list[tuple[int, float]]]`, mapping step -> list of `(button, value)`.
-  - `tuxghost.loop.install_schedule(client, schedule: InputSchedule) -> None`
-  - `tuxghost.loop.run_steps(client, n: int, hook: Callable[[int], None] | None = None) -> None`
-  - `tuxghost.loop.STEP_RATE = 60` and `FIXED_DT = 1.0 / 60.0`
+  - =tuxghost.loop.InputSchedule= — =dict[int, list[tuple[int, float]]]=, mapping step -> list of =(button, value)=.
+  - =tuxghost.loop.install_schedule(client, schedule: InputSchedule) -> None=
+  - =tuxghost.loop.run_steps(client, n: int, hook: Callable[[int], None] | None = None) -> None=
+  - =tuxghost.loop.STEP_RATE = 60= and =FIXED_DT = 1.0 / 60.0=
 
-- [ ] **Step 1: Write the failing test**
+- [ ] *Step 1: Write the failing test*
 
-```python
+#+begin_src python
 # tests/test_loop.py
 from tuxghost.loop import FIXED_DT, STEP_RATE, install_schedule, run_steps
 
@@ -455,16 +459,16 @@ def test_schedule_delivers_events_on_exact_steps() -> None:
     run_steps(client, 12, hook=lambda i: step_counter.__setitem__(0, i))
 
     assert [s for s, _b in seen] == [5, 9]
-```
+#+end_src
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] *Step 2: Run test to verify it fails*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_loop.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'tuxghost.loop'`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_loop.py -v=
+Expected: FAIL with =ModuleNotFoundError: No module named 'tuxghost.loop'=
 
-- [ ] **Step 3: Implement the loop**
+- [ ] *Step 3: Implement the loop*
 
-```python
+#+begin_src python
 # tuxghost/loop.py
 """The one stepping loop. A second one would fail nothing, so there is not one."""
 
@@ -508,40 +512,39 @@ def run_steps(
         if hook is not None:
             hook(i)
         client.update(FIXED_DT)
-```
+#+end_src
 
-- [ ] **Step 4: Run the test**
+- [ ] *Step 4: Run the test*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_loop.py -v`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_loop.py -v=
 Expected: PASS, 2 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] *Step 5: Commit*
 
-```bash
+#+begin_src bash
 git add tuxghost/loop.py tests/test_loop.py
 git commit -m "feat: one step-indexed stepping loop for record and execute"
-```
+#+end_src
 
----
 
-### Task 5: The state digest and its discrimination test
+* Task 5: The state digest and its discrimination test
 
-**This is the task that keeps the whole project honest.** During the spike the first digest reported "deterministic" across nine runs — including unseeded runs and three different seeds — because it captured nothing that changed. A digest that cannot discriminate makes every downstream test vacuous.
+*This is the task that keeps the whole project honest.* During the spike the first digest reported "deterministic" across nine runs — including unseeded runs and three different seeds — because it captured nothing that changed. A digest that cannot discriminate makes every downstream test vacuous.
 
-**Files:**
-- Create: `tuxghost/digest.py`
-- Create: `tests/test_digest.py`
+*Files:*
+- Create: =tuxghost/digest.py=
+- Create: =tests/test_digest.py=
 
-**Interfaces:**
-- Consumes: `build_client`, `run_steps`, `install_schedule`.
+*Interfaces:*
+- Consumes: =build_client=, =run_steps=, =install_schedule=.
 - Produces:
-  - `tuxghost.digest.EXEMPTIONS: dict[str, str]` — field name -> the defect it waits on. Target size zero.
-  - `tuxghost.digest.state_of(session) -> dict[str, Any]`
-  - `tuxghost.digest.digest_of(session) -> str` (sha256 hex)
+  - =tuxghost.digest.EXEMPTIONS: dict[str, str]= — field name -> the defect it waits on. Target size zero.
+  - =tuxghost.digest.state_of(session) -> dict[str, Any]=
+  - =tuxghost.digest.digest_of(session) -> str= (sha256 hex)
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] *Step 1: Write the failing tests*
 
-```python
+#+begin_src python
 # tests/test_digest.py
 import pytest
 
@@ -590,16 +593,16 @@ def test_exemptions_each_name_a_defect() -> None:
         "Battle.timestamp becomes deterministic under patch 0004; exempting "
         "it would re-hide the bug the spike spent a bisect finding"
     )
-```
+#+end_src
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] *Step 2: Run tests to verify they fail*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_digest.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'tuxghost.digest'`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_digest.py -v=
+Expected: FAIL with =ModuleNotFoundError: No module named 'tuxghost.digest'=
 
-- [ ] **Step 3: Implement the digest**
+- [ ] *Step 3: Implement the digest*
 
-```python
+#+begin_src python
 # tuxghost/digest.py
 """Canonical game-state digest.
 
@@ -657,37 +660,36 @@ def state_of(session: Any) -> dict[str, Any]:
 def digest_of(session: Any) -> str:
     blob = json.dumps(state_of(session), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
-```
+#+end_src
 
-- [ ] **Step 4: Run the tests**
+- [ ] *Step 4: Run the tests*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_digest.py -v`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_digest.py -v=
 Expected: PASS, 4 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] *Step 5: Commit*
 
-```bash
+#+begin_src bash
 git add tuxghost/digest.py tests/test_digest.py
 git commit -m "feat: canonical state digest with a discrimination control"
-```
+#+end_src
 
----
 
-### Task 6: Close the spec's open question — battle to world transition
+* Task 6: Close the spec's open question — battle to world transition
 
-The spec parks one measurement that could still change the format: whether combat stays deterministic through a **completed battle, exited back to the world**. Every spike run ended with `CombatState` still on the stack, so capture, evolution and the battle exit are unmeasured. If this diverges, `verify` needs a divergence-tolerant mode and the format changes; if it holds, the format is safe.
+The spec parks one measurement that could still change the format: whether combat stays deterministic through a *completed battle, exited back to the world*. Every spike run ended with =CombatState= still on the stack, so capture, evolution and the battle exit are unmeasured. If this diverges, =verify= needs a divergence-tolerant mode and the format changes; if it holds, the format is safe.
 
-**Files:**
-- Create: `tests/test_combat_determinism.py`
-- Create: `docs/2026-08-25-battle-exit-measurement.org`
+*Files:*
+- Create: =tests/test_combat_determinism.py=
+- Create: =docs/2026-08-25-battle-exit-measurement.org=
 
-**Interfaces:**
-- Consumes: `build_client`, `install_schedule`, `run_steps`, `digest_of`.
+*Interfaces:*
+- Consumes: =build_client=, =install_schedule=, =run_steps=, =digest_of=.
 - Produces: a recorded measurement; no new API.
 
-- [ ] **Step 1: Write the test that drives a battle to its exit**
+- [ ] *Step 1: Write the test that drives a battle to its exit*
 
-```python
+#+begin_src python
 # tests/test_combat_determinism.py
 import os
 
@@ -748,42 +750,41 @@ def test_battle_is_deterministic_through_its_exit() -> None:
     b, exited_b = _battle_run(1234, 200_000)
     assert exited_a == exited_b
     assert a == b, "combat diverged; verify needs a divergence-tolerant mode"
-```
+#+end_src
 
-- [ ] **Step 2: Run it and record what actually happens**
+- [ ] *Step 2: Run it and record what actually happens*
 
-Run: `PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 ./.venv/bin/python -m pytest tests/test_combat_determinism.py -v -s`
-Expected: PASS. **If `exited_a` is False, the battle still did not end** — raise the step budget and rerun before believing the result. Report the real values.
+Run: =PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 ./.venv/bin/python -m pytest tests/test_combat_determinism.py -v -s=
+Expected: PASS. *If =exited_a= is False, the battle still did not end* — raise the step budget and rerun before believing the result. Report the real values.
 
-- [ ] **Step 3: Write up the measurement**
+- [ ] *Step 3: Write up the measurement*
 
-Create `docs/2026-08-25-battle-exit-measurement.org` recording: the step budget needed, whether the battle actually exited, both digests, and — if it diverged — the field-level diff. State plainly whether the format is safe.
+Create =docs/2026-08-25-battle-exit-measurement.org= recording: the step budget needed, whether the battle actually exited, both digests, and — if it diverged — the field-level diff. State plainly whether the format is safe.
 
-- [ ] **Step 4: Commit**
+- [ ] *Step 4: Commit*
 
-```bash
+#+begin_src bash
 git add tests/test_combat_determinism.py docs/2026-08-25-battle-exit-measurement.org
 git commit -m "test: measure determinism through a completed battle exit"
-```
+#+end_src
 
----
 
-### Task 7: Patch 0002 — seed the weather RNG
+* Task 7: Patch 0002 — seed the weather RNG
 
-`WorldWeatherManager` is constructed seedless at `base_client.py:189`, and `world/weather.py:133` then builds `random.Random()` from OS entropy. It is the **only** instance-RNG in the codebase, and it accounted for all 152 unseeded draws the spike measured on a walking route. It already accepts a `seed`; it is simply never given one.
+=WorldWeatherManager= is constructed seedless at =base_client.py:189=, and =world/weather.py:133= then builds =random.Random()= from OS entropy. It is the *only* instance-RNG in the codebase, and it accounted for all 152 unseeded draws the spike measured on a walking route. It already accepts a =seed=; it is simply never given one.
 
-**Files:**
-- Create: `patches/0002-seed-weather-rng.patch`
-- Create: `tuxghost/determinism.py`
-- Create: `tests/test_determinism_sources.py`
+*Files:*
+- Create: =patches/0002-seed-weather-rng.patch=
+- Create: =tuxghost/determinism.py=
+- Create: =tests/test_determinism_sources.py=
 
-**Interfaces:**
+*Interfaces:*
 - Consumes: nothing.
-- Produces: `tuxghost.determinism.seed_all(seed: int) -> None` — seeds every entropy source from one master seed.
+- Produces: =tuxghost.determinism.seed_all(seed: int) -> None= — seeds every entropy source from one master seed.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] *Step 1: Write the failing test*
 
-```python
+#+begin_src python
 # tests/test_determinism_sources.py
 import random
 
@@ -809,16 +810,16 @@ def test_master_seed_controls_the_global_generator() -> None:
     first = [random.random() for _ in range(3)]
     seed_all(7)
     assert [random.random() for _ in range(3)] == first
-```
+#+end_src
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] *Step 2: Run test to verify it fails*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_determinism_sources.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'tuxghost.determinism'`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_determinism_sources.py -v=
+Expected: FAIL with =ModuleNotFoundError: No module named 'tuxghost.determinism'=
 
-- [ ] **Step 3: Write the patch**
+- [ ] *Step 3: Write the patch*
 
-```diff
+#+begin_src diff
 --- a/tuxemon/base_client.py
 +++ b/tuxemon/base_client.py
 @@
@@ -826,19 +827,19 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'tuxghost.determinism'
 +        self.weather_manager = WorldWeatherManager(
 +            seed=config.deterministic_seed
 +        )
-```
+#+end_src
 
-```diff
+#+begin_src diff
 --- a/tuxemon/config.py
 +++ b/tuxemon/config.py
 @@
 +        # None keeps upstream behaviour: weather seeds from OS entropy.
 +        self.deterministic_seed: int | None = None
-```
+#+end_src
 
-- [ ] **Step 4: Implement seed_all**
+- [ ] *Step 4: Implement seed_all*
 
-```python
+#+begin_src python
 # tuxghost/determinism.py
 """Seed every entropy source from one master seed.
 
@@ -860,43 +861,42 @@ def seed_all(seed: int) -> None:
     from tuxemon.user_config import CONFIG
 
     CONFIG.deterministic_seed = seed
-```
+#+end_src
 
-- [ ] **Step 5: Apply the patch and run the tests**
+- [ ] *Step 5: Apply the patch and run the tests*
 
-Run: `cd tuxemon && git apply ../patches/0002-seed-weather-rng.patch && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_determinism_sources.py -v`
+Run: =cd tuxemon && git apply ../patches/0002-seed-weather-rng.patch && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_determinism_sources.py -v=
 Expected: PASS, 2 tests.
 
-- [ ] **Step 6: Mutation gate — prove the patch is load-bearing**
+- [ ] *Step 6: Mutation gate — prove the patch is load-bearing*
 
-Run: `cd tuxemon && git stash && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_determinism_sources.py::test_weather_rng_is_seeded_from_the_master_seed -v; cd tuxemon && git stash pop`
+Run: =cd tuxemon && git stash && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_determinism_sources.py::test_weather_rng_is_seeded_from_the_master_seed -v; cd tuxemon && git stash pop=
 Expected: FAIL. Record the real draws in the commit message.
 
-- [ ] **Step 7: Commit**
+- [ ] *Step 7: Commit*
 
-```bash
+#+begin_src bash
 git add patches/0002-seed-weather-rng.patch tuxghost/determinism.py tests/test_determinism_sources.py
 git commit -m "feat: patch 0002 seeds the only instance RNG in the codebase"
-```
+#+end_src
 
----
 
-### Task 8: Patch 0003 — seeded uuid factory
+* Task 8: Patch 0003 — seeded uuid factory
 
-With weather seeded, three same-seed spike runs still diverged by exactly one field: a monster `instance_id`. `uuid4()` draws from OS entropy and ignores `random.seed()` entirely.
+With weather seeded, three same-seed spike runs still diverged by exactly one field: a monster =instance_id=. =uuid4()= draws from OS entropy and ignores =random.seed()= entirely.
 
-**Files:**
-- Create: `patches/0003-seeded-uuid-factory.patch`
-- Modify: `tuxghost/determinism.py`
-- Modify: `tests/test_determinism_sources.py`
+*Files:*
+- Create: =patches/0003-seeded-uuid-factory.patch=
+- Modify: =tuxghost/determinism.py=
+- Modify: =tests/test_determinism_sources.py=
 
-**Interfaces:**
-- Consumes: `seed_all`.
-- Produces: `tuxemon.core.ids.new_id() -> UUID` (added by the patch); `seed_all` also seeds it.
+*Interfaces:*
+- Consumes: =seed_all=.
+- Produces: =tuxemon.core.ids.new_id() -> UUID= (added by the patch); =seed_all= also seeds it.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] *Step 1: Write the failing test*
 
-```python
+#+begin_src python
 # append to tests/test_determinism_sources.py
 def test_entity_ids_are_reproducible() -> None:
     from tuxghost.boot import build_client
@@ -909,18 +909,18 @@ def test_entity_ids_are_reproducible() -> None:
 
     assert ids(1234) == ids(1234)
     assert ids(1234) != ids(99)
-```
+#+end_src
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] *Step 2: Run test to verify it fails*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_determinism_sources.py::test_entity_ids_are_reproducible -v`
-Expected: FAIL — the two `ids(1234)` lists differ.
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_determinism_sources.py::test_entity_ids_are_reproducible -v=
+Expected: FAIL — the two =ids(1234)= lists differ.
 
-- [ ] **Step 3: Write the patch**
+- [ ] *Step 3: Write the patch*
 
-Create `tuxemon/core/ids.py` and route the five load-bearing call sites through it (`entity/entity.py:218`, `battle.py:29`, `technique/technique.py:56`, `status/status.py:46`, `session.py:42`):
+Create =tuxemon/core/ids.py= and route the five load-bearing call sites through it (=entity/entity.py:218=, =battle.py:29=, =technique/technique.py:56=, =status/status.py:46=, =session.py:42=):
 
-```diff
+#+begin_src diff
 --- /dev/null
 +++ b/tuxemon/core/ids.py
 +"""Central identifier factory, so ids can be made reproducible."""
@@ -942,63 +942,62 @@ Create `tuxemon/core/ids.py` and route the five load-bearing call sites through 
 +    if _rng is None:
 +        return uuid.uuid4()
 +    return uuid.UUID(int=_rng.getrandbits(128), version=4)
-```
+#+end_src
 
-```diff
+#+begin_src diff
 --- a/tuxemon/entity/entity.py
 +++ b/tuxemon/entity/entity.py
 @@
 -        self.instance_id = instance_id or uuid4()
 +        self.instance_id = instance_id or new_id()
-```
+#+end_src
 
-- [ ] **Step 4: Extend seed_all**
+- [ ] *Step 4: Extend seed_all*
 
-```python
+#+begin_src python
 # in tuxghost/determinism.py, inside seed_all(), after CONFIG assignment
     from tuxemon.core.ids import seed_ids
 
     seed_ids(seed)
-```
+#+end_src
 
-- [ ] **Step 5: Apply and run**
+- [ ] *Step 5: Apply and run*
 
-Run: `cd tuxemon && git apply ../patches/0003-seeded-uuid-factory.patch && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_determinism_sources.py -v`
+Run: =cd tuxemon && git apply ../patches/0003-seeded-uuid-factory.patch && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_determinism_sources.py -v=
 Expected: PASS, 3 tests.
 
-- [ ] **Step 6: Mutation gate**
+- [ ] *Step 6: Mutation gate*
 
-Revert patch 0003 only, rerun `test_entity_ids_are_reproducible`. Expected: FAIL. Restore.
+Revert patch 0003 only, rerun =test_entity_ids_are_reproducible=. Expected: FAIL. Restore.
 
-- [ ] **Step 7: Drop the now-closed exemptions**
+- [ ] *Step 7: Drop the now-closed exemptions*
 
-Remove `uuid` and `instance_id` from `EXEMPTIONS` in `tuxghost/digest.py`. Run `make check-fast`; the digest tests must still pass.
+Remove =uuid= and =instance_id= from =EXEMPTIONS= in =tuxghost/digest.py=. Run =make check-fast=; the digest tests must still pass.
 
-- [ ] **Step 8: Commit**
+- [ ] *Step 8: Commit*
 
-```bash
+#+begin_src bash
 git add patches/0003-seeded-uuid-factory.patch tuxghost/determinism.py tuxghost/digest.py tests/test_determinism_sources.py
 git commit -m "feat: patch 0003 makes entity ids reproducible; two exemptions closed"
-```
+#+end_src
 
----
 
-### Task 9: Patch 0004 — the injectable clock
+* Task 9: Patch 0004 — the injectable clock
 
-The highest-value patch. `TimeHandler.get_current_time()` is the single `datetime.now()` choke point — both `get_ordinal()` and `get_time_variables()` route through it — and `TimeHandler` is constructed in exactly one place, `session.py:43`. Separately, `battle.py:33` stamps `time.time()` into every persisted battle record. That field was the **entire** divergence between two 120,000-step runs.
+The highest-value patch. =TimeHandler.get_current_time()= is the single =datetime.now()= choke point — both =get_ordinal()= and =get_time_variables()= route through it — and =TimeHandler= is constructed in exactly one place, =session.py:43=. Separately, =battle.py:33= stamps =time.time()= into every persisted battle record. That field was the *entire* divergence between two 120,000-step runs.
 
-**Files:**
-- Create: `patches/0004-injectable-clock.patch`
-- Modify: `tuxghost/determinism.py`
-- Create: `tests/test_clock.py`
+*Files:*
+- Create: =patches/0004-injectable-clock.patch=
+- Modify: =tuxghost/determinism.py=
+- Create: =tests/test_clock.py=
 
-**Interfaces:**
-- Consumes: `seed_all`.
-- Produces: `tuxemon.core.clock.set_epoch(epoch: float | None) -> None` and `now() -> float`; `tuxghost.determinism.pin_clock(epoch: int) -> None`.
+*Interfaces:*
+- Consumes: =seed_all=.
+- Produces: =tuxemon.core.clock.set_epoch(epoch: float | None) -> None= and =now() -> float=; =tuxghost.determinism.pin_clock(epoch: int) -> None=.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] *Step 1: Write the failing test*
 
-```python
+#+begin_src python
 # tests/test_clock.py
 from tuxghost.boot import build_client
 from tuxghost.determinism import pin_clock, seed_all
@@ -1036,16 +1035,16 @@ def test_battle_timestamps_are_pinned() -> None:
 
     pin_clock(1787694000)
     assert Battle().timestamp == Battle().timestamp == 1787694000.0
-```
+#+end_src
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] *Step 2: Run tests to verify they fail*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_clock.py -v`
-Expected: FAIL with `ImportError: cannot import name 'pin_clock'`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_clock.py -v=
+Expected: FAIL with =ImportError: cannot import name 'pin_clock'=
 
-- [ ] **Step 3: Write the patch**
+- [ ] *Step 3: Write the patch*
 
-```diff
+#+begin_src diff
 --- /dev/null
 +++ b/tuxemon/core/clock.py
 +"""Injectable wall clock, so recorded state can be reproduced.
@@ -1072,9 +1071,9 @@ Expected: FAIL with `ImportError: cannot import name 'pin_clock'`
 +
 +def now_datetime() -> datetime:
 +    return datetime.fromtimestamp(now())
-```
+#+end_src
 
-```diff
+#+begin_src diff
 --- a/tuxemon/time_handler.py
 +++ b/tuxemon/time_handler.py
 @@
@@ -1083,69 +1082,68 @@ Expected: FAIL with `ImportError: cannot import name 'pin_clock'`
 -        return datetime.now()
 +        """Returns the current datetime, honouring any pinned epoch."""
 +        return now_datetime()
-```
+#+end_src
 
-```diff
+#+begin_src diff
 --- a/tuxemon/battle.py
 +++ b/tuxemon/battle.py
 @@
 -        self.timestamp: float = time.time()
 +        self.timestamp: float = now()
-```
+#+end_src
 
-Apply the same substitution to the three `time.time()` reads in `tuxemon/session.py` (`_start_timestamp`, and both in `get_state`).
+Apply the same substitution to the three =time.time()= reads in =tuxemon/session.py= (=_start_timestamp=, and both in =get_state=).
 
-- [ ] **Step 4: Implement pin_clock**
+- [ ] *Step 4: Implement pin_clock*
 
-```python
+#+begin_src python
 # append to tuxghost/determinism.py
 def pin_clock(epoch: int) -> None:
     """Pin all wall-clock reads to a fixed epoch (seconds since 1970)."""
     from tuxemon.core.clock import set_epoch
 
     set_epoch(float(epoch))
-```
+#+end_src
 
-- [ ] **Step 5: Apply and run**
+- [ ] *Step 5: Apply and run*
 
-Run: `cd tuxemon && git apply ../patches/0004-injectable-clock.patch && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_clock.py -v`
+Run: =cd tuxemon && git apply ../patches/0004-injectable-clock.patch && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_clock.py -v=
 Expected: PASS, 3 tests.
 
-- [ ] **Step 6: Mutation gate**
+- [ ] *Step 6: Mutation gate*
 
-Revert patch 0004 only, rerun `test_battle_timestamps_are_pinned`. Expected: FAIL, the two timestamps differ. Restore.
+Revert patch 0004 only, rerun =test_battle_timestamps_are_pinned=. Expected: FAIL, the two timestamps differ. Restore.
 
-- [ ] **Step 7: Empty the exemption register**
+- [ ] *Step 7: Empty the exemption register*
 
-Remove `start_time`, `duration` and `total_playtime` from `EXEMPTIONS`, leaving `EXEMPTIONS = {}`. Run `make check-fast`. All digest tests must still pass — if any now fails, a real defect has surfaced; fix it rather than re-adding the exemption.
+Remove =start_time=, =duration= and =total_playtime= from =EXEMPTIONS=, leaving =EXEMPTIONS = {}=. Run =make check-fast=. All digest tests must still pass — if any now fails, a real defect has surfaced; fix it rather than re-adding the exemption.
 
-- [ ] **Step 8: Commit**
+- [ ] *Step 8: Commit*
 
-```bash
+#+begin_src bash
 git add patches/0004-injectable-clock.patch tuxghost/determinism.py tuxghost/digest.py tests/test_clock.py
 git commit -m "feat: patch 0004 pins the clock; exemption register now empty"
-```
+#+end_src
 
----
 
-### Task 10: The trace format and its preconditions
+* Task 10: The trace format and its preconditions
 
-**Files:**
-- Create: `tuxghost/trace.py`
-- Create: `tests/test_trace.py`
+*Files:*
+- Create: =tuxghost/trace.py=
+- Create: =tests/test_trace.py=
 
-**Interfaces:**
+*Interfaces:*
 - Consumes: nothing.
 - Produces:
-  - `tuxghost.trace.Trace` (pydantic model) with `.header`, `.initial_state`, `.inputs`, `.provenance`
-  - `tuxghost.trace.TraceHeader`, `tuxghost.trace.Provenance`
-  - `tuxghost.trace.read(path: Path, allow_mismatch: bool = False) -> Trace`
-  - `tuxghost.trace.write(trace: Trace, path: Path) -> None`
-  - `tuxghost.trace.Refused` (exception), `tuxghost.trace.FORMAT_VERSION = 1`
+  - =tuxghost.trace.Trace= (pydantic model) with =.header=, =.initial_state=, =.inputs=, =.provenance=
+  - =tuxghost.trace.TraceHeader=, =tuxghost.trace.Provenance=
+  - =tuxghost.trace.read(path: Path, allow_mismatch: bool = False) -> Trace=
+  - =tuxghost.trace.write(trace: Trace, path: Path) -> None=
+  - =tuxghost.trace.Refused= (exception), =tuxghost.trace.FORMAT_VERSION = 1=
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] *Step 1: Write the failing tests*
 
-```python
+#+begin_src python
 # tests/test_trace.py
 import json
 
@@ -1240,16 +1238,16 @@ def test_round_trips(tmp_path) -> None:
     out = tmp_path / "out.tuxghost"
     write(trace, out)
     assert read(out).header == trace.header
-```
+#+end_src
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] *Step 2: Run tests to verify they fail*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_trace.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'tuxghost.trace'`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_trace.py -v=
+Expected: FAIL with =ModuleNotFoundError: No module named 'tuxghost.trace'=
 
-- [ ] **Step 3: Implement the format**
+- [ ] *Step 3: Implement the format*
 
-```python
+#+begin_src python
 # tuxghost/trace.py
 """Trace format version 1.
 
@@ -1363,35 +1361,34 @@ def read(path: Path, allow_mismatch: bool = False) -> Trace:
 
 def write(trace: Trace, path: Path) -> None:
     Path(path).write_text(trace.model_dump_json(indent=2))
-```
+#+end_src
 
-- [ ] **Step 4: Run the tests**
+- [ ] *Step 4: Run the tests*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_trace.py -v`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_trace.py -v=
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] *Step 5: Commit*
 
-```bash
+#+begin_src bash
 git add tuxghost/trace.py tests/test_trace.py
 git commit -m "feat: trace format v1 with refuse-on-missing-clock preconditions"
-```
+#+end_src
 
----
 
-### Task 11: The recorder
+* Task 11: The recorder
 
-**Files:**
-- Create: `tuxghost/record.py`
-- Create: `tests/test_record.py`
+*Files:*
+- Create: =tuxghost/record.py=
+- Create: =tests/test_record.py=
 
-**Interfaces:**
-- Consumes: `Trace`, `TraceHeader`, `Provenance`, `snapshot_save`, `digest_of`, `run_steps`.
-- Produces: `tuxghost.record.Recorder` with `.observe(step, button, value)` and `.finish(step_count) -> Trace`.
+*Interfaces:*
+- Consumes: =Trace=, =TraceHeader=, =Provenance=, =snapshot_save=, =digest_of=, =run_steps=.
+- Produces: =tuxghost.record.Recorder= with =.observe(step, button, value)= and =.finish(step_count) -> Trace=.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] *Step 1: Write the failing test*
 
-```python
+#+begin_src python
 # tests/test_record.py
 from tuxghost.record import Recorder
 
@@ -1410,16 +1407,16 @@ def test_recorder_indexes_inputs_by_step_not_arrival_order() -> None:
     assert trace.header.step_rate == 60
     assert trace.header.clock_epoch == 1787694000
     assert trace.header.final_digest, "finish() must record the state reached"
-```
+#+end_src
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] *Step 2: Run test to verify it fails*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_record.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'tuxghost.record'`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_record.py -v=
+Expected: FAIL with =ModuleNotFoundError: No module named 'tuxghost.record'=
 
-- [ ] **Step 3: Implement the recorder**
+- [ ] *Step 3: Implement the recorder*
 
-```python
+#+begin_src python
 # tuxghost/record.py
 """Records a step-indexed trace from a live session."""
 
@@ -1502,40 +1499,39 @@ class Recorder:
                 recorder=self._recorder, model=self._model
             ),
         )
-```
+#+end_src
 
-- [ ] **Step 4: Run the test**
+- [ ] *Step 4: Run the test*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_record.py -v`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_record.py -v=
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] *Step 5: Commit*
 
-```bash
+#+begin_src bash
 git add tuxghost/record.py tests/test_record.py
 git commit -m "feat: step-indexed trace recorder"
-```
+#+end_src
 
----
 
-### Task 12: The executor, verify, and divergence reporting
+* Task 12: The executor, verify, and divergence reporting
 
-**Files:**
-- Create: `tuxghost/execute.py`
-- Create: `tuxghost/compare.py`
-- Create: `tests/test_execute.py`
+*Files:*
+- Create: =tuxghost/execute.py=
+- Create: =tuxghost/compare.py=
+- Create: =tests/test_execute.py=
 
-**Interfaces:**
+*Interfaces:*
 - Consumes: everything above.
 - Produces:
-  - `tuxghost.execute.execute(trace: Trace, checkpoint: int = 0) -> ExecutionResult` with `.final_digest`, `.checkpoints: list[tuple[int, str]]`
-  - `tuxghost.execute.verify(trace: Trace) -> int` returning 0 / 1 / 2
-  - `tuxghost.compare.first_difference(a: dict, b: dict) -> str | None` — dotted field path
-  - `tuxghost.compare.first_divergent_step(a: list[tuple[int, str]], b: list[tuple[int, str]]) -> int | None` — earliest checkpoint whose digests differ
+  - =tuxghost.execute.execute(trace: Trace, checkpoint: int = 0) -> ExecutionResult= with =.final_digest=, =.checkpoints: list[tuple[int, str]]=
+  - =tuxghost.execute.verify(trace: Trace) -> int= returning 0 / 1 / 2
+  - =tuxghost.compare.first_difference(a: dict, b: dict) -> str | None= — dotted field path
+  - =tuxghost.compare.first_divergent_step(a: list[tuple[int, str]], b: list[tuple[int, str]]) -> int | None= — earliest checkpoint whose digests differ
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] *Step 1: Write the failing tests*
 
-```python
+#+begin_src python
 # tests/test_execute.py
 from tuxghost.compare import first_difference
 
@@ -1571,16 +1567,16 @@ def test_verify_returns_zero_for_a_self_consistent_trace(tmp_path) -> None:
     trace = Recorder(session, seed=1234, clock_epoch=1787694000,
                      recorder="offline-agent").finish(step_count=120)
     assert verify(trace) == 0
-```
+#+end_src
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] *Step 2: Run tests to verify they fail*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_execute.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'tuxghost.compare'`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_execute.py -v=
+Expected: FAIL with =ModuleNotFoundError: No module named 'tuxghost.compare'=
 
-- [ ] **Step 3: Implement comparison**
+- [ ] *Step 3: Implement comparison*
 
-```python
+#+begin_src python
 # tuxghost/compare.py
 """Field-level divergence reporting."""
 
@@ -1626,11 +1622,11 @@ def first_divergent_step(
         if digest_a != digest_b:
             return step_a
     return None
-```
+#+end_src
 
-- [ ] **Step 4: Implement the executor**
+- [ ] *Step 4: Implement the executor*
 
-```python
+#+begin_src python
 # tuxghost/execute.py
 """Offline executor. Exit codes: 0 matched, 1 diverged, 2 refused."""
 
@@ -1695,35 +1691,34 @@ def verify(trace: Trace) -> int:
     except Refused:
         return 2
     return 0 if result.final_digest == trace.header.final_digest else 1
-```
+#+end_src
 
-- [ ] **Step 5: Run the tests**
+- [ ] *Step 5: Run the tests*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_execute.py -v`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_execute.py -v=
 Expected: PASS, 3 tests.
 
-- [ ] **Step 6: Commit**
+- [ ] *Step 6: Commit*
 
-```bash
+#+begin_src bash
 git add tuxghost/execute.py tuxghost/compare.py tests/test_execute.py
 git commit -m "feat: offline executor with verify and field-level divergence"
-```
+#+end_src
 
----
 
-### Task 13: The CLI
+* Task 13: The CLI
 
-**Files:**
-- Create: `tuxghost/cli.py`
-- Create: `tests/test_cli.py`
+*Files:*
+- Create: =tuxghost/cli.py=
+- Create: =tests/test_cli.py=
 
-**Interfaces:**
-- Consumes: `read`, `write`, `execute`, `verify`, `first_difference`.
-- Produces: `tuxghost.cli.main(argv: list[str] | None = None) -> int`.
+*Interfaces:*
+- Consumes: =read=, =write=, =execute=, =verify=, =first_difference=.
+- Produces: =tuxghost.cli.main(argv: list[str] | None = None) -> int=.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] *Step 1: Write the failing tests*
 
-```python
+#+begin_src python
 # tests/test_cli.py
 import pytest
 
@@ -1745,16 +1740,16 @@ def test_info_refuses_a_missing_clock_epoch(tmp_path) -> None:
     path = tmp_path / "bad.tuxghost"
     path.write_text(json.dumps({"format_version": 1, "header": {"seed": 1}}))
     assert main(["info", str(path)]) == 2
-```
+#+end_src
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] *Step 2: Run tests to verify they fail*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_cli.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'tuxghost.cli'`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_cli.py -v=
+Expected: FAIL with =ModuleNotFoundError: No module named 'tuxghost.cli'=
 
-- [ ] **Step 3: Implement the CLI**
+- [ ] *Step 3: Implement the CLI*
 
-```python
+#+begin_src python
 # tuxghost/cli.py
 """tuxghost command line."""
 
@@ -1891,11 +1886,11 @@ def _record(args: argparse.Namespace) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-```
+#+end_src
 
-- [ ] **Step 4: Add tests for the two remaining subcommands**
+- [ ] *Step 4: Add tests for the two remaining subcommands*
 
-```python
+#+begin_src python
 # append to tests/test_cli.py
 def test_compare_reports_a_human_recorder_as_a_finding(tmp_path, capsys) -> None:
     from tuxghost.record import Recorder
@@ -1916,35 +1911,34 @@ def test_compare_reports_a_human_recorder_as_a_finding(tmp_path, capsys) -> None
     out = capsys.readouterr().out
     assert "finding:" in out and "human loop" in out
     assert "traces agree" in out
-```
+#+end_src
 
-- [ ] **Step 5: Run the tests**
+- [ ] *Step 5: Run the tests*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_cli.py -v`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_cli.py -v=
 Expected: PASS, 4 tests.
 
-- [ ] **Step 6: Commit**
+- [ ] *Step 6: Commit*
 
-```bash
+#+begin_src bash
 git add tuxghost/cli.py tests/test_cli.py
 git commit -m "feat: tuxghost CLI with compare, record, and refused flag combinations"
-```
+#+end_src
 
----
 
-### Task 14: Golden traces, round trip, and the long-horizon probe
+* Task 14: Golden traces, round trip, and the long-horizon probe
 
-**Files:**
-- Create: `tests/golden/walk_1234.tuxghost`
-- Create: `tests/test_golden.py`
+*Files:*
+- Create: =tests/golden/walk_1234.tuxghost=
+- Create: =tests/test_golden.py=
 
-**Interfaces:**
+*Interfaces:*
 - Consumes: everything above.
 - Produces: a committed golden trace plus its expected digest.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] *Step 1: Write the failing tests*
 
-```python
+#+begin_src python
 # tests/test_golden.py
 import os
 from pathlib import Path
@@ -1975,16 +1969,16 @@ def test_long_horizon_trace_is_stable() -> None:
     trace = read(GOLDEN)
     trace.header.step_count = 120_000
     assert execute(trace).final_digest == execute(trace).final_digest
-```
+#+end_src
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] *Step 2: Run tests to verify they fail*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_golden.py -v`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_golden.py -v=
 Expected: FAIL — the golden file does not exist.
 
-- [ ] **Step 3: Generate the golden trace**
+- [ ] *Step 3: Generate the golden trace*
 
-```bash
+#+begin_src bash
 PYTHONHASHSEED=0 ./.venv/bin/python - <<'PY'
 from pathlib import Path
 from tuxghost.boot import build_client
@@ -2007,39 +2001,38 @@ write(trace, out)
 out.with_suffix(".digest").write_text(execute(trace).final_digest + "\n")
 print("wrote", out)
 PY
-```
+#+end_src
 
-- [ ] **Step 4: Run the golden tests**
+- [ ] *Step 4: Run the golden tests*
 
-The `slow` marker is already registered in `pyproject.toml` from Task 1.
+The =slow= marker is already registered in =pyproject.toml= from Task 1.
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_golden.py -v`
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_golden.py -v=
 Expected: PASS, 2 tests, 1 skipped.
 
-- [ ] **Step 5: Commit**
+- [ ] *Step 5: Commit*
 
-```bash
+#+begin_src bash
 git add tests/golden tests/test_golden.py
 git commit -m "test: golden trace with committed digest and opt-in long-horizon probe"
-```
+#+end_src
 
----
 
-### Task 15: Patch 0005 — event actions on the step clock
+* Task 15: Patch 0005 — event actions on the step clock
 
-`EventAction.run()` (`eventaction.py:178`) is a spin loop that computes `dt` from `time.perf_counter()` and never advances the client, so calling a non-instant action normally deadlocks headless forever — its own docstring admits it "may cause the game to hang". The deadlock is observed; the wall-clock `dt` hazard is reasoned, and this patch closes both.
+=EventAction.run()= (=eventaction.py:178=) is a spin loop that computes =dt= from =time.perf_counter()= and never advances the client, so calling a non-instant action normally deadlocks headless forever — its own docstring admits it "may cause the game to hang". The deadlock is observed; the wall-clock =dt= hazard is reasoned, and this patch closes both.
 
-**Files:**
-- Create: `patches/0005-action-step-clock.patch`
-- Create: `tests/test_action_clock.py`
+*Files:*
+- Create: =patches/0005-action-step-clock.patch=
+- Create: =tests/test_action_clock.py=
 
-**Interfaces:**
-- Consumes: `run_steps`, `build_client`.
-- Produces: no new public API; `EventAction.run` gains a step-driven mode.
+*Interfaces:*
+- Consumes: =run_steps=, =build_client=.
+- Produces: no new public API; =EventAction.run= gains a step-driven mode.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] *Step 1: Write the failing test*
 
-```python
+#+begin_src python
 # tests/test_action_clock.py
 from tuxghost.boot import build_client
 from tuxghost.loop import FIXED_DT, run_steps
@@ -2070,16 +2063,16 @@ def test_action_dt_comes_from_the_step_clock_not_the_wall_clock() -> None:
 
     assert seen, "no action updates observed"
     assert all(d == FIXED_DT for d in seen), f"non-step dt values: {set(seen)}"
-```
+#+end_src
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] *Step 2: Run test to verify it fails*
 
-Run: `PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_action_clock.py -v`
-Expected: FAIL — observed `dt` values are wall-clock deltas, not `FIXED_DT`.
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_action_clock.py -v=
+Expected: FAIL — observed =dt= values are wall-clock deltas, not =FIXED_DT=.
 
-- [ ] **Step 3: Write the patch**
+- [ ] *Step 3: Write the patch*
 
-```diff
+#+begin_src diff
 --- a/tuxemon/event/eventaction.py
 +++ b/tuxemon/event/eventaction.py
 @@
@@ -2108,11 +2101,11 @@ Expected: FAIL — observed `dt` values are wall-clock deltas, not `FIXED_DT`.
          except Exception as e:
              logger.error(f"Error running action: {e}")
              raise
-```
+#+end_src
 
 And add the deferral queue it calls:
 
-```diff
+#+begin_src diff
 --- a/tuxemon/event/eventengine.py
 +++ b/tuxemon/event/eventengine.py
 @@ class EventEngine:
@@ -2136,67 +2129,66 @@ And add the deferral queue it calls:
      def update(self, dt: float) -> None:
 +        self._update_deferred(dt)
          self.update_running_events(dt)
-```
+#+end_src
 
-- [ ] **Step 4: Apply and run**
+- [ ] *Step 4: Apply and run*
 
-Run: `cd tuxemon && git apply ../patches/0005-action-step-clock.patch && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_action_clock.py -v && make check-fast`
+Run: =cd tuxemon && git apply ../patches/0005-action-step-clock.patch && cd .. && PYTHONHASHSEED=0 ./.venv/bin/python -m pytest tests/test_action_clock.py -v && make check-fast=
 Expected: PASS, and the full fast suite still green.
 
-- [ ] **Step 5: Mutation gate**
+- [ ] *Step 5: Mutation gate*
 
 Revert patch 0005 only, rerun. Expected: FAIL. Restore.
 
-- [ ] **Step 6: Update the combat test now that skip=True is unnecessary**
+- [ ] *Step 6: Update the combat test now that skip=True is unnecessary*
 
-In `tests/test_combat_determinism.py`, change `execute("random_battle", (2, 8, 14), True)` to `execute("random_battle", (2, 8, 14))` and rerun the slow test. Expected: still PASS, no deadlock. If it hangs, patch 0005 is incomplete — say so rather than restoring `skip=True` silently.
+In =tests/test_combat_determinism.py=, change =execute("random_battle", (2, 8, 14), True)= to =execute("random_battle", (2, 8, 14))= and rerun the slow test. Expected: still PASS, no deadlock. If it hangs, patch 0005 is incomplete — say so rather than restoring =skip=True= silently.
 
-- [ ] **Step 7: Commit**
+- [ ] *Step 7: Commit*
 
-```bash
+#+begin_src bash
 git add patches/0005-action-step-clock.patch tests/test_action_clock.py tests/test_combat_determinism.py
 git commit -m "feat: patch 0005 drives event actions from the step clock"
-```
+#+end_src
 
----
 
-### Task 16: Documentation and the project CLAUDE.md
+* Task 16: Documentation and the project CLAUDE.md
 
-**Files:**
-- Create: `CLAUDE.md`
-- Create: `docs/STATUS.org`
-- Modify: `Makefile`
+*Files:*
+- Create: =CLAUDE.md=
+- Create: =docs/STATUS.org=
+- Modify: =Makefile=
 
-**Interfaces:**
+*Interfaces:*
 - Consumes: everything.
 - Produces: the entry points a future session reads first.
 
-- [ ] **Step 1: Write `docs/STATUS.org`**
+- [ ] *Step 1: Write =docs/STATUS.org=*
 
 Record: which patches are applied, the exemption register's current size (target zero), the measured determinism results with real digests, what is still unmeasured (capture, evolution, cross-platform), and the next subsystem (S2 CU harness).
 
-- [ ] **Step 2: Write `CLAUDE.md`**
+- [ ] *Step 2: Write =CLAUDE.md=*
 
-Must state: read `docs/STATUS.org` first; authority order is spec → measurements → plans; docs are org-mode; the trace format is version 1 and rejects any other; traces are step-indexed; never run without dummy SDL drivers; and the non-negotiable that every regression test must be demonstrated to fail against the bug it pins.
+Must state: read =docs/STATUS.org= first; authority order is spec → measurements → plans; docs are org-mode; the trace format is version 1 and rejects any other; traces are step-indexed; never run without dummy SDL drivers; and the non-negotiable that every regression test must be demonstrated to fail against the bug it pins.
 
-- [ ] **Step 3: Add a patch-application target**
+- [ ] *Step 3: Add a patch-application target*
 
-```makefile
+#+begin_src makefile
 patch:
 	cd tuxemon && for p in ../patches/*.patch; do git apply $$p; done
 
 unpatch:
 	cd tuxemon && git checkout -- . && git clean -fd
-```
+#+end_src
 
-- [ ] **Step 4: Verify the whole gate from a clean tree**
+- [ ] *Step 4: Verify the whole gate from a clean tree*
 
-Run: `make unpatch && make patch && make check`
+Run: =make unpatch && make patch && make check=
 Expected: all gates green, slow tests included.
 
-- [ ] **Step 5: Commit**
+- [ ] *Step 5: Commit*
 
-```bash
+#+begin_src bash
 git add CLAUDE.md docs/STATUS.org Makefile
 git commit -m "docs: project entry points and the patch application target"
-```
+#+end_src
