@@ -71,6 +71,13 @@ _TRACKED_FILES = (
     # `patch_series_id`. Tracking it means a future seventh patch fails
     # loudly here rather than joining the ambient noise (task 1, S3 plan).
     "tests/test_convention_alignment.py::",
+    # `walk_1234.tuxghost`'s `patch_series_id` differs from the current
+    # build, so the two parametrized tests that read it via `lift` each
+    # warn once (task 3, S3 plan); `claude_town_1234.tuxghost` is
+    # recorded against the current `patches/` and does not warn, so it
+    # gets no entry below -- the same asymmetry `test_golden.py` already
+    # relies on.
+    "tests/test_optimize_schedule.py::",
 )
 _EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS: dict[str, int] = {
     "tests/test_golden.py::test_golden_trace_still_reaches_its_recorded_digest": 1,
@@ -80,6 +87,8 @@ _EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS: dict[str, int] = {
     "tests/test_golden.py::test_long_horizon_trace_is_stable": 1,
     "tests/test_execute.py::test_execute_boots_a_save_whose_current_map_omits_the_extension": 2,
     "tests/test_execute.py::test_verify_refuses_a_trace_whose_map_cannot_be_resolved": 1,
+    "tests/test_optimize_schedule.py::test_lift_recovers_the_measured_shape[walk_1234-900-30-400-40]": 1,
+    "tests/test_optimize_schedule.py::test_lower_lift_round_trips_to_the_same_schedule[walk_1234-900-30-400-40]": 1,
 }
 
 _patch_series_id_warning_counts: dict[str, int] = {}
