@@ -39,6 +39,7 @@ from tuxghost.agent.types import Action, Observation, Policy, validate_actions
 from tuxghost.boot import boot_from_save, build_client
 from tuxghost.digest import digest_of
 from tuxghost.loop import InputSchedule, install_schedule, run_steps
+from tuxghost.observe import scaled_context
 from tuxghost.record import Recorder
 from tuxghost.trace import Trace
 
@@ -238,6 +239,19 @@ def run_agent(
     explicit `claimed_outcome=""` from a caller is honoured as-is rather
     than silently overridden by the policy's own value (task 5 review
     round 1).
+
+    Boots with `tuxghost.observe.scaled_context()`, not the module
+    default `headless_context()`: task 9 measured a 300-step per-step
+    digest sequence (not just a final digest) identical at every index
+    between the two contexts, on a schedule that keeps the player moving
+    through the end of the window -- `DisplayContext` only ever feeds
+    rendering geometry, never anything `tuxghost.digest.state_of` reads
+    -- so an agent gets the same ~16x9-tile field of view a human player
+    sees (measured scale 5 on this repo's `~/.tuxemon/tuxemon.yaml`, not
+    the scale 4 / ~20x11 tiles the task brief assumed before measuring),
+    at no digest cost, and `tuxghost.execute` (which keeps the
+    unscaled default) still reproduces a run's digests exactly. See
+    `docs/2026-08-26-display-scale-measurement.org` for the raw numbers.
     """
     if step_budget < 1:
         raise ValueError(f"step_budget must be >= 1, got {step_budget!r}")
@@ -247,16 +261,19 @@ def run_agent(
             "start from somewhere, and starting from both is not a thing"
         )
 
+    context = scaled_context()
     if cold_boot:
         # The title screen. Honest computer-use territory -- the intro's
         # name-entry keyboard is exactly the hard case -- and the only
         # route that renders the menu states at all. Probed: mashing A
         # here does NOT get through, so a policy that wants this must
         # actually read the frames.
-        client, session = build_client(seed=seed, clock_epoch=clock_epoch)
+        client, session = build_client(
+            seed=seed, clock_epoch=clock_epoch, context=context
+        )
     else:
         client, session = boot_from_save(
-            save_data, seed=seed, clock_epoch=clock_epoch
+            save_data, seed=seed, clock_epoch=clock_epoch, context=context
         )
 
     frames: FrameRenderer | None = None

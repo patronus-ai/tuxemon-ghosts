@@ -137,8 +137,27 @@ def resolve_map_asset(current_map: str) -> str | None:
     return None
 
 
-def build_client(seed: int, clock_epoch: int | None = None) -> tuple[Any, Any]:
+def build_client(
+    seed: int, clock_epoch: int | None = None, context: Any | None = None
+) -> tuple[Any, Any]:
     """Build a headless client on a fresh game at the given seed.
+
+    `context`, if given, is used INSTEAD of calling `headless_context()`
+    (the module's own unscaled, `scale=1` context). This exists for two
+    callers: task 9's scale measurement, and `tuxghost.agent.run_agent`,
+    which boots with `tuxghost.observe.scaled_context()` for human
+    field-of-view (~16x9 tiles, measured, versus the ~80x45-tile view
+    `headless_context()` produces). MEASURED digest-neutral: a 300-step
+    per-step digest sequence (`tuxghost.digest.digest_of`, not just the
+    final digest) was identical at every index between the two contexts
+    on a schedule that keeps the player moving through the end of the
+    window -- `DisplayContext` only ever feeds rendering geometry, never
+    anything `state_of` reads. So a recording and its replay boot with
+    DIFFERENT contexts today (`run_agent` scaled, `tuxghost.execute`
+    unscaled) without that being a hazard; see
+    `docs/2026-08-26-display-scale-measurement.org` for the raw numbers.
+    This would stop being true the day something reads `client.context`
+    into digested state -- nothing currently does.
 
     `clock_epoch`, if given, pins the wall clock (`tuxghost.determinism
     .pin_clock`) and resets the session's own elapsed-time bookkeeping
@@ -167,7 +186,8 @@ def build_client(seed: int, clock_epoch: int | None = None) -> tuple[Any, Any]:
 
         pin_clock(clock_epoch)
 
-    context = headless_context()
+    if context is None:
+        context = headless_context()
 
     from tuxemon.core.ids import seed_ids
     from tuxemon.database.runtime import db
@@ -261,9 +281,22 @@ def snapshot_save(session: Any) -> Any:
 
 
 def boot_from_save(
-    save_data: Any, seed: int, clock_epoch: int | None = None
+    save_data: Any,
+    seed: int,
+    clock_epoch: int | None = None,
+    context: Any | None = None,
 ) -> tuple[Any, Any]:
     """Boot a headless client and restore `save_data` into it.
+
+    `context`: see the matching parameter on `build_client` -- same
+    behaviour (used instead of `headless_context()` when given) and same
+    measured result: task 9's 300-step digest-sequence measurement found
+    scale digest-neutral, so `tuxghost.execute.execute` (this function's
+    one caller in the executor path) can keep passing no context at all
+    (the module default, unscaled) even though `tuxghost.agent.run_agent`
+    records with `tuxghost.observe.scaled_context()` -- the mismatch does
+    not perturb `digest_of`. See
+    `docs/2026-08-26-display-scale-measurement.org`.
 
     `clock_epoch`: see the matching parameter on `build_client` -- same
     behaviour, same ordering requirement (pin, then `reset_time()`), same
@@ -328,7 +361,8 @@ def boot_from_save(
 
         pin_clock(clock_epoch)
 
-    context = headless_context()
+    if context is None:
+        context = headless_context()
 
     from tuxemon.core.ids import seed_ids
     from tuxemon.entity.npc import NPC

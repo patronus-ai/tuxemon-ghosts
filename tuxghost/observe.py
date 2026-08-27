@@ -20,6 +20,7 @@ state -- drawing here never calls `update`.
 
 from __future__ import annotations
 
+import os
 from io import BytesIO
 from typing import Any
 
@@ -31,6 +32,89 @@ BACKGROUND = (0, 0, 0)
 #: the tile size (16) and every power of two in the resolution, so the
 #: sample does not land on a single repeating column of a tiled floor.
 SAMPLE_STRIDE = 7
+
+
+def scaled_context() -> Any:
+    """A headless `DisplayContext` scaled the way the REAL game scales,
+    instead of `tuxghost.boot.headless_context()`'s hardcoded `scale=1`.
+
+    `tuxemon/prepare.py`'s `headless_init` builds `DisplayContext` with
+    `DefaultScaling(1)` unconditionally -- fine for the fast, render-free
+    tests this project mostly runs, but it means a headless camera shows
+    roughly 80x45 tiles at 1280x720 (`tile_size=(16, 16)`) where a real,
+    windowed boot (`pygame_init`, `make_default_scaling(CONFIG,
+    NATIVE_RESOLUTION)`) shows far fewer, larger tiles -- measured on
+    this machine's `~/.tuxemon/tuxemon.yaml`, scale 5 (`tile_size=(80,
+    80)`, ~16x9 tiles), not the scale 4 this task's brief assumed; see
+    `docs/2026-08-26-display-scale-measurement.org` for the real numbers
+    and why the assumption was off. An agent that only ever sees the
+    unscaled view sees far more of the map, at far smaller sprites, than
+    a human player ever would.
+
+    This function mirrors `pygame_init`'s scaling arithmetic exactly
+    (same `make_default_scaling` call, same `NATIVE_TILE_SIZE`), but
+    keeps `headless_init`'s headless plumbing: both dummy SDL drivers,
+    `platform.init()`, `pg.init()`/`display.init()`/`font.init()`, a
+    real `pg.display.set_mode(CONFIG.resolution)` (required before any
+    sprite's `convert_alpha()`), and a `pg.Surface` -- never a real
+    window -- as the context's `screen`. Neither `pygame_init` (opens a
+    real window; this project never may) nor `headless_init` (hardcodes
+    `scale=1`) can be called as-is to get both properties at once.
+
+    Assigns the result to `tuxemon.prepare.DISPLAY_CONTEXT` as well as
+    returning it: `NullRenderer.__init__` reads that module global
+    DIRECTLY (not a parameter passed to it), so a `NullRenderer`
+    constructed after this call -- e.g. inside `headless_world` via
+    `build_client(..., context=scaled_context())` -- would otherwise
+    still see whatever context was assigned there last, unscaled or not.
+
+    Callers needing this context must pass it explicitly to
+    `tuxghost.boot.build_client`/`boot_from_save` (their `context`
+    parameter) -- this function does not call either of those itself, so
+    a caller that wants scaled AND a booted client makes both calls.
+    Whichever context a recording uses, replay of that trace MUST use
+    the same one: the trace header carries no scale field, so nothing
+    else enforces this.
+    """
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+    os.environ["SDL_AUDIODRIVER"] = "dummy"
+
+    import pygame as pg
+    from tuxemon.platform import platform
+    from tuxemon.platform.const.sizes import NATIVE_RESOLUTION
+    from tuxemon.platform.const.sizes import TILE_SIZE as NATIVE_TILE_SIZE
+    from tuxemon.scaling import make_default_scaling
+    from tuxemon.user_config import CONFIG
+
+    from tuxemon import prepare
+
+    platform.init()
+    prepare.core_init()
+
+    pg.init()
+    pg.display.init()
+    pg.font.init()
+
+    # Required before any sprite's convert_alpha() -- see headless_init's
+    # matching comment. The dummy driver opens no real window.
+    pg.display.set_mode(CONFIG.resolution)
+
+    scaling = make_default_scaling(CONFIG, NATIVE_RESOLUTION)
+    screen = pg.Surface(CONFIG.resolution)
+    rect = screen.get_rect()
+
+    context = prepare.DisplayContext(
+        screen=screen,
+        rect=rect,
+        resolution=CONFIG.resolution,
+        tile_size=scaling.scale_point(NATIVE_TILE_SIZE),
+        scale=scaling._scale,
+        scaling=scaling,
+    )
+    # NullRenderer.__init__ reads this module global directly -- see this
+    # function's own docstring.
+    prepare.DISPLAY_CONTEXT = context
+    return context
 
 
 def distinct_colors(
