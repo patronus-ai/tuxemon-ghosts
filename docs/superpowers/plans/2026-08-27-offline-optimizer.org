@@ -1594,6 +1594,58 @@ git commit -m "feat: Objective protocol and ReachTile, the one built-in"
 
 * Task 7: The loop, driven by =ScriptedEditor=
 
+** MEASURED 2026-08-27 — read this before writing any test in this task
+
+Task 7's first implementer stalled trying to establish these facts. They are
+now measured, on this tree, and they invalidate three of the tests written
+below. *The measurements win; the test code below is superseded where they
+conflict.*
+
+The parent (=tests/golden/claude_town_1234.tuxghost=) ends at tile
+=[11, 14]= on =spyder_paper_town.tmx= after 442 steps, with
+=state_stack == ['DialogState', 'WorldState']=.
+
+*That trailing dialog swallows every input.* Measured, one appended action
+each: =UP=, =DOWN=, =LEFT=, =RIGHT= all leave the tile at =[11, 14]=;
+=A= then =DOWN= and =B= then =DOWN= also leave it at =[11, 14]=. So *no
+append-only edit to this parent can move the player at all*, and the
+=distance= term of =ReachTile= is FROZEN. Only the =steps= term is
+optimizable against this parent.
+
+Consequences, each measured:
+
+| edit | result | score vs parent |
+|------+--------+-----------------|
+| =Insert(18, Action(DOWN, 16, 8))= | tile =[11,14]=, steps 466 | *WORSE* (more steps, same place) — so the brief's "improving edit" does the opposite |
+| =Delete(len(actions) - 1)= | tile =[11,14]=, steps 442→416→390→364 | *BETTER*, monotonically |
+| =Delete(0)= | tile =[11,14]=, steps 442→416→390 | *BETTER* — so the brief's "worsening edit" also does the opposite |
+| =Insert(len(actions), Action(DOWN, 100, 100))= | tile =[11,14]=, steps 442→642→842 | *WORSE*, monotonically |
+
+Required substitutions in the tests below:
+
+- The *improving* edit is =Delete(len(script.actions) - 1)=, not
+  =Insert(18, DOWN)=. Applies to =test_an_improving_edit_...=,
+  =test_the_rounds_cap_...=, =test_an_empty_proposal_...=, and the second
+  round of =test_an_invalid_proposal_...=.
+- The *worsening* edit is =Insert(len(script.actions), Action(buttons.DOWN, 100, 100))=,
+  not =Delete(0)=. Applies to =test_a_worsening_edit_...= and
+  =test_patience_stops_...=.
+- =test_an_over_budget_proposal_...= is unaffected: the parent costs 442
+  and the inserted action adds 1200, so =max_cost=500= still refuses it.
+  Round 0 seals the parent WITHOUT =max_cost=, so the parent itself is
+  never refused.
+
+*Do not "fix" this by moving the target to where the parent already is.*
+An improvement on the =steps= term — fewer steps to the same place — is a
+real improvement on a real term of the objective, and is exactly what an
+optimizer is for. A target moved to the parent's own end tile would make
+the test pass while proving nothing.
+
+This fixture limitation belongs in =docs/STATUS.org= (Task 12): the one
+committed live-capture trace, used as an optimizer PARENT, has an
+immovable position because it was recorded mid-dialogue.
+
+
 *Files:*
 - Create: =tuxghost/optimize/editors/__init__.py=,
   =tuxghost/optimize/editors/scripted.py=
