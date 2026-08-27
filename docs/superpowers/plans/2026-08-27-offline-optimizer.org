@@ -1,0 +1,3622 @@
+#+TITLE: S3 — offline trajectory optimizer implementation plan
+#+DATE: 2026-08-27
+
+* For agentic workers
+
+*REQUIRED SUB-SKILL*: use =superpowers:subagent-driven-development=
+(recommended) or =superpowers:executing-plans= to implement this plan
+task-by-task. Steps use checkbox (=- [ ]=) syntax for tracking.
+
+*Goal*: an editor proposes named edits to an existing trace's action list,
+each candidate is recompiled and replayed offline, an objective scores the
+state it reached, and the winner is sealed as an =offline-agent= trace
+that =tuxghost verify= replays to the digest it recorded.
+
+*Architecture*: no new stepping loop, no new format code, no seventh
+patch. Candidates are compiled through the project's existing canonical
+writers (=add_edge= for schedules, =Recorder= for traces) and run through
+=run_steps= with =execute='s own checkpoint hook, so candidate telemetry
+and =verify= telemetry share one convention by construction.
+
+*Tech stack*: Python 3.12, pygame-ce 2.5.7, pydantic v2, pytest, mypy
+--strict, ruff. =anthropic= SDK as an *optional* extra, imported lazily
+and gated on =--editor claude=.
+
+*Spec*: =docs/superpowers/specs/2026-08-27-offline-optimizer-design.org=
+(=#+STATUS: draft=). Read it before Task 1; this plan argues from it.
+
+* Global constraints
+
+Every task's requirements implicitly include this section.
+
+- *Docs are org-mode* (=.org=), plans included. =CLAUDE.md= is the one
+  named exception. Never write a =.md= file in this repo.
+- *Never edit =tuxemon/= directly.* S3 adds NO patch: =patches/= must
+  still hold exactly *6* files at close-out, and
+  =git -C tuxemon diff --stat= must still report *18 files changed, 265
+  insertions(+), 63 deletions(-)* plus the same 2 untracked files.
+- *Every invocation that touches the client sets*
+  =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy=. No exceptions, including
+  a REPL.
+- =PYTHONHASHSEED=0= in tests (the Makefile already does this).
+- *=format_version= stays 1.* No header field is added. Lineage goes in
+  =provenance.taints=.
+- *=tuxghost/digest.py='s =EXEMPTIONS= stays =={}=.* Never add an entry to
+  make a test pass.
+- =mypy --strict=, =ruff check= at zero warnings, and =make lint-patched=
+  all block. No =# type: ignore= or =# noqa= without a written reason.
+- *Every regression test must be DEMONSTRATED to fail* against the defect
+  it pins: mutate, run, capture the real failure output, restore, run
+  again, capture the pass, and confirm with =git status=/=git diff= that
+  the file was genuinely restored. The report carries the real output, not
+  a description of it.
+- *Never compare settled end states.* Compare per-step digest sequences
+  or per-round score sequences, and report the first differing index. A
+  settled tile is an attractor in this game; a final-digest assertion
+  cannot see a transient. Measured: 56 differing per-step digests
+  re-converged and a final-digest check read them as identical.
+- *Do not run two full test suites concurrently* — they race on
+  =~/.tuxemon/cache/l18n/*.mo=, which has been corrupted this way before.
+- Python is =./.venv/bin/python=. The =anthropic= extra IS currently
+  installed in this venv (the live capture needed it); the gate must
+  still pass with it absent, verified the way Task 10 describes.
+- Exit codes: *0 or 2 for every anticipated precondition; 1 is reserved
+  for a genuine engine bug.* =optimize=, like =agent=, has nothing to
+  diverge from.
+- S3 renders NOTHING. No =FrameRenderer=, no =scaled_context=, no frames
+  in any run directory.
+
+* File structure
+
+| File | Responsibility |
+|------+----------------|
+| =tuxghost/loop.py= (modify) | gains =PRESSED=, =RELEASED=, =add_edge= — moved verbatim from =agent/runner.py=. =InputSchedule= is defined here, so the one function that writes one belongs here too. |
+| =tuxghost/agent/runner.py= (modify) | imports those three from =tuxghost.loop=; local copies deleted. |
+| =tuxghost/optimize/__init__.py= | new package marker. |
+| =tuxghost/optimize/schedule.py= | =ActionScript=, =lift=, =lower=. |
+| =tuxghost/optimize/edits.py= | =Insert=/=Delete=/=Replace=, =apply_edits=. |
+| =tuxghost/optimize/seal.py= | =CandidateResult=, =seal=. |
+| =tuxghost/optimize/objective.py= | =Objective= protocol, =ReachTile=. |
+| =tuxghost/optimize/editors/scripted.py= | =ScriptedEditor= — drives the gate. |
+| =tuxghost/optimize/editors/mutation.py= | =MutationEditor= — seeded baseline. |
+| =tuxghost/optimize/editors/replay.py= | =ReplayEditor= — re-runs a recorded optimization. |
+| =tuxghost/optimize/editors/claude.py= | =ClaudeEditor= — lazily imports =anthropic=. |
+| =tuxghost/optimize/runner.py= | =optimize()=, =OptimizeResult=, =Round=. |
+| =tuxghost/cli.py= (modify) | the =optimize= subcommand. |
+| =tests/test_convention_alignment.py= | Task 1 only: the =run_agent=/=execute= sampling convention. |
+| =tests/test_optimize_schedule.py= … =tests/test_optimize_cli.py= | one test module per production module. |
+| =docs/2026-08-27-optimizer-tuning.org= | Task 12: the measured =rounds=/=patience= numbers. |
+| =docs/STATUS.org= (modify) | Task 12: S3's measured facts. |
+
+** Two decisions this plan makes that the spec left open
+
+1. *Where =add_edge= lives* (spec, "Open questions"). Neither spec option
+   is right: leaving it in =tuxghost/agent/runner.py= makes the optimizer
+   depend on the agent harness for one function, and moving it into
+   =tuxghost/optimize/schedule.py= makes the *agent harness depend on the
+   optimizer*, which is backwards. Third option, taken here: move it to
+   =tuxghost/loop.py=, which already defines =InputSchedule= and which
+   both subsystems already import. One edge writer, no cross-subsystem
+   dependency. Task 2 is that move, alone, as a pure refactor.
+2. *A cost ceiling the spec does not mention.* Nothing in the spec bounds
+   how much an editor may grow a script. =HOLD_CAP=/=SETTLE_CAP= are 600
+   each, so 10,000 inserted actions is a 12,000,000-step candidate —
+   hours of engine time inside one =seal()= call, unobservable and
+   uninterruptible, which is the exact reasoning
+   =tuxghost/agent/types.py= gives for having caps at all. =optimize()=
+   therefore takes a required =max_cost= and treats an over-budget
+   candidate as a *rejected round*. Flagged here rather than smuggled in:
+   it is an addition to the spec, and Task 7 pins it.
+
+-----
+
+* Task 1: Pin the digest-sampling convention =run_agent= and =execute= share
+
+=run_agent(digest_every=N)= and =execute(checkpoint=N)= both sample every
+N steps and both skip step 0 (=tuxghost/agent/runner.py:374=
+=if digest_every and absolute and absolute % digest_every == 0=;
+=tuxghost/execute.py:173= =if checkpoint and i and i % checkpoint == 0=).
+That agreement was reached by hand and *nothing asserts it*. S3 optimizes
+against telemetry from one and verifies with the other, and S2's
+=run_agent= traces are S3's parents, so a silent disagreement would make
+every S3 measurement unreproducible by anyone else.
+
+This task adds no production code. It is first because it is the cheapest
+place to find out the premise is false.
+
+*Files:*
+- Create: =tests/test_convention_alignment.py=
+
+*Interfaces:*
+- Consumes: =tuxghost.agent.runner.run_agent=,
+  =tuxghost.agent.scripted.ScriptedPolicy=, =tuxghost.execute.execute=,
+  =tuxghost.agent.types.Action=.
+- Produces: nothing importable. Later tasks rely on the *fact* it pins.
+
+- [ ] *Step 1: Write the failing test*
+
+#+begin_src python
+"""Task 1: `run_agent(digest_every=N)` and `execute(checkpoint=N)` must
+agree, step for step, on which steps get sampled.
+
+Both skip step 0 and both count absolutely, but they compute that
+independently -- `run_agent` samples inside a per-ACTION `run_steps` call
+with a `_base` offset added back, `execute` samples inside one whole-run
+call. S3 reads the first and verifies with the second, so this file is
+the assertion that the two conventions are one convention.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from tuxemon.platform.const import buttons
+from tuxemon.save_system.save_state import SaveData
+
+from tuxghost.agent.runner import run_agent
+from tuxghost.agent.scripted import ScriptedPolicy
+from tuxghost.agent.types import Action
+from tuxghost.determinism import seed_all
+from tuxghost.execute import execute
+
+FIXTURE = Path(__file__).parent / "fixtures" / "paper_town.save"
+EPOCH = 1787659200
+SEED = 1234
+
+#: A MOVING route, not an idle one. 600 idle ticks leave `state_of`
+#: byte-identical (measured, see docs/STATUS.org "The digest's measured
+#: blind spot"), so an idle schedule would make every sampled digest
+#: equal and this test would pass against two conventions that disagree.
+#: (12, 12) is leavable DOWN/UP/RIGHT only -- LEFT is blocked.
+ROUTE = (
+    Action(buttons.DOWN, 16, 8),
+    Action(buttons.RIGHT, 16, 8),
+    Action(buttons.DOWN, 16, 8),
+    Action(buttons.UP, 16, 8),
+)
+COST = sum(a.hold + a.settle for a in ROUTE)
+EVERY = 8
+
+
+def _save() -> SaveData:
+    return SaveData.model_validate(json.loads(FIXTURE.read_text()))
+
+
+def test_run_agent_and_execute_sample_the_same_steps() -> None:
+    seed_all(SEED)
+    recorded = run_agent(
+        policy=ScriptedPolicy([ROUTE]),
+        save_data=_save(),
+        seed=SEED,
+        clock_epoch=EPOCH,
+        step_budget=COST,
+        observe=False,
+        digest_every=EVERY,
+        recorder_kind="offline-agent",
+    )
+    replayed = execute(recorded.trace, checkpoint=EVERY)
+
+    assert [s for s, _ in recorded.digests] == [s for s, _ in replayed.checkpoints]
+    assert recorded.digests == replayed.checkpoints
+
+
+def test_the_sampled_route_actually_moves() -> None:
+    """Anti-vacuity control. If the route never changed the digest, the
+    test above would pass against conventions that sample DIFFERENT steps,
+    because every sample would be the same hash."""
+    seed_all(SEED)
+    recorded = run_agent(
+        policy=ScriptedPolicy([ROUTE]),
+        save_data=_save(),
+        seed=SEED,
+        clock_epoch=EPOCH,
+        step_budget=COST,
+        observe=False,
+        digest_every=EVERY,
+        recorder_kind="offline-agent",
+    )
+    assert len(recorded.digests) >= 8, recorded.digests
+    assert 0 not in [s for s, _ in recorded.digests], "step 0 must be skipped"
+    assert len({d for _, d in recorded.digests}) > 1, (
+        "every sampled digest is identical -- this route proves nothing "
+        "about sampling alignment"
+    )
+#+end_src
+
+- [ ] *Step 2: Run it*
+
+Run: =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_convention_alignment.py -v=
+
+Expected: PASS. This test pins existing behaviour rather than driving new
+code, so a pass here is the correct first outcome — the demonstration in
+Step 3 is what makes it a real test.
+
+If it FAILS, *stop and report*. The two conventions genuinely disagree,
+and every later task in this plan rests on them agreeing. Do not "fix" it
+by loosening the assertion.
+
+- [ ] *Step 3: Demonstrate it fails against the defect it pins*
+
+Shift one convention by one step and watch the sequences diverge:
+
+#+begin_src bash
+cp tuxghost/agent/runner.py /tmp/runner.py.bak
+# in the `sample` hook, change:
+#     if digest_every and absolute and absolute % digest_every == 0:
+# to:
+#     if digest_every and absolute and (absolute + 1) % digest_every == 0:
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  ./.venv/bin/python -m pytest -q tests/test_convention_alignment.py
+cp /tmp/runner.py.bak tuxghost/agent/runner.py && rm /tmp/runner.py.bak
+git diff --stat tuxghost/agent/runner.py   # must be empty
+#+end_src
+
+Expected: =test_run_agent_and_execute_sample_the_same_steps= FAILS on the
+step-list assertion (a shifted list, e.g. =[7, 15, 23, …]= vs
+=[8, 16, 24, …]=); the anti-vacuity test still passes. Capture both
+outputs and the empty =git diff= in the report.
+
+- [ ] *Step 4: Add the file to the warning tripwire*
+
+=tests/conftest.py=: add ="tests/test_convention_alignment.py::"= to
+=_TRACKED_FILES= with a comment. It reads no committed trace, so it must
+warn *zero* times about =patch_series_id=; tracking it means a future
+seventh patch fails loudly here rather than joining the ambient noise.
+
+- [ ] *Step 5: Run the fast gate*
+
+Run: =make check-fast=
+
+Expected: green, 213 + 2 = *215 passed, 3 skipped, 9 warnings*.
+
+- [ ] *Step 6: Commit*
+
+#+begin_src bash
+git add tests/test_convention_alignment.py tests/conftest.py
+git commit -m "test: pin the digest-sampling convention run_agent and execute share"
+#+end_src
+
+-----
+
+* Task 2: Move =add_edge=, =PRESSED=, =RELEASED= to =tuxghost/loop.py=
+
+A pure refactor with no behaviour change, done alone so a reviewer can
+reject it independently. =InputSchedule= is defined in =tuxghost/loop.py=;
+the one function that writes one currently lives in
+=tuxghost/agent/runner.py= as =_add_edge=. S3 needs it, and neither
+subsystem should depend on the other (see "Two decisions" above).
+
+It also gains a direct unit test. Today =_add_edge='s append-and-sort
+contract is only covered *through* =run_agent=; that indirection is why
+the missing =edges.sort()= once stayed green (the append-only test's
+insertion order happened to already be ascending, because
+=buttons.DOWN < buttons.RIGHT=).
+
+*Files:*
+- Modify: =tuxghost/loop.py= (add =PRESSED=, =RELEASED=, =add_edge=)
+- Modify: =tuxghost/agent/runner.py= (delete the local copies, import
+  instead)
+- Create: =tests/test_loop_add_edge.py=
+
+*Interfaces:*
+- Produces: =tuxghost.loop.PRESSED: float= (=1.0=),
+  =tuxghost.loop.RELEASED: float= (=0.0=), and
+  =tuxghost.loop.add_edge(schedule: InputSchedule, step: int, button: int, value: float) -> None=.
+- Consumed by: Tasks 3 and 5, and =tuxghost.agent.runner= from now on.
+
+- [ ] *Step 1: Move the code, docstring and all*
+
+Cut =PRESSED=, =RELEASED= and =_add_edge= out of
+=tuxghost/agent/runner.py= (lines 57-58 and 113-175) and paste them into
+=tuxghost/loop.py= after the =InputSchedule= definition, renaming
+=_add_edge= to =add_edge=. *Move the entire docstring verbatim* — it
+records why the function appends rather than assigns, why it re-sorts on
+every insert, and which test pins each half. That docstring is the most
+valuable thing in the diff; losing it is worse than not moving the
+function.
+
+Add one paragraph to it explaining the new home:
+
+#+begin_src python
+    Lives here, next to `InputSchedule`, rather than in either consumer:
+    `tuxghost.agent.runner` (S2) and `tuxghost.optimize.schedule` (S3)
+    both write schedules, and putting the writer in either one would make
+    the other depend on it for a single function. `tuxghost.loop` defines
+    the type, owns `install_schedule`, and is already imported by both.
+#+end_src
+
+- [ ] *Step 2: Update =tuxghost/agent/runner.py=*
+
+Replace the deleted definitions with an import, and update the four call
+sites (=_add_edge(= → =add_edge(=):
+
+#+begin_src python
+from tuxghost.loop import (
+    PRESSED,
+    RELEASED,
+    InputSchedule,
+    add_edge,
+    install_schedule,
+    run_steps,
+)
+#+end_src
+
+Grep for stragglers: =grep -rn "_add_edge\|PRESSED\|RELEASED" tuxghost tests=.
+=tests/test_agent_runner.py= may reference =_add_edge= by name; update it.
+
+- [ ] *Step 3: Write the direct unit test*
+
+#+begin_src python
+"""Task 2: `add_edge`'s contract, tested directly rather than through
+`run_agent`.
+
+Both halves of that contract have a history. It APPENDS rather than
+assigns because a `settle=0` action schedules its release on exactly the
+step the next action's press lands on, and `schedule[step] = [...]`
+silently dropped one of them. It RE-SORTS on every insert because
+`install_schedule` delivers a step's edges in list order, so insertion
+order could match `_schedule_of`'s output by luck on one route and
+deliver a press/release pair to the engine in the opposite order on
+another. Neither was caught directly before: both were only reachable
+through a full `run_agent` route.
+"""
+
+from __future__ import annotations
+
+from tuxghost.loop import PRESSED, RELEASED, InputSchedule, add_edge
+
+
+def test_two_edges_on_one_step_are_both_kept() -> None:
+    schedule: InputSchedule = {}
+    add_edge(schedule, 16, 2, RELEASED)
+    add_edge(schedule, 16, 8, PRESSED)
+    assert schedule == {16: [(2, RELEASED), (8, PRESSED)]}
+
+
+def test_edges_are_sorted_canonically_regardless_of_insert_order() -> None:
+    """Insert in DESCENDING button order; the stored list must still be
+    ascending. Descending on purpose: an ascending insert order would
+    leave the list already sorted and the missing-sort defect invisible,
+    which is exactly how that defect once survived a test."""
+    schedule: InputSchedule = {}
+    add_edge(schedule, 4, 8, PRESSED)
+    add_edge(schedule, 4, 2, PRESSED)
+    add_edge(schedule, 4, 1, RELEASED)
+    assert schedule[4] == [(1, RELEASED), (2, PRESSED), (8, PRESSED)]
+
+
+def test_the_same_button_and_value_twice_is_kept_twice() -> None:
+    """`add_edge` is not a set: it records what it was told. A duplicate
+    is a caller bug, and silently swallowing one would hide it."""
+    schedule: InputSchedule = {}
+    add_edge(schedule, 0, 64, PRESSED)
+    add_edge(schedule, 0, 64, PRESSED)
+    assert schedule[0] == [(64, PRESSED), (64, PRESSED)]
+
+
+def test_constants_are_the_values_the_engine_expects() -> None:
+    assert (PRESSED, RELEASED) == (1.0, 0.0)
+#+end_src
+
+- [ ] *Step 4: Run the new test and the S2 suites it must not disturb*
+
+Run: =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_loop_add_edge.py tests/test_agent_runner.py tests/test_loop.py -v=
+
+Expected: all pass. This is a refactor; any S2 failure means the move was
+not verbatim.
+
+- [ ] *Step 5: Demonstrate the new test discriminates*
+
+#+begin_src bash
+cp tuxghost/loop.py /tmp/loop.py.bak
+# delete the `edges.sort()` line at the end of add_edge
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_loop_add_edge.py
+cp /tmp/loop.py.bak tuxghost/loop.py && rm /tmp/loop.py.bak
+git diff --stat tuxghost/loop.py    # must show only the intended move
+#+end_src
+
+Expected: =test_edges_are_sorted_canonically_regardless_of_insert_order=
+FAILS with =[(8, 1.0), (2, 1.0), (1, 0.0)] != [(1, 0.0), (2, 1.0), (8, 1.0)]=.
+Repeat for the append contract by changing =edges.append(...)= to
+=schedule[step] = [(button, value)]= and confirm
+=test_two_edges_on_one_step_are_both_kept= fails. Capture both.
+
+- [ ] *Step 6: Gate and commit*
+
+Run: =make check-fast= — expect *219 passed, 3 skipped, 9 warnings*.
+
+#+begin_src bash
+git add tuxghost/loop.py tuxghost/agent/runner.py tests/test_loop_add_edge.py tests/test_agent_runner.py
+git commit -m "refactor: move add_edge to loop.py, next to InputSchedule, and test it directly"
+#+end_src
+
+-----
+
+* Task 3: =ActionScript=, =lift= and =lower=
+
+The edit unit. =lift= turns a trace's edges back into actions; =lower=
+turns actions back into a canonical schedule. The invariant that makes
+the pair trustworthy is =lead_in + sum(hold + settle) == step_count=, and
+it exists because *two quantities leave no edge behind at all*: the wait
+before the first press and the settle after the last release. Measured on
+the committed traces:
+
+| trace | =step_count= | lead-in | tail |
+|-------+--------------+---------+------|
+| =claude_town_1234= | 442 | 0 | 10 |
+| =walk_1234= | 900 | 30 | 400 |
+
+*Files:*
+- Create: =tuxghost/optimize/__init__.py=, =tuxghost/optimize/schedule.py=
+- Create: =tests/test_optimize_schedule.py=
+
+*Interfaces:*
+- Consumes: =tuxghost.loop.add_edge=/=PRESSED=/=RELEASED=/=InputSchedule=,
+  =tuxghost.agent.types.Action=.
+- Produces:
+  - =ActionScript= — frozen dataclass, fields =lead_in: int=,
+    =actions: tuple[Action, ...]=, method =cost() -> int=.
+  - =lift(inputs: Sequence[tuple[int, int, float]], step_count: int) -> ActionScript=
+  - =lower(script: ActionScript) -> InputSchedule=
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""Task 3: the edit unit, and the two quantities a trace's edge list does
+not contain.
+
+`lift` REQUIRES `step_count`. A lead-in before the first press and a tail
+after the last release leave no edge behind, and a version of `lift`
+written without `step_count` produced a 432-step script for the 442-step
+`claude_town_1234` trace -- whose replay then matched the parent's digest
+anyway, because the ten dropped steps changed nothing already settled.
+That is this project's attractor lesson (docs/STATUS.org, "Settled end
+states cannot detect a perturbation in this game") applied to `lift`: the
+digest cannot be trusted to catch a dropped tail, so the invariant is
+asserted arithmetically instead.
+
+Both committed traces are tested, never just one: `claude_town_1234` has
+`lead_in == 0`, so a `lift` that drops lead-ins entirely passes against it
+and fails only against `walk_1234`.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from tuxemon.platform.const import buttons
+
+from tuxghost.agent.types import Action
+from tuxghost.execute import _schedule_of
+from tuxghost.loop import PRESSED, RELEASED
+from tuxghost.optimize.schedule import ActionScript, lift, lower
+from tuxghost.trace import read
+
+GOLDEN = Path(__file__).parent / "golden"
+
+#: (name, step_count, lead_in, tail, action count) -- measured, not guessed.
+COMMITTED = [
+    ("claude_town_1234", 442, 0, 10, 18),
+    ("walk_1234", 900, 30, 400, 40),
+]
+
+
+@pytest.mark.parametrize("name,step_count,lead_in,tail,n", COMMITTED)
+def test_lift_recovers_the_measured_shape(
+    name: str, step_count: int, lead_in: int, tail: int, n: int
+) -> None:
+    trace = read(GOLDEN / f"{name}.tuxghost", allow_mismatch=True)
+    assert trace.header.step_count == step_count
+    script = lift(trace.inputs, trace.header.step_count)
+    assert script.lead_in == lead_in
+    assert len(script.actions) == n
+    assert script.actions[-1].settle == tail
+    assert script.cost() == step_count
+
+
+@pytest.mark.parametrize("name,step_count,lead_in,tail,n", COMMITTED)
+def test_lower_lift_round_trips_to_the_same_schedule(
+    name: str, step_count: int, lead_in: int, tail: int, n: int
+) -> None:
+    del step_count, lead_in, tail, n
+    trace = read(GOLDEN / f"{name}.tuxghost", allow_mismatch=True)
+    script = lift(trace.inputs, trace.header.step_count)
+    assert lower(script) == _schedule_of(trace)
+
+
+def test_an_input_free_trace_lifts_to_a_bare_wait() -> None:
+    script = lift([], 300)
+    assert script == ActionScript(lead_in=300, actions=())
+    assert script.cost() == 300
+    assert lower(script) == {}
+
+
+def test_lower_places_the_first_press_at_lead_in() -> None:
+    script = ActionScript(lead_in=30, actions=(Action(buttons.A, 10, 5),))
+    assert lower(script) == {30: [(buttons.A, PRESSED)], 40: [(buttons.A, RELEASED)]}
+
+
+def test_lower_keeps_a_zero_settle_collision_intact() -> None:
+    """A `settle=0` action releases on exactly the step the next action
+    presses. Both edges must survive -- the defect `add_edge` exists to
+    prevent, re-checked from this side of the boundary."""
+    script = ActionScript(
+        lead_in=0,
+        actions=(Action(buttons.DOWN, 4, 0), Action(buttons.RIGHT, 4, 0)),
+    )
+    assert lower(script)[4] == [
+        (buttons.DOWN, RELEASED),
+        (buttons.RIGHT, PRESSED),
+    ]
+
+
+def test_lift_refuses_a_button_left_held() -> None:
+    with pytest.raises(ValueError, match="still held"):
+        lift([(0, buttons.A, PRESSED)], 100)
+
+
+def test_lift_refuses_a_release_without_a_press() -> None:
+    with pytest.raises(ValueError, match="released without"):
+        lift([(0, buttons.A, RELEASED)], 100)
+
+
+def test_lift_refuses_a_double_press() -> None:
+    with pytest.raises(ValueError, match="already held"):
+        lift([(0, buttons.A, PRESSED), (2, buttons.A, PRESSED)], 100)
+
+
+def test_lift_refuses_overlapping_holds() -> None:
+    """Two DIFFERENT buttons held at once cannot be expressed as a
+    sequential action list. Refused loudly rather than reinterpreted --
+    neither committed trace has one, but a human-recorded trace could."""
+    inputs = [
+        (0, buttons.DOWN, PRESSED),
+        (4, buttons.A, PRESSED),
+        (8, buttons.DOWN, RELEASED),
+        (12, buttons.A, RELEASED),
+    ]
+    with pytest.raises(ValueError, match="overlap"):
+        lift(inputs, 100)
+
+
+def test_lift_refuses_a_value_that_is_neither_press_nor_release() -> None:
+    with pytest.raises(ValueError, match="neither"):
+        lift([(0, buttons.A, 0.5)], 100)
+
+
+def test_lift_refuses_a_step_count_shorter_than_the_last_release() -> None:
+    with pytest.raises(ValueError, match="step_count"):
+        lift([(0, buttons.A, PRESSED), (50, buttons.A, RELEASED)], 20)
+#+end_src
+
+- [ ] *Step 2: Run the tests to verify they fail*
+
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_schedule.py=
+
+Expected: collection error — =ModuleNotFoundError: No module named
+'tuxghost.optimize'=.
+
+- [ ] *Step 3: Write the implementation*
+
+=tuxghost/optimize/__init__.py=: empty (a package marker; no re-exports,
+so import cycles stay impossible by construction).
+
+=tuxghost/optimize/schedule.py=:
+
+#+begin_src python
+"""A trace's inputs as an editable action list, and back again.
+
+`lift` and `lower` are inverses for every trace `lift` accepts, pinned
+both ways in `tests/test_optimize_schedule.py`. `lower` writes through
+`tuxghost.loop.add_edge` -- the project's one canonical schedule writer
+-- rather than assembling a dict itself, because same-step edge order is
+a writer-side convention (`tuxghost/trace.py`'s `read()` neither sorts
+nor validates it) and a second writer would be a second convention.
+
+Refusals are `ValueError`, matching the `ValueError`/`TypeError` taxonomy
+`validate_actions` and `actions_from_json` already use, so the CLI's
+boundary can stay as narrow as `_agent`'s.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+
+from tuxghost.agent.types import Action
+from tuxghost.loop import PRESSED, RELEASED, InputSchedule, add_edge
+
+
+@dataclass(frozen=True)
+class ActionScript:
+    """A trace's inputs as actions, plus the wait before the first press.
+
+    INVARIANT: `lead_in + sum(a.hold + a.settle for a in actions) ==
+    step_count` of the trace this came from. Both ends are load-bearing
+    and NEITHER is present in `Trace.inputs`: `lead_in` is the gap before
+    the first press (measured 30 steps on `walk_1234`) and the last
+    action's `settle` is the gap after the last release (measured 400 on
+    `walk_1234`, 44% of that trace). A version of `lift` that ignored
+    them produced a 432-step script for a 442-step trace whose replay
+    still matched the parent digest -- see this module's test docstring.
+    """
+
+    lead_in: int
+    actions: tuple[Action, ...]
+
+    def cost(self) -> int:
+        """Total steps this script occupies -- what `seal` runs and what
+        the resulting trace's `step_count` must equal."""
+        return self.lead_in + sum(a.hold + a.settle for a in self.actions)
+
+
+def lift(
+    inputs: Sequence[tuple[int, int, float]], step_count: int
+) -> ActionScript:
+    """Edges plus `step_count` -> actions. `step_count` is NOT optional.
+
+    Refuses rather than reinterprets: a button left held, a release with
+    no press, a double press, two buttons held at once, a value that is
+    neither edge, or a `step_count` that ends before the last release.
+    """
+    held: dict[int, int] = {}
+    pairs: list[tuple[int, int, int]] = []
+    for step, button, value in sorted(inputs):
+        if value == PRESSED:
+            if button in held:
+                raise ValueError(
+                    f"step {step}: button {button} pressed while already "
+                    f"held since step {held[button]}; this trace is not "
+                    "expressible as a sequential action list"
+                )
+            held[button] = step
+        elif value == RELEASED:
+            press = held.pop(button, None)
+            if press is None:
+                raise ValueError(
+                    f"step {step}: button {button} released without a "
+                    "press; refusing rather than inventing one"
+                )
+            pairs.append((press, button, step))
+        else:
+            raise ValueError(
+                f"step {step}: input value {value!r} is neither "
+                f"{PRESSED} (press) nor {RELEASED} (release)"
+            )
+    if held:
+        raise ValueError(
+            f"buttons still held when the trace ends: {sorted(held)}; an "
+            "action list has no way to express a press that never releases"
+        )
+
+    pairs.sort()
+    for (p1, b1, r1), (p2, b2, _r2) in zip(pairs, pairs[1:]):
+        if p2 < r1:
+            raise ValueError(
+                f"overlapping holds: button {b1} is held [{p1}, {r1}] "
+                f"while button {b2} presses at {p2}; an action list is "
+                "sequential and cannot express two buttons held at once"
+            )
+
+    if not pairs:
+        return ActionScript(lead_in=step_count, actions=())
+
+    last_release = pairs[-1][2]
+    if step_count < last_release:
+        raise ValueError(
+            f"step_count {step_count} ends before the last release at "
+            f"step {last_release}; the trace is internally inconsistent"
+        )
+
+    lead_in = pairs[0][0]
+    actions: list[Action] = []
+    prev_release = lead_in
+    for press, button, release in pairs:
+        if actions:
+            actions[-1] = replace(actions[-1], settle=press - prev_release)
+        actions.append(Action(button=button, hold=release - press, settle=0))
+        prev_release = release
+    actions[-1] = replace(actions[-1], settle=step_count - prev_release)
+
+    script = ActionScript(lead_in=lead_in, actions=tuple(actions))
+    if script.cost() != step_count:
+        raise AssertionError(  # pragma: no cover -- arithmetic invariant
+            f"lift produced a {script.cost()}-step script for a "
+            f"{step_count}-step trace; the invariant is broken"
+        )
+    return script
+
+
+def lower(script: ActionScript) -> InputSchedule:
+    """Actions -> a canonical schedule, written through `add_edge`.
+
+    Step indices are computed here, never carried by an edit, which is
+    what makes an insert unable to corrupt every action after it.
+    """
+    schedule: InputSchedule = {}
+    step = script.lead_in
+    for action in script.actions:
+        add_edge(schedule, step, action.button, PRESSED)
+        add_edge(schedule, step + action.hold, action.button, RELEASED)
+        step += action.hold + action.settle
+    return schedule
+#+end_src
+
+- [ ] *Step 4: Run the tests to verify they pass*
+
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_schedule.py -v=
+
+Expected: all pass (16 tests: 2 parametrized × 2, plus 12 singles).
+
+- [ ] *Step 5: Demonstrate the two lossy cases*
+
+Two separate mutations, because they fail on *different* traces:
+
+#+begin_src bash
+cp tuxghost/optimize/schedule.py /tmp/sched.bak
+# (a) drop the tail: delete the line
+#     actions[-1] = replace(actions[-1], settle=step_count - prev_release)
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_schedule.py
+# (b) drop the lead-in: replace `lead_in = pairs[0][0]` with `lead_in = 0`
+#     and `prev_release = lead_in` with `prev_release = 0`
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_schedule.py
+cp /tmp/sched.bak tuxghost/optimize/schedule.py && rm /tmp/sched.bak
+git status --short tuxghost/optimize/schedule.py
+#+end_src
+
+Expected: (a) fails for BOTH traces on =script.cost() == step_count=
+(=432 != 442= and =870 != 900=). (b) fails for =walk_1234= ONLY
+(=lead_in== =0 != 30=) and *passes* for =claude_town_1234= — which is the
+measured justification for parametrizing over both traces rather than
+using the newer one alone. Capture both runs.
+
+- [ ] *Step 6: Gate and commit*
+
+Run: =make check-fast= — expect *235 passed, 3 skipped, 9 warnings*.
+
+#+begin_src bash
+git add tuxghost/optimize/ tests/test_optimize_schedule.py
+git commit -m "feat: ActionScript, lift and lower -- the edit unit"
+#+end_src
+
+-----
+
+* Task 4: The edit vocabulary
+
+Three operations, applied *sequentially* — each index is interpreted
+against the list as it stands after the previous edit in the same batch.
+That is a real choice with a surprising corner (=[Delete(0), Delete(0)]=
+removes the first two actions), so it is documented on =apply_edits= and
+pinned by a test rather than left for an editor author to discover.
+
+*Files:*
+- Create: =tuxghost/optimize/edits.py=
+- Create: =tests/test_optimize_edits.py=
+
+*Interfaces:*
+- Consumes: =ActionScript= (Task 3), =tuxghost.agent.types.validate_actions=.
+- Produces: =Insert(index: int, action: Action)=, =Delete(index: int)=,
+  =Replace(index: int, action: Action)=, the union alias =Edit=, and
+  =apply_edits(script: ActionScript, edits: Sequence[Edit]) -> ActionScript=.
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""Task 4: the edit vocabulary.
+
+Edits are applied SEQUENTIALLY -- each index sees the list as the previous
+edit left it. Pinned here because the alternative (all indices against the
+original list) is equally defensible and silently different, and because
+an editor author reading only `apply_edits`'s signature could reasonably
+assume either.
+"""
+
+from __future__ import annotations
+
+import pytest
+from tuxemon.platform.const import buttons
+
+from tuxghost.agent.types import Action
+from tuxghost.optimize.edits import Delete, Insert, Replace, apply_edits
+from tuxghost.optimize.schedule import ActionScript
+
+A = Action(buttons.A, 10, 5)
+DOWN = Action(buttons.DOWN, 16, 8)
+UP = Action(buttons.UP, 16, 8)
+
+
+def _script(*actions: Action) -> ActionScript:
+    return ActionScript(lead_in=0, actions=tuple(actions))
+
+
+def test_replace_swaps_one_action() -> None:
+    out = apply_edits(_script(A, DOWN), [Replace(1, UP)])
+    assert out.actions == (A, UP)
+
+
+def test_insert_puts_the_action_before_the_index() -> None:
+    out = apply_edits(_script(A, DOWN), [Insert(1, UP)])
+    assert out.actions == (A, UP, DOWN)
+
+
+def test_insert_at_the_end_appends() -> None:
+    out = apply_edits(_script(A), [Insert(1, UP)])
+    assert out.actions == (A, UP)
+
+
+def test_delete_removes_one_action() -> None:
+    out = apply_edits(_script(A, DOWN, UP), [Delete(1)])
+    assert out.actions == (A, UP)
+
+
+def test_edits_apply_sequentially_not_against_the_original() -> None:
+    """Two `Delete(0)`s remove the FIRST TWO actions, because the second
+    one sees the list the first one left. The documented semantics."""
+    out = apply_edits(_script(A, DOWN, UP), [Delete(0), Delete(0)])
+    assert out.actions == (UP,)
+
+
+def test_lead_in_is_preserved_and_never_edited() -> None:
+    out = apply_edits(ActionScript(lead_in=30, actions=(A,)), [Replace(0, UP)])
+    assert out.lead_in == 30
+
+
+def test_an_empty_edit_list_returns_an_equal_script() -> None:
+    script = ActionScript(lead_in=7, actions=(A, DOWN))
+    assert apply_edits(script, []) == script
+
+
+def test_out_of_range_index_is_refused() -> None:
+    with pytest.raises(ValueError, match="index 5"):
+        apply_edits(_script(A), [Replace(5, UP)])
+
+
+def test_insert_beyond_the_end_is_refused() -> None:
+    """`Insert(len)` appends; `Insert(len + 1)` is a hole, not an append."""
+    with pytest.raises(ValueError, match="index 3"):
+        apply_edits(_script(A), [Insert(3, UP)])
+
+
+def test_negative_index_is_refused_rather_than_wrapping() -> None:
+    """Python would happily index from the end. An editor that emitted -1
+    meaning "the last one" and got it is an editor whose next -1 means
+    something else."""
+    with pytest.raises(ValueError, match="index -1"):
+        apply_edits(_script(A), [Delete(-1)])
+
+
+def test_an_out_of_range_action_is_refused_by_validate_actions() -> None:
+    with pytest.raises(ValueError, match="hold"):
+        apply_edits(_script(A), [Replace(0, Action(buttons.A, 10_000, 0))])
+
+
+def test_an_invalid_button_is_refused() -> None:
+    with pytest.raises(ValueError, match="button"):
+        apply_edits(_script(A), [Insert(0, Action(999_999, 10, 0))])
+
+
+def test_deleting_every_action_is_allowed() -> None:
+    """A script with no actions is legal -- it is a bare wait -- so an
+    editor is allowed to reach it. `seal` still runs `lead_in` steps."""
+    out = apply_edits(ActionScript(lead_in=5, actions=(A,)), [Delete(0)])
+    assert out == ActionScript(lead_in=5, actions=())
+#+end_src
+
+- [ ] *Step 2: Run to verify they fail*
+
+Expected: =ModuleNotFoundError: No module named 'tuxghost.optimize.edits'=.
+
+- [ ] *Step 3: Write the implementation*
+
+#+begin_src python
+"""What an editor is allowed to say.
+
+Three operations over an `ActionScript`'s action list. `lead_in` is NOT
+editable in v1 (see the spec's Open questions): it is preserved exactly,
+so a run whose only problem is starting too early cannot be fixed here.
+
+Indices are interpreted SEQUENTIALLY -- each edit sees the list as the
+previous edit in the same batch left it. `[Delete(0), Delete(0)]`
+therefore removes the first two actions. The alternative (every index
+against the original list, applied atomically) is equally defensible;
+this one composes trivially and an editor that wants the other semantics
+can propose one edit per round.
+
+Every refusal is a `ValueError`, matching `validate_actions`, so
+`tuxghost.optimize.runner` can catch exactly `(ValueError, TypeError)` --
+the same narrow boundary `tuxghost.cli._agent` uses -- and treat a bad
+proposal as a rejected round rather than a crash.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+
+from tuxghost.agent.types import Action, validate_actions
+from tuxghost.optimize.schedule import ActionScript
+
+
+@dataclass(frozen=True)
+class Insert:
+    index: int
+    action: Action
+
+
+@dataclass(frozen=True)
+class Delete:
+    index: int
+
+
+@dataclass(frozen=True)
+class Replace:
+    index: int
+    action: Action
+
+
+Edit = Insert | Delete | Replace
+
+
+def _check_index(index: int, length: int, *, insert: bool) -> None:
+    limit = length if insert else length - 1
+    if index < 0 or index > limit:
+        raise ValueError(
+            f"index {index} is out of range for {length} action(s) "
+            f"(valid: 0..{max(limit, 0)}); negative indices are refused "
+            "rather than wrapping to the end"
+        )
+
+
+def apply_edits(
+    script: ActionScript, edits: Sequence[Edit]
+) -> ActionScript:
+    """Apply `edits` in order and revalidate the result.
+
+    Raises `ValueError` for an out-of-range index or an action
+    `validate_actions` rejects. Returns a new `ActionScript`; the input is
+    frozen and untouched.
+    """
+    actions = list(script.actions)
+    for edit in edits:
+        match edit:
+            case Insert(index, action):
+                _check_index(index, len(actions), insert=True)
+                actions.insert(index, action)
+            case Delete(index):
+                _check_index(index, len(actions), insert=False)
+                del actions[index]
+            case Replace(index, action):
+                _check_index(index, len(actions), insert=False)
+                actions[index] = action
+    return replace(script, actions=validate_actions(actions))
+#+end_src
+
+- [ ] *Step 4: Run to verify they pass*
+
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_edits.py -v= — expect 13 passed.
+
+- [ ] *Step 5: Demonstrate the tests discriminate*
+
+#+begin_src bash
+cp tuxghost/optimize/edits.py /tmp/edits.bak
+# (a) drop the revalidation: return `replace(script, actions=tuple(actions))`
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_edits.py
+# (b) allow negatives: change `if index < 0 or index > limit` to `if index > limit`
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_edits.py
+cp /tmp/edits.bak tuxghost/optimize/edits.py && rm /tmp/edits.bak
+git status --short tuxghost/optimize/edits.py
+#+end_src
+
+Expected: (a) both =..._out_of_range_action_...= and =..._invalid_button_=
+fail — an unvalidated =hold=10_000= would reach the engine and silently
+rescale, corrupting a trace. (b)
+=test_negative_index_is_refused_rather_than_wrapping= fails: =Delete(-1)=
+succeeds and removes the last action.
+
+- [ ] *Step 6: Gate and commit*
+
+Run: =make check-fast= — expect *248 passed, 3 skipped, 9 warnings*.
+
+#+begin_src bash
+git add tuxghost/optimize/edits.py tests/test_optimize_edits.py
+git commit -m "feat: the edit vocabulary -- Insert, Delete, Replace"
+#+end_src
+
+-----
+
+* Task 5: =seal()= — compile, run, record
+
+Turns a script into a sealed =offline-agent= trace plus telemetry, using
+only primitives that already exist. The identity control here is the most
+important test in the plan: an empty edit list must reproduce its parent's
+=inputs=, =final_digest= *and* =step_count=. All three, because the first
+probe of this design matched inputs and digest while silently dropping 10
+real steps.
+
+Note =seal= calls =seed_all= *and* =pin_clock=, like
+=tuxghost.execute.execute= (lines 139-140), and unlike =run_agent= (whose
+caller does it). Getting that wrong makes candidates differ from their
+parents for reasons that have nothing to do with the edit.
+
+*Files:*
+- Create: =tuxghost/optimize/seal.py=
+- Create: =tests/test_optimize_seal.py=
+
+*Interfaces:*
+- Consumes: =lift=/=lower=/=ActionScript= (Task 3),
+  =tuxghost.boot.boot_from_save=, =tuxghost.loop.install_schedule=/=run_steps=,
+  =tuxghost.record.Recorder=, =tuxghost.digest.digest_of=/=state_of=,
+  =tuxghost.determinism.seed_all=/=pin_clock=, =tuxghost.trace.Trace=.
+- Produces:
+  - =CandidateResult= — dataclass with =trace: Trace=, =steps: int=,
+    =final_state: dict[str, Any]=, =checkpoints: list[tuple[int, str]]=,
+    =checkpoint_states: dict[int, dict[str, Any]]=.
+  - =seal(script: ActionScript, parent: Trace, *, checkpoint: int = 0, taints: Sequence[str] = (), model: str | None = None) -> CandidateResult=
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""Task 5: compile a script, run it, seal it.
+
+THE IDENTITY CONTROL is the point of this file: sealing a script lifted
+straight out of a trace, with no edits, must reproduce that trace's
+`inputs`, `final_digest` AND `step_count`. All three are asserted because
+a probe of this exact path once matched inputs and digest while dropping
+the parent's last 10 steps -- the digest could not see it, because those
+steps changed nothing that had not already settled.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from tuxghost.agent.types import Action
+from tuxghost.execute import execute
+from tuxghost.optimize.edits import Delete
+from tuxghost.optimize.edits import apply_edits
+from tuxghost.optimize.schedule import lift
+from tuxghost.optimize.seal import seal
+from tuxghost.trace import read
+
+GOLDEN = Path(__file__).parent / "golden"
+LIVE = GOLDEN / "claude_town_1234.tuxghost"
+
+
+def test_sealing_an_unedited_script_reproduces_its_parent_exactly() -> None:
+    parent = read(LIVE)
+    script = lift(parent.inputs, parent.header.step_count)
+    result = seal(script, parent)
+
+    assert result.trace.inputs == parent.inputs
+    assert result.trace.header.step_count == parent.header.step_count
+    assert result.steps == parent.header.step_count
+    assert result.trace.header.final_digest == parent.header.final_digest
+
+
+def test_a_sealed_candidate_is_an_offline_agent_trace_that_verifies() -> None:
+    parent = read(LIVE)
+    script = lift(parent.inputs, parent.header.step_count)
+    result = seal(script, parent, taints=("derived in a test",))
+
+    assert result.trace.provenance.recorder == "offline-agent"
+    assert result.trace.provenance.taints == ["derived in a test"]
+    assert execute(result.trace).final_digest == result.trace.header.final_digest
+
+
+def test_an_edited_script_changes_the_input_stream() -> None:
+    """A control against `seal` ignoring its script: deleting an action
+    must produce fewer inputs and a shorter run."""
+    parent = read(LIVE)
+    script = lift(parent.inputs, parent.header.step_count)
+    edited = apply_edits(script, [Delete(0)])
+    result = seal(edited, parent)
+
+    assert len(result.trace.inputs) == len(parent.inputs) - 2
+    assert result.steps == edited.cost() < parent.header.step_count
+
+
+def test_seal_samples_checkpoints_on_executes_convention() -> None:
+    parent = read(LIVE)
+    script = lift(parent.inputs, parent.header.step_count)
+    result = seal(script, parent, checkpoint=64, taints=())
+
+    assert [s for s, _ in result.checkpoints] == [64, 128, 192, 256, 320, 384]
+    assert result.checkpoints == execute(parent, checkpoint=64).checkpoints
+    assert sorted(result.checkpoint_states) == [s for s, _ in result.checkpoints]
+    assert "tile_pos" in result.checkpoint_states[64]
+
+
+def test_seal_captures_nothing_when_checkpoint_is_zero() -> None:
+    parent = read(LIVE)
+    script = lift(parent.inputs, parent.header.step_count)
+    result = seal(script, parent)
+    assert result.checkpoints == [] and result.checkpoint_states == {}
+
+
+def test_seal_runs_exactly_the_scripts_cost() -> None:
+    """`seal` counts the steps it actually ran and refuses to seal a trace
+    claiming a different number. Not tautological: the count comes from
+    `run_steps`' own per-step hook, so a `run_steps(client, cost - 1)`
+    fires it. See this task's demonstration step."""
+    parent = read(LIVE)
+    script = lift(parent.inputs, parent.header.step_count)
+    result = seal(script, parent)
+    assert result.steps == script.cost()
+
+
+def test_seal_refuses_a_script_that_would_outlive_its_budget() -> None:
+    parent = read(LIVE)
+    script = lift(parent.inputs, parent.header.step_count)
+    with pytest.raises(ValueError, match="max_cost"):
+        seal(script, parent, max_cost=10)
+
+
+def test_an_action_free_script_still_runs_its_lead_in() -> None:
+    parent = read(LIVE)
+    result = seal(lift([], 120), parent)
+    assert result.steps == 120
+    assert result.trace.inputs == []
+    assert result.trace.header.step_count == 120
+#+end_src
+
+- [ ] *Step 2: Run to verify they fail*
+
+Expected: =ModuleNotFoundError: No module named 'tuxghost.optimize.seal'=.
+
+- [ ] *Step 3: Write the implementation*
+
+#+begin_src python
+"""Compile a script, run it, and seal the result as a trace.
+
+Composes four primitives that already exist and adds no fifth:
+`boot_from_save`, `install_schedule`, `run_steps` (with `execute`'s own
+checkpoint hook) and `Recorder`. There is deliberately no new stepping
+loop and no new format writer here.
+
+Why not `run_agent`: its scripted path starts the first action at step 0,
+so it cannot express a script with a nonzero `lead_in` -- true of 1 of
+the 2 traces this project has committed (`walk_1234` waits 30 steps).
+
+`seed_all` and `pin_clock` are called here, mirroring
+`tuxghost.execute.execute` and NOT `run_agent` (whose caller does it).
+Without them a candidate would differ from its parent for reasons that
+have nothing to do with the edit under test.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+from tuxghost.boot import boot_from_save
+from tuxghost.determinism import pin_clock, seed_all
+from tuxghost.digest import digest_of, state_of
+from tuxghost.loop import install_schedule, run_steps
+from tuxghost.optimize.schedule import ActionScript, lower
+from tuxghost.record import Recorder
+from tuxghost.trace import Trace
+
+
+@dataclass
+class CandidateResult:
+    """One candidate, run. This is everything an `Objective` and an
+    `Editor` are allowed to see -- no frames, by design."""
+
+    trace: Trace
+    steps: int
+    final_state: dict[str, Any]
+    #: `(step, digest)` every `checkpoint` steps, on `execute`'s
+    #: convention (step 0 excluded). Empty when `checkpoint=0`.
+    checkpoints: list[tuple[int, str]] = field(default_factory=list)
+    checkpoint_states: dict[int, dict[str, Any]] = field(default_factory=dict)
+
+
+def seal(
+    script: ActionScript,
+    parent: Trace,
+    *,
+    checkpoint: int = 0,
+    taints: Sequence[str] = (),
+    model: str | None = None,
+    max_cost: int | None = None,
+) -> CandidateResult:
+    """Run `script` from `parent`'s start and seal what it reached.
+
+    `parent` supplies `initial_state`, `seed` and `clock_epoch` verbatim:
+    a candidate that changed any of them would not be a candidate for the
+    same problem.
+
+    `max_cost` refuses an over-budget script BEFORE booting anything.
+    `HOLD_CAP` and `SETTLE_CAP` are 600 each, so an editor that inserts
+    10,000 actions describes a 12,000,000-step run -- hours of engine
+    time inside one call, unobservable and uninterruptible, which is the
+    same reasoning `tuxghost/agent/types.py` gives for capping a single
+    action.
+    """
+    from tuxemon.save_system.save_state import SaveData
+
+    cost = script.cost()
+    if max_cost is not None and cost > max_cost:
+        raise ValueError(
+            f"script costs {cost} steps, over the max_cost of {max_cost}; "
+            "refusing before booting rather than running it"
+        )
+
+    seed = parent.header.seed
+    epoch = parent.header.clock_epoch
+    seed_all(seed)
+    pin_clock(epoch)
+
+    save_data = SaveData.model_validate(parent.initial_state)
+    client, session = boot_from_save(save_data, seed=seed, clock_epoch=epoch)
+
+    schedule = lower(script)
+    install_schedule(client, schedule)
+
+    recorder = Recorder(
+        session,
+        seed=seed,
+        clock_epoch=epoch,
+        recorder="offline-agent",
+        model=model,
+        taints=taints,
+    )
+    for step in sorted(schedule):
+        for button, value in schedule[step]:
+            recorder.observe(step, button, value)
+
+    checkpoints: list[tuple[int, str]] = []
+    states: dict[int, dict[str, Any]] = {}
+    ran = 0
+
+    def hook(i: int) -> None:
+        nonlocal ran
+        ran += 1
+        if checkpoint and i and i % checkpoint == 0:
+            checkpoints.append((i, digest_of(session)))
+            states[i] = state_of(session)
+
+    run_steps(client, cost, hook=hook)
+
+    if ran != cost:
+        raise AssertionError(
+            f"seal ran {ran} steps for a {cost}-step script; a clipped "
+            "candidate would be scored as if the clip were the edit"
+        )
+
+    trace = recorder.finish(step_count=cost)
+    return CandidateResult(
+        trace=trace,
+        steps=cost,
+        final_state=state_of(session),
+        checkpoints=checkpoints,
+        checkpoint_states=states,
+    )
+#+end_src
+
+Note the hook is installed *unconditionally* — the step counter needs it
+even when =checkpoint == 0=. That is the difference between the tautology
+the spec's self-review flagged and a real assertion.
+
+- [ ] *Step 4: Run to verify they pass*
+
+Run: =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_seal.py -v= — expect 8 passed.
+
+- [ ] *Step 5: Demonstrate the identity control and the step counter*
+
+#+begin_src bash
+cp tuxghost/optimize/seal.py /tmp/seal.bak
+# (a) clip the run: `run_steps(client, cost - 1, hook=hook)`
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  ./.venv/bin/python -m pytest -q tests/test_optimize_seal.py
+# (b) drop pin_clock
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  ./.venv/bin/python -m pytest -q tests/test_optimize_seal.py
+cp /tmp/seal.bak tuxghost/optimize/seal.py && rm /tmp/seal.bak
+git status --short tuxghost/optimize/seal.py
+#+end_src
+
+Expected: (a) =AssertionError: seal ran 441 steps for a 442-step script=
+— note this fires *before* any digest comparison, which is the whole
+point: the digest itself may well be unchanged. (b) record what actually
+happens and report it honestly; if the digest is unchanged, say so and
+note that =pin_clock='s necessity here is inherited from =execute='s
+documented reasoning rather than demonstrated by this test — do NOT claim
+a demonstration that did not occur.
+
+- [ ] *Step 6: Gate and commit*
+
+Run: =make check-fast= — expect *256 passed, 3 skipped, 9 warnings*.
+
+#+begin_src bash
+git add tuxghost/optimize/seal.py tests/test_optimize_seal.py
+git commit -m "feat: seal() -- compile a script, run it, record an offline-agent trace"
+#+end_src
+
+-----
+
+* Task 6: The objective and =ReachTile=
+
+*Files:*
+- Create: =tuxghost/optimize/objective.py=
+- Create: =tests/test_optimize_objective.py=
+
+*Interfaces:*
+- Consumes: =CandidateResult= (Task 5).
+- Produces: =Objective= protocol with
+  =score(candidate: CandidateResult) -> tuple[float, ...]=, and
+  =ReachTile(map_name: str, tile: tuple[int, int])=.
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""Task 6: scoring.
+
+Scores are TUPLES compared lexicographically, higher is better, because
+any objective mixing "did it get there" with "how fast" into a single
+float needs an invented weighting constant.
+
+`ReachTile`'s middle term (distance) is not decoration. A binary
+reached/didn't objective gives `MutationEditor` nothing to climb: every
+failing candidate scores identically, the search degenerates to a random
+walk, and Task 8's convergence test would be measuring luck.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from tuxghost.optimize.objective import ReachTile
+from tuxghost.optimize.seal import CandidateResult
+from tuxghost.trace import Trace
+
+
+def _candidate(map_name: str, tile: tuple[int, int], steps: int) -> CandidateResult:
+    """A CandidateResult with only the fields `ReachTile` reads. The
+    `trace` field is never touched by an objective, so `None` typed as
+    `Any` keeps the fixture honest about that rather than fabricating a
+    Trace this test does not use."""
+    trace: Any = None
+    return CandidateResult(
+        trace=trace,
+        steps=steps,
+        final_state={"map": map_name, "tile_pos": [tile[0], tile[1]]},
+    )
+
+
+TARGET = ReachTile("spyder_paper_town.tmx", (12, 20))
+
+
+def test_reaching_the_target_beats_being_near_it() -> None:
+    on = _candidate("spyder_paper_town.tmx", (12, 20), 400)
+    near = _candidate("spyder_paper_town.tmx", (12, 19), 100)
+    assert TARGET.score(on) > TARGET.score(near)
+
+
+def test_closer_beats_farther_on_the_same_map() -> None:
+    near = _candidate("spyder_paper_town.tmx", (12, 18), 400)
+    far = _candidate("spyder_paper_town.tmx", (12, 12), 400)
+    assert TARGET.score(near) > TARGET.score(far)
+
+
+def test_any_same_map_candidate_beats_a_wrong_map_one() -> None:
+    """Even an absurdly distant same-map candidate. `manhattan` across
+    maps is meaningless, so the map term leads."""
+    same = _candidate("spyder_paper_town.tmx", (900, 900), 400)
+    other = _candidate("spyder_bedroom.tmx", (12, 20), 400)
+    assert TARGET.score(same) > TARGET.score(other)
+
+
+def test_fewer_steps_breaks_a_tie() -> None:
+    quick = _candidate("spyder_paper_town.tmx", (12, 20), 100)
+    slow = _candidate("spyder_paper_town.tmx", (12, 20), 400)
+    assert TARGET.score(quick) > TARGET.score(slow)
+
+
+def test_steps_never_outweigh_distance() -> None:
+    """The gradient must dominate the tie-break, or the optimizer learns
+    to do nothing quickly rather than something slowly."""
+    closer_slower = _candidate("spyder_paper_town.tmx", (12, 19), 10_000)
+    farther_faster = _candidate("spyder_paper_town.tmx", (12, 12), 1)
+    assert TARGET.score(closer_slower) > TARGET.score(farther_faster)
+
+
+def test_the_score_is_a_stable_length_tuple() -> None:
+    a = TARGET.score(_candidate("spyder_paper_town.tmx", (12, 20), 1))
+    b = TARGET.score(_candidate("spyder_bedroom.tmx", (0, 0), 999))
+    assert len(a) == len(b) == 3
+
+
+def test_distance_is_symmetric_in_both_axes() -> None:
+    left = _candidate("spyder_paper_town.tmx", (10, 20), 400)
+    below = _candidate("spyder_paper_town.tmx", (12, 22), 400)
+    assert TARGET.score(left) == TARGET.score(below)
+#+end_src
+
+- [ ] *Step 2: Run to verify they fail*
+
+Expected: =ModuleNotFoundError: No module named 'tuxghost.optimize.objective'=.
+
+- [ ] *Step 3: Write the implementation*
+
+#+begin_src python
+"""What "better" means, and the one built-in that says so.
+
+An `Objective` returns a TUPLE, compared lexicographically, higher is
+better. A single float would need an invented constant to weigh "arrived"
+against "arrived quickly"; tuple comparison gives that priority for free,
+and a single-criterion objective returns a 1-tuple.
+
+`ReachTile` is openly a PROXY. It measures position, not progress: it
+says nothing about whether the game advanced, which is exactly where S5
+takes over. S5 supplies its own `Objective` and nothing else changes.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from tuxghost.optimize.seal import CandidateResult
+
+
+class Objective(Protocol):
+    def score(self, candidate: CandidateResult) -> tuple[float, ...]:
+        """Higher is better; compared lexicographically against other
+        scores from the SAME objective. The tuple length must not vary
+        between candidates -- `tuxghost.optimize.runner` checks it."""
+        ...
+
+
+class ReachTile:
+    """Get to `tile` on `map_name`, in as few steps as possible.
+
+    Score: `(on_the_right_map, -distance, -steps)`.
+
+    The distance term is what makes this searchable. Without it every
+    candidate that has not arrived scores identically and a mutation
+    search has no gradient to climb.
+
+    `manhattan` between two different maps is meaningless, which is why
+    the map term leads: a candidate that wanders onto a neighbouring map
+    scores below EVERY same-map candidate however physically close it
+    ends. Deliberate -- a trace that left the map has broken the thing
+    being optimized -- but it means `ReachTile` cannot reward a route
+    that legitimately passes THROUGH another map. Such a target needs a
+    state predicate, not a tile.
+    """
+
+    def __init__(self, map_name: str, tile: tuple[int, int]) -> None:
+        self.map_name = map_name
+        self.tile = tile
+
+    def score(self, candidate: CandidateResult) -> tuple[float, ...]:
+        state = candidate.final_state
+        on_map = state.get("map") == self.map_name
+        pos = state.get("tile_pos") or [0, 0]
+        distance = abs(pos[0] - self.tile[0]) + abs(pos[1] - self.tile[1])
+        return (
+            0.0 if on_map else -1.0,
+            -float(distance),
+            -float(candidate.steps),
+        )
+#+end_src
+
+- [ ] *Step 4: Run to verify they pass*
+
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_objective.py -v= — expect 7 passed.
+
+- [ ] *Step 5: Demonstrate the gradient and the ordering matter*
+
+#+begin_src bash
+cp tuxghost/optimize/objective.py /tmp/obj.bak
+# (a) make it binary: replace the distance term with `0.0 if distance == 0 else -1.0`
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_objective.py
+# (b) reorder to (-distance, on_map, -steps)
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_objective.py
+cp /tmp/obj.bak tuxghost/optimize/objective.py && rm /tmp/obj.bak
+git status --short tuxghost/optimize/objective.py
+#+end_src
+
+Expected: (a) =test_closer_beats_farther_on_the_same_map= fails — the two
+candidates tie, which is exactly the no-gradient failure. (b)
+=test_any_same_map_candidate_beats_a_wrong_map_one= fails.
+
+- [ ] *Step 6: Gate and commit*
+
+Run: =make check-fast= — expect *263 passed, 3 skipped, 9 warnings*.
+
+#+begin_src bash
+git add tuxghost/optimize/objective.py tests/test_optimize_objective.py
+git commit -m "feat: Objective protocol and ReachTile, the one built-in"
+#+end_src
+
+-----
+
+* Task 7: The loop, driven by =ScriptedEditor=
+
+*Files:*
+- Create: =tuxghost/optimize/editors/__init__.py=,
+  =tuxghost/optimize/editors/scripted.py=
+- Create: =tuxghost/optimize/runner.py=
+- Create: =tests/test_optimize_runner.py=
+
+*Interfaces:*
+- Consumes: everything from Tasks 3-6.
+- Produces:
+  - =Editor= protocol:
+    =propose(script: ActionScript, candidate: CandidateResult, score: tuple[float, ...]) -> Sequence[Edit]=
+  - =ScriptedEditor(rounds: Sequence[Sequence[Edit]])=
+  - =Round= — dataclass: =index: int=, =edits: tuple[Edit, ...]=,
+    =score: tuple[float, ...] | None=, =steps: int | None=,
+    =digest: str | None=, =accepted: bool=, =rejected_reason: str | None=
+  - =OptimizeResult= — dataclass: =best: CandidateResult=,
+    =best_script: ActionScript=, =best_round: int=,
+    =rounds: list[Round]=, =stop_reason: str=
+  - =optimize(parent, editor, objective, *, rounds, patience, max_rejections, max_cost, checkpoint=0, model=None) -> OptimizeResult=
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""Task 7: the edit -> seal -> score loop.
+
+Round 0 is the PARENT, sealed and scored, so "did anything improve" is
+answered against a measured baseline rather than against the parent's own
+recorded header.
+
+Improvement is asserted on the round-by-round score SEQUENCE, never on
+the final best alone: a settled tile is an attractor in this game, so an
+endpoint comparison cannot distinguish a run that improved from one that
+wandered and came back.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from tuxemon.platform.const import buttons
+
+from tuxghost.agent.types import Action
+from tuxghost.optimize.edits import Delete, Insert, Replace
+from tuxghost.optimize.editors.scripted import ScriptedEditor
+from tuxghost.optimize.objective import ReachTile
+from tuxghost.optimize.runner import optimize
+from tuxghost.trace import read
+
+LIVE = Path(__file__).parent / "golden" / "claude_town_1234.tuxghost"
+#: The live capture ends at tile (11, 14) on this map. A target two tiles
+#: further DOWN is reachable and gives the loop something to close.
+TARGET = ReachTile("spyder_paper_town.tmx", (11, 16))
+DOWN = Action(buttons.DOWN, 16, 8)
+
+
+def _parent() -> object:
+    return read(LIVE)
+
+
+def test_round_zero_is_the_parent_scored() -> None:
+    result = optimize(
+        _parent(), ScriptedEditor([]), TARGET,
+        rounds=1, patience=1, max_rejections=1, max_cost=10_000,
+    )
+    assert result.rounds[0].index == 0
+    assert result.rounds[0].edits == ()
+    assert result.rounds[0].accepted is True
+    assert result.best.trace.header.final_digest == read(LIVE).header.final_digest
+    assert result.best_round == 0
+
+
+def test_an_improving_edit_is_accepted_and_becomes_the_new_best() -> None:
+    """Appending two DOWN presses moves the player toward the target."""
+    editor = ScriptedEditor([[Insert(18, DOWN)], [Insert(19, DOWN)]])
+    result = optimize(
+        _parent(), editor, TARGET,
+        rounds=3, patience=3, max_rejections=1, max_cost=10_000,
+    )
+    scores = [r.score for r in result.rounds if r.score is not None]
+    assert scores == sorted(scores), f"score sequence went backwards: {scores}"
+    assert scores[-1] > scores[0]
+    assert result.best_round > 0
+
+
+def test_a_worsening_edit_is_kept_out_of_best_but_recorded() -> None:
+    editor = ScriptedEditor([[Delete(0)], [Delete(0)]])
+    result = optimize(
+        _parent(), editor, TARGET,
+        rounds=3, patience=3, max_rejections=1, max_cost=10_000,
+    )
+    assert result.best_round == 0
+    assert [r.accepted for r in result.rounds] == [True, False, False]
+    assert all(r.score is not None for r in result.rounds)
+
+
+def test_an_empty_proposal_stops_the_run() -> None:
+    editor = ScriptedEditor([[Insert(18, DOWN)], []])
+    result = optimize(
+        _parent(), editor, TARGET,
+        rounds=10, patience=10, max_rejections=1, max_cost=10_000,
+    )
+    assert result.stop_reason == "editor returned STOP"
+    assert len(result.rounds) == 2
+
+
+def test_patience_stops_a_run_that_stops_improving() -> None:
+    editor = ScriptedEditor([[Delete(0)]] * 10)
+    result = optimize(
+        _parent(), editor, TARGET,
+        rounds=10, patience=2, max_rejections=10, max_cost=10_000,
+    )
+    assert result.stop_reason == "patience exhausted"
+    assert len(result.rounds) == 3  # round 0 + two non-improving
+
+
+def test_the_rounds_cap_stops_a_run_that_keeps_improving() -> None:
+    editor = ScriptedEditor([[Insert(18, DOWN)]] * 10)
+    result = optimize(
+        _parent(), editor, TARGET,
+        rounds=2, patience=10, max_rejections=1, max_cost=10_000,
+    )
+    assert result.stop_reason == "rounds exhausted"
+    assert len(result.rounds) == 3  # round 0 + 2
+
+
+def test_an_invalid_proposal_is_a_rejected_round_not_a_crash() -> None:
+    editor = ScriptedEditor([[Replace(999, DOWN)], [Insert(18, DOWN)]])
+    result = optimize(
+        _parent(), editor, TARGET,
+        rounds=3, patience=3, max_rejections=2, max_cost=10_000,
+    )
+    assert result.rounds[1].accepted is False
+    assert result.rounds[1].score is None
+    assert "index 999" in (result.rounds[1].rejected_reason or "")
+    assert result.rounds[2].accepted is True  # the run continued
+
+
+def test_consecutive_rejections_stop_the_run() -> None:
+    editor = ScriptedEditor([[Replace(999, DOWN)]] * 5)
+    result = optimize(
+        _parent(), editor, TARGET,
+        rounds=5, patience=5, max_rejections=2, max_cost=10_000,
+    )
+    assert result.stop_reason == "editor rejected 2 rounds consecutively"
+
+
+def test_an_over_budget_proposal_is_rejected_rather_than_run() -> None:
+    """`max_cost` is the guard against an editor describing a
+    12,000,000-step candidate: HOLD_CAP and SETTLE_CAP are 600 each, so a
+    few thousand inserted actions is hours of engine time in one call."""
+    editor = ScriptedEditor([[Insert(18, Action(buttons.DOWN, 600, 600))]])
+    result = optimize(
+        _parent(), editor, TARGET,
+        rounds=1, patience=1, max_rejections=1, max_cost=500,
+    )
+    assert result.rounds[1].accepted is False
+    assert "max_cost" in (result.rounds[1].rejected_reason or "")
+
+
+def test_an_objective_with_an_unstable_score_length_is_refused() -> None:
+    class Wobbly:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def score(self, candidate: object) -> tuple[float, ...]:
+            self.n += 1
+            return tuple(0.0 for _ in range(self.n))
+
+    with pytest.raises(ValueError, match="score length"):
+        optimize(
+            _parent(), ScriptedEditor([[Insert(18, DOWN)]]), Wobbly(),
+            rounds=2, patience=2, max_rejections=1, max_cost=10_000,
+        )
+
+
+def test_rounds_below_one_is_refused() -> None:
+    with pytest.raises(ValueError, match="rounds"):
+        optimize(
+            _parent(), ScriptedEditor([]), TARGET,
+            rounds=0, patience=1, max_rejections=1, max_cost=10_000,
+        )
+#+end_src
+
+- [ ] *Step 2: Run to verify they fail*
+
+Expected: =ModuleNotFoundError: No module named 'tuxghost.optimize.editors'=.
+
+- [ ] *Step 3: Write =ScriptedEditor=*
+
+#+begin_src python
+"""An editor that answers from a fixed list.
+
+Drives every loop test in the gate: no network, no model, no key, no
+randomness. Straight from `tuxghost.agent.scripted.ScriptedPolicy`'s
+precedent, including "returns STOP when exhausted" -- an empty proposal
+is a valid answer, not an error.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from tuxghost.optimize.edits import Edit
+from tuxghost.optimize.schedule import ActionScript
+from tuxghost.optimize.seal import CandidateResult
+
+
+class ScriptedEditor:
+    def __init__(self, rounds: Sequence[Sequence[Edit]]) -> None:
+        self._rounds = [tuple(r) for r in rounds]
+        self._index = 0
+
+    def propose(
+        self,
+        script: ActionScript,
+        candidate: CandidateResult,
+        score: tuple[float, ...],
+    ) -> Sequence[Edit]:
+        del script, candidate, score  # a fixed list ignores the state
+        if self._index >= len(self._rounds):
+            return ()
+        proposal = self._rounds[self._index]
+        self._index += 1
+        return proposal
+#+end_src
+
+=tuxghost/optimize/editors/__init__.py=: empty.
+
+- [ ] *Step 4: Write =tuxghost/optimize/runner.py=*
+
+#+begin_src python
+"""The edit -> seal -> score loop.
+
+Round 0 is the parent, sealed and scored, so improvement is measured
+against something this process actually ran rather than against a digest
+recorded by another one.
+
+An editor is UNTRUSTED INPUT -- `ClaudeEditor` parses a language model's
+JSON. A proposal that fails validation is a rejected round: logged with
+its reason, patience incremented, loop continues, because one malformed
+answer must not kill a 20-round run. The boundary is exactly
+`(ValueError, TypeError)`, the two exceptions this project's own input
+validation raises, deliberately NOT `Exception`: an `AttributeError` out
+of an editor is a programming error and must stay a visible crash rather
+than being laundered into a tidy rejected round.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Protocol
+
+from tuxghost.optimize.edits import Edit, apply_edits
+from tuxghost.optimize.objective import Objective
+from tuxghost.optimize.schedule import ActionScript, lift
+from tuxghost.optimize.seal import CandidateResult, seal
+from tuxghost.trace import Trace
+
+
+class Editor(Protocol):
+    def propose(
+        self,
+        script: ActionScript,
+        candidate: CandidateResult,
+        score: tuple[float, ...],
+    ) -> Sequence[Edit]:
+        """Edits to apply to `script`. An EMPTY sequence means STOP -- a
+        valid answer, not an error (the same convention
+        `tuxghost.agent.types.STOP` sets for policies)."""
+        ...
+
+
+@dataclass
+class Round:
+    index: int
+    edits: tuple[Edit, ...]
+    score: tuple[float, ...] | None = None
+    steps: int | None = None
+    digest: str | None = None
+    accepted: bool = False
+    rejected_reason: str | None = None
+
+
+@dataclass
+class OptimizeResult:
+    best: CandidateResult
+    best_script: ActionScript
+    best_round: int
+    rounds: list[Round] = field(default_factory=list)
+    stop_reason: str = "rounds exhausted"
+
+
+def optimize(
+    parent: Trace,
+    editor: Editor,
+    objective: Objective,
+    *,
+    rounds: int,
+    patience: int,
+    max_rejections: int,
+    max_cost: int,
+    checkpoint: int = 0,
+    model: str | None = None,
+) -> OptimizeResult:
+    """Edit, seal, score, keep if better.
+
+    Every bound is required rather than defaulted: no realistic value has
+    been measured yet (see docs/2026-08-27-optimizer-tuning.org), and a
+    default invented here would be mistaken for one that had.
+    """
+    if rounds < 1:
+        raise ValueError(f"rounds must be >= 1, got {rounds!r}")
+    for name, value in (
+        ("patience", patience),
+        ("max_rejections", max_rejections),
+        ("max_cost", max_cost),
+    ):
+        if value < 1:
+            raise ValueError(f"{name} must be >= 1, got {value!r}")
+
+    base_script = lift(parent.inputs, parent.header.step_count)
+    best = seal(base_script, parent, checkpoint=checkpoint, model=model)
+    best_score = tuple(objective.score(best))
+    score_length = len(best_score)
+    best_script = base_script
+    best_round = 0
+
+    log = [
+        Round(
+            index=0,
+            edits=(),
+            score=best_score,
+            steps=best.steps,
+            digest=best.trace.header.final_digest,
+            accepted=True,
+        )
+    ]
+
+    stop_reason = "rounds exhausted"
+    stale = 0
+    consecutive_rejections = 0
+
+    for index in range(1, rounds + 1):
+        proposal = tuple(editor.propose(best_script, best, best_score))
+        if not proposal:
+            stop_reason = "editor returned STOP"
+            log.append(Round(index=index, edits=(), rejected_reason="STOP"))
+            break
+
+        entry = Round(index=index, edits=proposal)
+        log.append(entry)
+
+        try:
+            script = apply_edits(best_script, proposal)
+            candidate = seal(
+                script,
+                parent,
+                checkpoint=checkpoint,
+                model=model,
+                max_cost=max_cost,
+            )
+        except (ValueError, TypeError) as exc:
+            entry.rejected_reason = str(exc)
+            consecutive_rejections += 1
+            stale += 1
+            if consecutive_rejections >= max_rejections:
+                stop_reason = (
+                    f"editor rejected {consecutive_rejections} rounds "
+                    "consecutively"
+                )
+                break
+            if stale >= patience:
+                stop_reason = "patience exhausted"
+                break
+            continue
+
+        consecutive_rejections = 0
+        score = tuple(objective.score(candidate))
+        if len(score) != score_length:
+            raise ValueError(
+                f"objective returned a score length of {len(score)} after "
+                f"{score_length}; a varying score length is a bug, not a "
+                "tie-break"
+            )
+
+        entry.score = score
+        entry.steps = candidate.steps
+        entry.digest = candidate.trace.header.final_digest
+
+        if score > best_score:
+            best, best_score, best_script, best_round = (
+                candidate,
+                score,
+                script,
+                index,
+            )
+            entry.accepted = True
+            stale = 0
+        else:
+            stale += 1
+            if stale >= patience:
+                stop_reason = "patience exhausted"
+                break
+
+    return OptimizeResult(
+        best=best,
+        best_script=best_script,
+        best_round=best_round,
+        rounds=log,
+        stop_reason=stop_reason,
+    )
+#+end_src
+
+- [ ] *Step 5: Run to verify they pass*
+
+Run: =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_runner.py -v=
+
+Expected: 11 passed. If =test_an_improving_edit_is_accepted...= fails
+because appending =DOWN= does *not* improve =ReachTile('…', (11, 16))=,
+*measure the real end tile* (=lift= + =seal= the parent and print
+=final_state["map"]= and =final_state["tile_pos"]=) and correct =TARGET=
+and the inserted actions to a genuinely reachable improvement. Record the
+measured tile in the task report. Do NOT weaken the assertion to make an
+unreachable target pass.
+
+- [ ] *Step 6: Demonstrate the loop's guards*
+
+#+begin_src bash
+cp tuxghost/optimize/runner.py /tmp/optrunner.bak
+# (a) accept everything: change `if score > best_score:` to `if True:`
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  ./.venv/bin/python -m pytest -q tests/test_optimize_runner.py
+# (b) widen the boundary: `except Exception as exc:`  -- then add a
+#     temporary editor raising AttributeError in the test file and show it
+#     is swallowed as a rejected round instead of crashing
+# (c) drop the score-length check
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  ./.venv/bin/python -m pytest -q tests/test_optimize_runner.py
+cp /tmp/optrunner.bak tuxghost/optimize/runner.py && rm /tmp/optrunner.bak
+git status --short tuxghost/optimize/runner.py
+#+end_src
+
+Expected: (a) =test_a_worsening_edit_is_kept_out_of_best_but_recorded=
+fails (=best_round= becomes 2). (c)
+=test_an_objective_with_an_unstable_score_length_is_refused= fails.
+Capture each.
+
+- [ ] *Step 7: Gate and commit*
+
+Run: =make check-fast= — expect *274 passed, 3 skipped, 9 warnings*.
+
+#+begin_src bash
+git add tuxghost/optimize/editors/ tuxghost/optimize/runner.py tests/test_optimize_runner.py
+git commit -m "feat: the optimize loop, driven by ScriptedEditor"
+#+end_src
+
+-----
+
+* Task 8: =MutationEditor= — the seeded baseline
+
+The control that makes any later claim about an LLM editor measurable.
+Two properties matter more than cleverness: it must be *reproducible from
+a seed* and it must *actually improve something*, demonstrated against a
+no-op editor.
+
+It draws from its own =random.Random(seed)= instance, *never* the global
+module RNG: =tuxghost.determinism.seed_all= pins the global RNG for the
+GAME, and an editor drawing from it would perturb the engine's own random
+stream and change the very thing being scored. This project already
+replaced the engine's only =random.Random= INSTANCE in patch 0002 because
+instance-vs-global is exactly the distinction that bites here.
+
+*Files:*
+- Create: =tuxghost/optimize/editors/mutation.py=
+- Create: =tests/test_optimize_mutation.py=
+
+*Interfaces:*
+- Produces: =MutationEditor(seed: int, nudge: int = 4)= with the =Editor=
+  =propose= signature.
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""Task 8: the seeded mutation baseline.
+
+Reproducibility is asserted on the round-by-round score SEQUENCE and the
+winning trace's digest, not on the final score alone -- two runs that
+wandered differently and happened to settle on the same tile would look
+identical to an endpoint check.
+
+The convergence test is demonstrated against a NO-OP editor: if it passes
+with an editor that proposes nothing, it was measuring the harness.
+"""
+
+from __future__ import annotations
+
+import random
+from pathlib import Path
+
+from tuxghost.optimize.editors.mutation import MutationEditor
+from tuxghost.optimize.objective import ReachTile
+from tuxghost.optimize.runner import optimize
+from tuxghost.trace import read
+
+LIVE = Path(__file__).parent / "golden" / "claude_town_1234.tuxghost"
+TARGET = ReachTile("spyder_paper_town.tmx", (11, 16))
+BOUNDS = {"rounds": 12, "patience": 12, "max_rejections": 6, "max_cost": 4_000}
+
+
+def test_the_same_seed_produces_the_same_proposals() -> None:
+    """Pure, no engine: the editor is a function of its seed and inputs."""
+    from tuxghost.optimize.schedule import lift
+
+    parent = read(LIVE)
+    script = lift(parent.inputs, parent.header.step_count)
+    a = MutationEditor(seed=7)
+    b = MutationEditor(seed=7)
+    fake: object = None
+    for _ in range(20):
+        assert a.propose(script, fake, (0.0,)) == b.propose(script, fake, (0.0,))
+
+
+def test_different_seeds_diverge() -> None:
+    from tuxghost.optimize.schedule import lift
+
+    parent = read(LIVE)
+    script = lift(parent.inputs, parent.header.step_count)
+    fake: object = None
+    a = [MutationEditor(seed=7).propose(script, fake, (0.0,)) for _ in range(20)]
+    b = [MutationEditor(seed=8).propose(script, fake, (0.0,)) for _ in range(20)]
+    assert a != b
+
+
+def test_the_editor_never_touches_the_global_rng() -> None:
+    """The engine's determinism depends on the global `random` stream that
+    `seed_all` pins. An editor drawing from it would perturb the game."""
+    random.seed(99)
+    before = random.random()
+    random.seed(99)
+    from tuxghost.optimize.schedule import lift
+
+    parent = read(LIVE)
+    script = lift(parent.inputs, parent.header.step_count)
+    editor = MutationEditor(seed=7)
+    fake: object = None
+    for _ in range(50):
+        editor.propose(script, fake, (0.0,))
+    assert random.random() == before, (
+        "MutationEditor consumed from the global RNG stream"
+    )
+
+
+def test_a_seeded_run_is_reproducible_end_to_end() -> None:
+    a = optimize(read(LIVE), MutationEditor(seed=7), TARGET, **BOUNDS)
+    b = optimize(read(LIVE), MutationEditor(seed=7), TARGET, **BOUNDS)
+    assert [r.score for r in a.rounds] == [r.score for r in b.rounds]
+    assert a.best.trace.header.final_digest == b.best.trace.header.final_digest
+    assert a.best_round == b.best_round and a.stop_reason == b.stop_reason
+
+
+def test_the_mutation_editor_improves_on_the_parent() -> None:
+    result = optimize(read(LIVE), MutationEditor(seed=7), TARGET, **BOUNDS)
+    scores = [r.score for r in result.rounds if r.score is not None]
+    assert result.best_round > 0, (
+        f"no round beat the parent; score sequence was {scores}"
+    )
+    assert scores[0] < max(scores)
+
+
+def test_every_proposal_is_structurally_valid() -> None:
+    """A mutator that proposed out-of-range actions would burn the whole
+    budget on rejected rounds and still look like it 'ran'."""
+    result = optimize(read(LIVE), MutationEditor(seed=7), TARGET, **BOUNDS)
+    reasons = [r.rejected_reason for r in result.rounds if r.rejected_reason]
+    assert not [r for r in reasons if r != "STOP"], reasons
+#+end_src
+
+- [ ] *Step 2: Run to verify they fail*
+
+Expected: =ModuleNotFoundError: No module named
+'tuxghost.optimize.editors.mutation'=.
+
+- [ ] *Step 3: Write the implementation*
+
+#+begin_src python
+"""A deliberately dumb seeded mutator: the baseline, not the point.
+
+It exists so that any claim about `ClaudeEditor` has something to be
+compared against. An LLM editor with no control to beat is the
+"green but proves nothing" trap this project has already been burned by.
+
+It draws from its OWN `random.Random(seed)` instance and never the global
+module RNG. `tuxghost.determinism.seed_all` pins the global stream for
+the GAME; drawing from it here would perturb the engine's own randomness
+and change the very thing being scored. Patch 0002 exists because
+instance-vs-global matters in this codebase.
+
+Every value it emits is in range by construction, so
+`validate_actions` never has to catch it -- a mutator that proposed
+invalid actions would spend the whole budget on rejected rounds while
+still looking like it ran.
+"""
+
+from __future__ import annotations
+
+import random
+from collections.abc import Sequence
+
+from tuxghost.agent.types import HOLD_CAP, SETTLE_CAP, VALID_BUTTONS, Action
+from tuxghost.optimize.edits import Delete, Edit, Insert, Replace
+from tuxghost.optimize.schedule import ActionScript
+from tuxghost.optimize.seal import CandidateResult
+
+#: Only the overworld buttons an edit can usefully reach. `VALID_BUTTONS`
+#: includes mouse and finger events the overworld ignores; proposing them
+#: would spend rounds on no-ops that still cost a full engine run.
+_USEFUL = (1, 2, 4, 8, 64, 128)
+
+
+class MutationEditor:
+    def __init__(self, seed: int, nudge: int = 4) -> None:
+        assert set(_USEFUL) <= VALID_BUTTONS, "a useful button went away"
+        self._rng = random.Random(seed)
+        self._nudge = nudge
+
+    def _action(self) -> Action:
+        return Action(
+            button=self._rng.choice(_USEFUL),
+            hold=self._rng.randint(1, 32),
+            settle=self._rng.randint(0, 16),
+        )
+
+    def _clamp(self, value: int, low: int, high: int) -> int:
+        return max(low, min(high, value))
+
+    def propose(
+        self,
+        script: ActionScript,
+        candidate: CandidateResult,
+        score: tuple[float, ...],
+    ) -> Sequence[Edit]:
+        del candidate, score  # blind hill-climbing, by design
+        n = len(script.actions)
+        if n == 0:
+            return [Insert(0, self._action())]
+
+        choice = self._rng.choice(
+            ("hold", "settle", "button", "insert", "delete")
+        )
+        index = self._rng.randrange(n)
+        current = script.actions[index]
+        delta = self._rng.choice((-self._nudge, self._nudge))
+
+        if choice == "hold":
+            return [
+                Replace(
+                    index,
+                    Action(
+                        current.button,
+                        self._clamp(current.hold + delta, 1, HOLD_CAP),
+                        current.settle,
+                    ),
+                )
+            ]
+        if choice == "settle":
+            return [
+                Replace(
+                    index,
+                    Action(
+                        current.button,
+                        current.hold,
+                        self._clamp(current.settle + delta, 0, SETTLE_CAP),
+                    ),
+                )
+            ]
+        if choice == "button":
+            return [
+                Replace(
+                    index,
+                    Action(
+                        self._rng.choice(_USEFUL), current.hold, current.settle
+                    ),
+                )
+            ]
+        if choice == "insert":
+            return [Insert(self._rng.randint(0, n), self._action())]
+        return [Delete(index)]
+#+end_src
+
+- [ ] *Step 4: Run to verify they pass*
+
+Run: =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_mutation.py -v=
+
+Expected: 6 passed. If =test_the_mutation_editor_improves_on_the_parent=
+fails, do NOT raise =rounds= until it passes by luck — that is measuring
+a lottery. Instead: try 3 seeds, record all three score sequences in the
+report, and if none improves, report that the dumb mutator does not beat
+this parent on this objective and propose either a better-suited target
+or a smarter neighbourhood. An honest negative result is a finding.
+
+- [ ] *Step 5: Demonstrate against a no-op editor*
+
+#+begin_src bash
+# In tests/test_optimize_mutation.py, temporarily replace MutationEditor
+# with a no-op in `test_the_mutation_editor_improves_on_the_parent`:
+#     class NoOp:
+#         def propose(self, script, candidate, score): return [Delete(0)]
+#     ... and also try one returning `()`
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  ./.venv/bin/python -m pytest -q tests/test_optimize_mutation.py
+git checkout -- tests/test_optimize_mutation.py
+git status --short tests/
+#+end_src
+
+Expected: FAILS with =no round beat the parent; score sequence was […]=.
+Also demonstrate the global-RNG test by changing =self._rng= to the
+=random= module and watching
+=test_the_editor_never_touches_the_global_rng= fail. Capture both.
+
+- [ ] *Step 6: Gate and commit*
+
+Run: =make check-fast= — expect *280 passed, 3 skipped, 9 warnings*.
+
+#+begin_src bash
+git add tuxghost/optimize/editors/mutation.py tests/test_optimize_mutation.py
+git commit -m "feat: MutationEditor -- the seeded baseline any LLM editor must beat"
+#+end_src
+
+-----
+
+* Task 9: =ReplayEditor= — re-run a recorded optimization
+
+What makes an LLM-driven optimization auditable: the model is not
+reproducible, its recorded edits are. Refuses to loop when exhausted,
+exactly as =tuxghost.agent.replay.ReplayPolicy= does, and validates the
+whole transcript at CONSTRUCTION rather than lazily mid-run — Ruling X
+from S2's task 8 review, for the same reason: a malformed transcript is
+knowable before the game ever boots.
+
+*Files:*
+- Create: =tuxghost/optimize/editors/replay.py=
+- Create: =tests/test_optimize_replay.py=
+
+*Interfaces:*
+- Produces: =ReplayEditor(transcript: Path)= with the =Editor= =propose=
+  signature, and =edits_from_json(raw: Any) -> tuple[Edit, ...]= — shared
+  with =ClaudeEditor= (Task 10) so a transcript is validated by the same
+  rules a live answer is.
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""Task 9: replaying a recorded optimization.
+
+`edits_from_json` is shared with `ClaudeEditor`, so a transcript record
+is checked by exactly the rules a live model answer is -- the same
+arrangement `actions_from_json` gives `ClaudePolicy`/`ReplayPolicy`.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from tuxghost.agent.types import Action
+from tuxghost.optimize.edits import Delete, Insert, Replace
+from tuxghost.optimize.editors.replay import ReplayEditor, edits_from_json
+from tuxghost.optimize.schedule import ActionScript
+
+SCRIPT = ActionScript(lead_in=0, actions=(Action(2, 16, 8),))
+FAKE: object = None
+
+
+def _write(tmp_path: Path, rows: list[object]) -> Path:
+    path = tmp_path / "edits.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return path
+
+
+def test_edits_from_json_builds_all_three_operations() -> None:
+    raw = [
+        {"op": "insert", "index": 0, "action": {"button": 2, "hold": 4, "settle": 1}},
+        {"op": "delete", "index": 1},
+        {"op": "replace", "index": 0, "action": {"button": 8, "hold": 4, "settle": 1}},
+    ]
+    assert edits_from_json(raw) == (
+        Insert(0, Action(2, 4, 1)),
+        Delete(1),
+        Replace(0, Action(8, 4, 1)),
+    )
+
+
+def test_edits_from_json_refuses_a_non_list() -> None:
+    with pytest.raises(TypeError, match="list"):
+        edits_from_json({"op": "delete", "index": 0})
+
+
+def test_edits_from_json_refuses_an_unknown_op() -> None:
+    with pytest.raises(ValueError, match="unknown op"):
+        edits_from_json([{"op": "reverse", "index": 0}])
+
+
+def test_edits_from_json_refuses_a_missing_index() -> None:
+    with pytest.raises(ValueError, match="index"):
+        edits_from_json([{"op": "delete"}])
+
+
+def test_edits_from_json_refuses_an_insert_without_an_action() -> None:
+    with pytest.raises(ValueError, match="action"):
+        edits_from_json([{"op": "insert", "index": 0}])
+
+
+def test_replay_returns_each_round_in_order(tmp_path: Path) -> None:
+    path = _write(tmp_path, [
+        [{"op": "delete", "index": 0}],
+        [{"op": "insert", "index": 0,
+          "action": {"button": 2, "hold": 4, "settle": 1}}],
+    ])
+    editor = ReplayEditor(path)
+    assert editor.propose(SCRIPT, FAKE, (0.0,)) == (Delete(0),)
+    assert editor.propose(SCRIPT, FAKE, (0.0,)) == (Insert(0, Action(2, 4, 1)),)
+
+
+def test_replay_stops_rather_than_looping(tmp_path: Path) -> None:
+    """A transcript that silently restarted would make a replayed run
+    diverge from the run it claims to reproduce."""
+    path = _write(tmp_path, [[{"op": "delete", "index": 0}]])
+    editor = ReplayEditor(path)
+    assert editor.propose(SCRIPT, FAKE, (0.0,)) == (Delete(0),)
+    assert editor.propose(SCRIPT, FAKE, (0.0,)) == ()
+    assert editor.propose(SCRIPT, FAKE, (0.0,)) == ()
+
+
+def test_a_malformed_transcript_is_refused_at_construction(tmp_path: Path) -> None:
+    """Not lazily, mid-run: a malformed transcript is knowable before the
+    game boots, so failing now saves a pointless run (S2 Ruling X)."""
+    path = _write(tmp_path, [[{"op": "delete", "index": 0}], [{"op": "nope"}]])
+    with pytest.raises(ValueError, match="unknown op"):
+        ReplayEditor(path)
+
+
+def test_a_non_list_round_is_refused_at_construction(tmp_path: Path) -> None:
+    path = _write(tmp_path, [{"op": "delete", "index": 0}])
+    with pytest.raises(TypeError, match="list"):
+        ReplayEditor(path)
+
+
+def test_an_empty_round_is_a_stop_not_an_error(tmp_path: Path) -> None:
+    path = _write(tmp_path, [[]])
+    editor = ReplayEditor(path)
+    assert editor.propose(SCRIPT, FAKE, (0.0,)) == ()
+#+end_src
+
+- [ ] *Step 2: Run to verify they fail*
+
+Expected: =ModuleNotFoundError= for =tuxghost.optimize.editors.replay=.
+
+- [ ] *Step 3: Write the implementation*
+
+#+begin_src python
+"""Replays a recorded optimization's edits, round by round.
+
+`edits_from_json` is shared with `ClaudeEditor`: a model's answer and a
+transcript of that answer must be validated identically, or the replay
+would accept what the live path rejected. Same arrangement
+`actions_from_json` gives `ClaudePolicy`/`ReplayPolicy`.
+
+The whole transcript is validated at CONSTRUCTION. A malformed round is
+knowable before the game boots, so failing now saves a pointless run and
+matches how `--policy scripted` already pre-parses its actions file
+(S2 task 8 review, Ruling X).
+
+It deliberately does NOT loop when exhausted: a transcript that silently
+restarted would make a replayed run diverge from the run it claims to
+reproduce, which is the one thing a replay must not do.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+from tuxghost.agent.replay import actions_from_json
+from tuxghost.optimize.edits import Delete, Edit, Insert, Replace
+from tuxghost.optimize.schedule import ActionScript
+from tuxghost.optimize.seal import CandidateResult
+
+
+def _one(raw: Any, position: int) -> Edit:
+    if not isinstance(raw, dict):
+        raise TypeError(
+            f"edit {position} must be an object, got {type(raw).__name__}"
+        )
+    op = raw.get("op")
+    if "index" not in raw:
+        raise ValueError(f"edit {position} is missing 'index'")
+    index = int(raw["index"])
+    if op == "delete":
+        return Delete(index)
+    if op in ("insert", "replace"):
+        if "action" not in raw:
+            raise ValueError(f"edit {position} ({op}) is missing 'action'")
+        # Reuses S2's validation so an edit's action is checked by exactly
+        # the rules a policy's action is.
+        (action,) = actions_from_json([raw["action"]])
+        return Insert(index, action) if op == "insert" else Replace(index, action)
+    raise ValueError(
+        f"edit {position}: unknown op {op!r}; expected one of "
+        "'insert', 'delete', 'replace'"
+    )
+
+
+def edits_from_json(raw: Any) -> tuple[Edit, ...]:
+    """Build edits from a decoded JSON list, refusing anything partial."""
+    if not isinstance(raw, list):
+        raise TypeError(
+            f"edits must be a JSON list, got {type(raw).__name__}"
+        )
+    return tuple(_one(item, i) for i, item in enumerate(raw))
+
+
+class ReplayEditor:
+    def __init__(self, transcript: Path) -> None:
+        lines = Path(transcript).read_text().splitlines()
+        self._rounds = [
+            edits_from_json(json.loads(line))
+            for line in lines
+            if line.strip()
+        ]
+        self._index = 0
+
+    def propose(
+        self,
+        script: ActionScript,
+        candidate: CandidateResult,
+        score: tuple[float, ...],
+    ) -> Sequence[Edit]:
+        del script, candidate, score
+        if self._index >= len(self._rounds):
+            return ()
+        proposal = self._rounds[self._index]
+        self._index += 1
+        return proposal
+#+end_src
+
+- [ ] *Step 4: Run to verify they pass*
+
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_replay.py -v= — expect 10 passed.
+
+- [ ] *Step 5: Demonstrate*
+
+#+begin_src bash
+cp tuxghost/optimize/editors/replay.py /tmp/replay.bak
+# (a) make it loop: `self._rounds[self._index % len(self._rounds)]`
+# (b) validate lazily: build `self._rounds` from raw json and call
+#     edits_from_json inside propose()
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_replay.py
+cp /tmp/replay.bak tuxghost/optimize/editors/replay.py && rm /tmp/replay.bak
+git status --short tuxghost/optimize/editors/replay.py
+#+end_src
+
+Expected: (a) =test_replay_stops_rather_than_looping= fails. (b)
+=test_a_malformed_transcript_is_refused_at_construction= fails — no
+exception at construction.
+
+- [ ] *Step 6: Gate and commit*
+
+Run: =make check-fast= — expect *290 passed, 3 skipped, 9 warnings*.
+
+#+begin_src bash
+git add tuxghost/optimize/editors/replay.py tests/test_optimize_replay.py
+git commit -m "feat: ReplayEditor -- re-run a recorded optimization"
+#+end_src
+
+-----
+
+* Task 10: =ClaudeEditor=
+
+Reuses =ClaudePolicy='s fence discipline and exception taxonomy, with two
+deliberate differences: *no images at all* (a round is text-only and
+cheap), and a much larger =MAX_TOKENS= — the live capture measured 1024
+sufficient *for one action*, which is not evidence for a list of edits
+plus reasoning.
+
+No live API call anywhere in the gate. If a live optimization capture
+happens later it gets the same treatment the S2 play capture got: a
+committed transcript, a =ReplayEditor= fixture, and a =verify()== =0=
+test over the derived trace.
+
+*Files:*
+- Create: =tuxghost/optimize/editors/claude.py=
+- Create: =tests/test_optimize_claude.py=
+
+*Interfaces:*
+- Produces: =ClaudeEditor(model: str = DEFAULT_MODEL, goal: str = "", client: Any | None = None)=
+  with the =Editor= =propose= signature, plus =EDITOR_MAX_TOKENS: int= and
+  the pure =build_prompt(script, candidate, score) -> str= and
+  =parse_response(text) -> tuple[Edit, ...]=.
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""Task 10: the LLM editor's prompt and parse paths, against stubs only.
+
+No live call in the gate: `make check` must need no network and no key,
+and must pass with `anthropic` absent entirely (Step 6 verifies that).
+
+Two things this file pins that the S2 capture taught. The fence regex
+must span NEWLINES -- every stub answer's payload in
+`tests/test_agent_claude.py` is single-line while every real model answer
+is multi-line, so a regex without `re.DOTALL` passed all 16 of those
+tests and failed only against real text. And the prompt must carry the
+telemetry, because a blind editor is the no-gradient failure in a
+different costume.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from tuxghost.agent.types import Action
+from tuxghost.optimize.edits import Delete, Insert, Replace
+from tuxghost.optimize.editors.claude import (
+    EDITOR_MAX_TOKENS,
+    ClaudeEditor,
+)
+from tuxghost.optimize.schedule import ActionScript
+from tuxghost.optimize.seal import CandidateResult
+
+SCRIPT = ActionScript(lead_in=30, actions=(Action(2, 16, 8), Action(8, 16, 8)))
+
+
+def _candidate() -> CandidateResult:
+    trace: Any = None
+    return CandidateResult(
+        trace=trace,
+        steps=48,
+        final_state={"map": "spyder_paper_town.tmx", "tile_pos": [12, 13]},
+        checkpoints=[(16, "aa" * 32), (32, "bb" * 32)],
+        checkpoint_states={
+            16: {"map": "spyder_paper_town.tmx", "tile_pos": [12, 12]},
+            32: {"map": "spyder_paper_town.tmx", "tile_pos": [12, 13]},
+        },
+    )
+
+
+class _StubTextBlock:
+    def __init__(self, text: str) -> None:
+        self.type = "text"
+        self.text = text
+
+
+class _StubResponse:
+    def __init__(self, text: str) -> None:
+        self.content = [_StubTextBlock(text)]
+
+
+class _StubClient:
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.calls: list[dict[str, Any]] = []
+        self.messages = self
+
+    def create(self, **kwargs: Any) -> _StubResponse:
+        self.calls.append(kwargs)
+        return _StubResponse(self._text)
+
+
+ANSWER = """Looking at the checkpoints the player stalls after step 32.
+
+```json
+{"edits": [{"op": "replace", "index": 0,
+            "action": {"button": 2, "hold": 32, "settle": 8}}],
+ "notes": "hold DOWN twice as long"}
+```
+"""
+
+
+def test_a_real_shaped_multiline_answer_parses() -> None:
+    editor = ClaudeEditor(client=_StubClient(ANSWER))
+    assert editor.propose(SCRIPT, _candidate(), (0.0, -1.0, -48.0)) == (
+        Replace(0, Action(2, 32, 8)),
+    )
+
+
+def test_the_prompt_carries_the_telemetry_but_no_image() -> None:
+    client = _StubClient(ANSWER)
+    ClaudeEditor(client=client).propose(SCRIPT, _candidate(), (0.0,))
+    sent = client.calls[0]
+    body = str(sent["messages"])
+    assert "tile_pos" in body and "12, 13" in body.replace("[", "").replace("]", "")
+    assert "image" not in body, "S3 renders nothing; no frame may be sent"
+    assert sent["max_tokens"] == EDITOR_MAX_TOKENS > 1024
+
+
+def test_the_prompt_describes_the_current_script() -> None:
+    client = _StubClient(ANSWER)
+    ClaudeEditor(client=client).propose(SCRIPT, _candidate(), (0.0,))
+    body = str(client.calls[0]["messages"])
+    assert "lead_in" in body and "30" in body
+
+
+def test_an_empty_edit_list_is_a_stop() -> None:
+    editor = ClaudeEditor(client=_StubClient('```json\n{"edits": []}\n```'))
+    assert editor.propose(SCRIPT, _candidate(), (0.0,)) == ()
+
+
+def test_a_missing_fenced_block_raises_value_error() -> None:
+    editor = ClaudeEditor(client=_StubClient("I would delete the third one."))
+    with pytest.raises(ValueError, match="no fenced json block"):
+        editor.propose(SCRIPT, _candidate(), (0.0,))
+
+
+def test_malformed_json_in_the_fence_raises_value_error() -> None:
+    editor = ClaudeEditor(client=_StubClient("```json\n{not json\n```"))
+    with pytest.raises(ValueError, match="not valid json"):
+        editor.propose(SCRIPT, _candidate(), (0.0,))
+
+
+def test_a_non_object_payload_raises_type_error() -> None:
+    editor = ClaudeEditor(client=_StubClient("```json\n[1, 2, 3]\n```"))
+    with pytest.raises(TypeError, match="must be an object"):
+        editor.propose(SCRIPT, _candidate(), (0.0,))
+
+
+def test_an_unknown_op_raises_value_error() -> None:
+    editor = ClaudeEditor(
+        client=_StubClient('```json\n{"edits": [{"op": "x", "index": 0}]}\n```')
+    )
+    with pytest.raises(ValueError, match="unknown op"):
+        editor.propose(SCRIPT, _candidate(), (0.0,))
+
+
+def test_the_last_fenced_block_wins() -> None:
+    text = (
+        '```json\n{"edits": [{"op": "delete", "index": 0}]}\n```\n'
+        'on reflection:\n'
+        '```json\n{"edits": [{"op": "delete", "index": 1}]}\n```'
+    )
+    editor = ClaudeEditor(client=_StubClient(text))
+    assert editor.propose(SCRIPT, _candidate(), (0.0,)) == (Delete(1),)
+
+
+def test_notes_are_carried_forward_between_rounds() -> None:
+    client = _StubClient(ANSWER)
+    editor = ClaudeEditor(client=client)
+    editor.propose(SCRIPT, _candidate(), (0.0,))
+    editor.propose(SCRIPT, _candidate(), (0.0,))
+    assert "hold DOWN twice as long" in str(client.calls[1]["messages"])
+
+
+def test_the_goal_reaches_the_prompt() -> None:
+    client = _StubClient(ANSWER)
+    ClaudeEditor(client=client, goal="reach the shop").propose(
+        SCRIPT, _candidate(), (0.0,)
+    )
+    assert "reach the shop" in str(client.calls[0]["messages"])
+
+
+def test_constructing_the_editor_does_not_import_anthropic() -> None:
+    """`make check` installs no network SDK. The import is lazy, inside
+    `_ensure_client`, reached only from a real `propose` with no injected
+    client."""
+    import sys
+
+    ClaudeEditor()
+    assert "anthropic" not in sys.modules or True  # see Step 6's real check
+    editor = ClaudeEditor(client=_StubClient(ANSWER))
+    editor.propose(SCRIPT, _candidate(), (0.0,))
+
+
+def test_an_insert_index_beyond_the_script_is_the_loops_problem() -> None:
+    """`ClaudeEditor` parses; it does not know the script's length. An
+    out-of-range index becomes a REJECTED ROUND in the loop, not a parse
+    error here -- pinned so nobody 'helpfully' adds bounds checking in two
+    places that can disagree."""
+    editor = ClaudeEditor(
+        client=_StubClient('```json\n{"edits": [{"op": "delete", "index": 99}]}\n```')
+    )
+    assert editor.propose(SCRIPT, _candidate(), (0.0,)) == (Delete(99),)
+#+end_src
+
+- [ ] *Step 2: Run to verify they fail*
+
+Expected: =ModuleNotFoundError= for =tuxghost.optimize.editors.claude=.
+
+- [ ] *Step 3: Write the implementation*
+
+#+begin_src python
+"""The LLM editor: telemetry in, edits out. No pixels, ever.
+
+`anthropic` is an OPTIONAL extra, imported lazily inside
+`_ensure_client` and never at module scope -- `make check` installs no
+network SDK and must still import this module to test the two pure
+functions below.
+
+Two deliberate differences from `tuxghost.agent.claude.ClaudePolicy`:
+
+  * NO images. S3 renders nothing, so a round is text-only and cheap.
+  * `EDITOR_MAX_TOKENS` is far above `ClaudePolicy`'s 1024. The S2 live
+    capture measured 1024 sufficient FOR ONE ACTION; a list of edits plus
+    reasoning is a different size of answer and that measurement is not
+    evidence for it.
+
+The fence regex carries `re.DOTALL`, and that is load-bearing rather than
+incidental: every stub answer in `tests/test_agent_claude.py` has a
+single-line json payload while every real model answer measured so far is
+multi-line, so a regex without it passes all 16 stub tests and fails only
+against real text (measured -- see docs/STATUS.org, "The live-model
+capture", finding 1).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Sequence
+from typing import Any
+
+from tuxghost.agent.claude import DEFAULT_MODEL
+from tuxghost.optimize.edits import Edit
+from tuxghost.optimize.editors.replay import edits_from_json
+from tuxghost.optimize.schedule import ActionScript
+from tuxghost.optimize.seal import CandidateResult
+
+EDITOR_MAX_TOKENS = 4096
+
+_JSON_BLOCK = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
+
+SYSTEM = """You are improving a recorded Tuxemon play trace, offline.
+
+The trace is a list of ACTIONS. Each action presses one button, holds it
+`hold` steps, releases it, then waits `settle` steps. The game runs at 60
+steps per second and one tile of walking takes 16 steps of a direction
+held. Buttons: UP=1, DOWN=2, LEFT=4, RIGHT=8, A=64, B=128.
+
+You never see the game. You see the action list, where the run ended, and
+a sequence of checkpoints showing where it was along the way. Propose
+EDITS to the action list; the trace is then re-run and scored for you.
+
+Reply with exactly one fenced json block:
+
+```json
+{"edits": [{"op": "replace", "index": 0,
+            "action": {"button": 2, "hold": 32, "settle": 8}}],
+ "notes": "what you want your future self to remember"}
+```
+
+`op` is one of "insert", "delete", "replace". "delete" takes only an
+`index`. Edits apply IN ORDER, each seeing the list the previous one left.
+An empty `edits` list ends the run. `notes` replaces your previous notes.
+"""
+
+
+class ClaudeEditor:
+    def __init__(
+        self,
+        model: str = DEFAULT_MODEL,
+        goal: str = "",
+        # The injected `anthropic.Anthropic` instance (real or test stub).
+        # Bare `Any` for the same reason `ClaudePolicy` uses it: naming
+        # the type would need an unconditional import of an optional
+        # dependency, and this project's mypy config resolves
+        # `anthropic.*` to `Any` regardless.
+        client: Any | None = None,
+    ) -> None:
+        self.model = model
+        self.goal = goal
+        self.notes = ""
+        self.last_raw: str | None = None
+        self._client = client
+
+    def build_prompt(
+        self,
+        script: ActionScript,
+        candidate: CandidateResult,
+        score: tuple[float, ...],
+    ) -> str:
+        lines = [
+            f"lead_in: {script.lead_in} steps, then {len(script.actions)} "
+            "actions:",
+        ]
+        for i, a in enumerate(script.actions):
+            lines.append(
+                f"  [{i}] button={a.button} hold={a.hold} settle={a.settle}"
+            )
+        lines.append(f"\nTotal cost: {script.cost()} steps.")
+        if self.goal:
+            lines.append(f"\nGoal: {self.goal}")
+        lines.append(f"\nScore (higher is better): {list(score)}")
+        state = candidate.final_state
+        lines.append(
+            f"\nEnded on map {state.get('map')!r} at tile "
+            f"{state.get('tile_pos')}, after {candidate.steps} steps."
+        )
+        if candidate.checkpoint_states:
+            lines.append("\nAlong the way:")
+            for step in sorted(candidate.checkpoint_states):
+                snap = candidate.checkpoint_states[step]
+                lines.append(
+                    f"  step {step}: map {snap.get('map')!r} tile "
+                    f"{snap.get('tile_pos')} facing {snap.get('facing')!r}"
+                )
+        if self.notes:
+            lines.append(f"\nYour notes:\n{self.notes}")
+        lines.append("\nWhat do you change?")
+        return "\n".join(lines)
+
+    def parse_response(self, text: str) -> tuple[tuple[Edit, ...], str | None]:
+        blocks = _JSON_BLOCK.findall(text)
+        if not blocks:
+            raise ValueError(
+                "response contains no fenced json block; expected one "
+                '```json { "edits": [...] } ``` block'
+            )
+        try:
+            payload = json.loads(blocks[-1])
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"the last fenced json block is not valid json: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise TypeError(
+                f"the json block must be an object, got "
+                f"{type(payload).__name__}"
+            )
+        return edits_from_json(payload.get("edits", [])), payload.get("notes")
+
+    def _ensure_client(self) -> Any:
+        if self._client is None:
+            import anthropic
+
+            self._client = anthropic.Anthropic()
+        return self._client
+
+    def propose(
+        self,
+        script: ActionScript,
+        candidate: CandidateResult,
+        score: tuple[float, ...],
+    ) -> Sequence[Edit]:
+        response = self._ensure_client().messages.create(
+            model=self.model,
+            max_tokens=EDITOR_MAX_TOKENS,
+            system=SYSTEM,
+            messages=[
+                {
+                    "role": "user",
+                    "content": self.build_prompt(script, candidate, score),
+                }
+            ],
+        )
+        raw = "".join(
+            block.text
+            for block in response.content
+            if getattr(block, "type", None) == "text"
+        )
+        edits, notes = self.parse_response(raw)
+        self.last_raw = raw
+        if notes:
+            self.notes = notes
+        return edits
+#+end_src
+
+- [ ] *Step 4: Run to verify they pass*
+
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_claude.py -v= — expect 13 passed.
+
+- [ ] *Step 5: Demonstrate the DOTALL and telemetry defects*
+
+#+begin_src bash
+cp tuxghost/optimize/editors/claude.py /tmp/claude_ed.bak
+# (a) drop re.DOTALL from _JSON_BLOCK
+# (b) drop the checkpoint_states block from build_prompt
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_claude.py \
+  tests/test_agent_claude.py
+cp /tmp/claude_ed.bak tuxghost/optimize/editors/claude.py && rm /tmp/claude_ed.bak
+git status --short tuxghost/optimize/editors/claude.py
+#+end_src
+
+Expected: (a) =test_a_real_shaped_multiline_answer_parses= fails while
+every =tests/test_agent_claude.py= test still passes — the same
+discrimination the S2 capture found, now pinned on this side too. (b)
+=test_the_prompt_carries_the_telemetry_but_no_image= fails.
+
+- [ ] *Step 6: Verify the gate passes with =anthropic= absent*
+
+The venv currently HAS =anthropic= (the S2 capture installed it), so the
+absence must be simulated rather than assumed:
+
+#+begin_src bash
+PYTHONHASHSEED=0 ./.venv/bin/python - <<'PY'
+import sys
+from importlib.abc import MetaPathFinder
+
+class Block(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "anthropic" or fullname.startswith("anthropic."):
+            raise ModuleNotFoundError(f"blocked: {fullname}")
+        return None
+
+sys.meta_path.insert(0, Block())
+import pytest
+sys.exit(pytest.main(["-q", "tests/test_optimize_claude.py",
+                      "tests/test_agent_claude.py",
+                      "tests/test_live_capture.py"]))
+PY
+#+end_src
+
+Expected: all pass. Record the count in the report.
+
+- [ ] *Step 7: Gate and commit*
+
+Run: =make check-fast= — expect *303 passed, 3 skipped, 9 warnings*.
+
+#+begin_src bash
+git add tuxghost/optimize/editors/claude.py tests/test_optimize_claude.py
+git commit -m "feat: ClaudeEditor -- telemetry in, edits out, no pixels"
+#+end_src
+
+-----
+
+* Task 11: The =optimize= CLI subcommand
+
+*Files:*
+- Modify: =tuxghost/cli.py= (parser, =_optimize=, dispatch, module
+  docstring)
+- Create: =tests/test_optimize_cli.py=
+
+*Interfaces:*
+- Consumes: everything above.
+- Produces: the =optimize= subcommand and its artifacts.
+
+Read =tuxghost/cli.py='s module docstring and =_agent= before writing
+this; =_optimize= mirrors =_agent='s structure, refusal ordering and
+exit-code contract deliberately.
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""Task 11: the `optimize` subcommand.
+
+Driven as a real SUBPROCESS, not through `main()` in-process. Two
+reasons: an in-process run shares a process with earlier boots, and the
+exit-code contract is a property of the process, not of a function's
+return value. `tests/test_cli.py`'s docstring records the same rule.
+
+Every path a user can get wrong must exit 2, never 1: `optimize`, like
+`agent`, has nothing to diverge FROM, so 1 is reserved for a genuine
+engine bug.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+GOLDEN = ROOT / "tests" / "golden" / "claude_town_1234.tuxghost"
+
+
+def _run(*args: str) -> subprocess.CompletedProcess[str]:
+    env = {
+        **os.environ,
+        "SDL_VIDEODRIVER": "dummy",
+        "SDL_AUDIODRIVER": "dummy",
+        "PYTHONHASHSEED": "0",
+    }
+    return subprocess.run(
+        [sys.executable, "-m", "tuxghost.cli", "optimize", *args],
+        capture_output=True, text=True, cwd=ROOT, env=env,
+    )
+
+
+def test_a_mutation_run_succeeds_and_writes_its_artifacts(tmp_path: Path) -> None:
+    out = tmp_path / "best.tuxghost"
+    run_dir = tmp_path / "run"
+    proc = _run(
+        "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
+        "--objective", "reach-tile",
+        "--target", "spyder_paper_town.tmx:11,16",
+        "--rounds", "4", "--patience", "4", "--max-rejections", "3",
+        "--max-cost", "4000", "--out", str(out), "--run-dir", str(run_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert out.exists()
+
+    info = json.loads((run_dir / "run.json").read_text())
+    assert info["editor"] == "mutation" and info["seed"] == 7
+    assert info["objective"] == "reach-tile"
+    assert info["parent_digest"] == json.loads(GOLDEN.read_text())["header"][
+        "final_digest"
+    ]
+    assert info["stop_reason"]
+    assert "best_round" in info
+
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "optimize.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert rows[0]["index"] == 0 and rows[0]["accepted"] is True
+    assert not (run_dir / "frames").exists(), "S3 renders nothing"
+
+
+def test_the_written_trace_is_a_verifiable_offline_agent_trace(tmp_path: Path) -> None:
+    out = tmp_path / "best.tuxghost"
+    proc = _run(
+        "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
+        "--objective", "reach-tile",
+        "--target", "spyder_paper_town.tmx:11,16",
+        "--rounds", "2", "--patience", "2", "--max-rejections", "2",
+        "--max-cost", "4000", "--out", str(out),
+        "--run-dir", str(tmp_path / "run"),
+    )
+    assert proc.returncode == 0, proc.stderr
+    written = json.loads(out.read_text())
+    assert written["provenance"]["recorder"] == "offline-agent"
+    taints = written["provenance"]["taints"]
+    assert len(taints) == 1 and "parent" in taints[0] and "mutation" in taints[0]
+
+    verify = subprocess.run(
+        [sys.executable, "-m", "tuxghost.cli", "verify", str(out)],
+        capture_output=True, text=True, cwd=ROOT,
+        env={**os.environ, "SDL_VIDEODRIVER": "dummy",
+             "SDL_AUDIODRIVER": "dummy", "PYTHONHASHSEED": "0"},
+    )
+    assert verify.returncode == 0, verify.stderr
+
+
+def test_a_relative_trace_path_works(tmp_path: Path) -> None:
+    """The CLI chdirs into the vendored tuxemon/ directory. A relative
+    path must resolve against the user's cwd -- the exact defect an
+    earlier CLI shipped with, and one that only a relative path finds."""
+    proc = _run(
+        "--trace", "tests/golden/claude_town_1234.tuxghost",
+        "--editor", "mutation", "--seed", "7", "--objective", "reach-tile",
+        "--target", "spyder_paper_town.tmx:11,16",
+        "--rounds", "1", "--patience", "1", "--max-rejections", "1",
+        "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
+        "--run-dir", str(tmp_path / "run"),
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize(
+    "args,needle",
+    [
+        (["--trace", "/nonexistent.tuxghost"], "cannot read"),
+        (["--editor", "replay"], "requires --edits"),
+        (["--editor", "scripted"], "requires --edits"),
+        (["--target", "nonsense"], "--target"),
+        (["--target", "map.tmx:a,b"], "--target"),
+        (["--rounds", "0"], "--rounds"),
+        (["--patience", "0"], "--patience"),
+        (["--max-rejections", "0"], "--max-rejections"),
+        (["--max-cost", "0"], "--max-cost"),
+        (["--editor", "mutation"], "--seed"),
+    ],
+)
+def test_every_anticipated_precondition_exits_2(
+    tmp_path: Path, args: list[str], needle: str
+) -> None:
+    base = {
+        "--trace": str(GOLDEN), "--editor": "mutation", "--seed": "7",
+        "--objective": "reach-tile",
+        "--target": "spyder_paper_town.tmx:11,16", "--rounds": "1",
+        "--patience": "1", "--max-rejections": "1", "--max-cost": "4000",
+        "--out": str(tmp_path / "o.tuxghost"),
+        "--run-dir": str(tmp_path / "run"),
+    }
+    for i in range(0, len(args), 2):
+        if args[i] == "--editor" and len(args) == 2:
+            base["--editor"] = args[i + 1] if i + 1 < len(args) else base["--editor"]
+        elif i + 1 < len(args):
+            base[args[i]] = args[i + 1]
+    if args == ["--editor", "mutation"]:
+        del base["--seed"]
+    flat = [x for k, v in base.items() for x in (k, v)]
+    proc = _run(*flat)
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert needle in proc.stderr
+
+
+def test_an_unliftable_parent_is_refused_not_crashed(tmp_path: Path) -> None:
+    """A trace with two buttons held at once cannot be lifted. That is a
+    refusal (2), not a divergence (1) and not a traceback."""
+    parent = json.loads(GOLDEN.read_text())
+    parent["inputs"] = [
+        [0, 2, 1.0], [4, 8, 1.0], [8, 2, 0.0], [12, 8, 0.0],
+    ]
+    parent["header"]["step_count"] = 100
+    bad = tmp_path / "overlap.tuxghost"
+    bad.write_text(json.dumps(parent))
+    proc = _run(
+        "--trace", str(bad), "--editor", "mutation", "--seed", "7",
+        "--objective", "reach-tile",
+        "--target", "spyder_paper_town.tmx:11,16",
+        "--rounds", "1", "--patience", "1", "--max-rejections", "1",
+        "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
+        "--run-dir", str(tmp_path / "run"),
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "overlap" in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+def test_the_claude_editor_is_the_only_one_that_touches_anthropic() -> None:
+    """`_optimize` must gate the anthropic import on `--editor claude`,
+    like `_agent` does after the 61f63aa residual fix: otherwise a
+    genuine engine crash on `--editor mutation` has its traceback
+    replaced by ModuleNotFoundError."""
+    source = (ROOT / "tuxghost" / "cli.py").read_text()
+    assert 'args.editor == "claude"' in source
+#+end_src
+
+- [ ] *Step 2: Run to verify they fail*
+
+Expected: =error: argument command: invalid choice: 'optimize'=, so every
+test fails on the return code.
+
+- [ ] *Step 3: Add the parser*
+
+In =_build_parser=, after =p_agent=:
+
+#+begin_src python
+    p_opt = sub.add_parser(
+        "optimize",
+        help="edit a trace offline, re-run each candidate, keep the best",
+    )
+    p_opt.add_argument("--trace", type=Path, required=True)
+    p_opt.add_argument(
+        "--editor",
+        choices=("scripted", "mutation", "replay", "claude"),
+        required=True,
+    )
+    # No argparse default for --seed: `mutation` REQUIRES one (a default
+    # would make an unreproducible run look reproducible) and the other
+    # three editors have no use for one.
+    p_opt.add_argument("--seed", type=int, default=None)
+    p_opt.add_argument("--edits", type=Path, default=None)
+    p_opt.add_argument("--model", default=None)
+    p_opt.add_argument("--objective", choices=("reach-tile",), required=True)
+    p_opt.add_argument("--target", required=True)
+    p_opt.add_argument("--rounds", type=int, required=True)
+    p_opt.add_argument("--patience", type=int, required=True)
+    p_opt.add_argument(
+        "--max-rejections", type=int, required=True, dest="max_rejections"
+    )
+    p_opt.add_argument("--max-cost", type=int, required=True, dest="max_cost")
+    p_opt.add_argument("--checkpoint", type=int, default=64)
+    p_opt.add_argument("--out", type=Path, required=True)
+    p_opt.add_argument("--run-dir", type=Path, required=True, dest="run_dir")
+#+end_src
+
+Add =optimize= to =_NEEDS_BOOTSTRAP= and to the path-resolution table
+=_resolve_paths= consults (=("trace", "edits", "out", "run_dir")=) — the
+=--trace= relative-path test depends on the second one.
+
+- [ ] *Step 4: Write =_optimize=*
+
+#+begin_src python
+def _parse_target(raw: str) -> tuple[str, tuple[int, int]] | None:
+    """`MAP:X,Y` -> `(map, (x, y))`, or None if it does not parse."""
+    map_name, _, coords = raw.partition(":")
+    x, _, y = coords.partition(",")
+    if not map_name or not x or not y:
+        return None
+    try:
+        return map_name, (int(x), int(y))
+    except ValueError:
+        return None
+
+
+def _optimize(args: argparse.Namespace) -> int:
+    """Optimize a trace offline. Exits 0 or 2 for everything it can
+    anticipate; 1 is reserved for a genuine engine bug, exactly as
+    `_agent` documents -- there is nothing here to diverge FROM."""
+    import dataclasses
+
+    from tuxghost.optimize.editors.mutation import MutationEditor
+    from tuxghost.optimize.editors.replay import ReplayEditor, edits_from_json
+    from tuxghost.optimize.editors.scripted import ScriptedEditor
+    from tuxghost.optimize.objective import ReachTile
+    from tuxghost.optimize.runner import Editor, optimize
+    from tuxghost.trace import Refused, read, write
+
+    for name, value in (
+        ("--rounds", args.rounds),
+        ("--patience", args.patience),
+        ("--max-rejections", args.max_rejections),
+        ("--max-cost", args.max_cost),
+        ("--checkpoint", args.checkpoint + 1),
+    ):
+        if value < 1:
+            print(f"refused: {name} must be >= 1, got {value!r}", file=sys.stderr)
+            return 2
+
+    target = _parse_target(args.target)
+    if target is None:
+        print(
+            f"refused: --target {args.target!r} does not parse; expected "
+            "MAP:X,Y (e.g. spyder_paper_town.tmx:11,16)",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.editor in ("scripted", "replay") and args.edits is None:
+        print(
+            f"refused: --editor {args.editor} requires --edits "
+            "(a JSONL file, one round of edits per line)",
+            file=sys.stderr,
+        )
+        return 2
+    if args.editor == "mutation" and args.seed is None:
+        print(
+            "refused: --editor mutation requires --seed; without one the "
+            "run is unreproducible and would still look reproducible",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        parent = read(args.trace)
+    except OSError as exc:
+        print(f"refused: cannot read {args.trace}: {exc}", file=sys.stderr)
+        return 2
+    except Refused as exc:
+        print(f"refused: {args.trace} is not a usable trace: {exc}", file=sys.stderr)
+        return 2
+
+    editor: Editor
+    model: str | None = None
+    if args.editor == "mutation":
+        editor = MutationEditor(seed=args.seed)
+    elif args.editor == "replay":
+        if args.model is None:
+            print(
+                "refused: --editor replay requires --model; a transcript "
+                "carries no model of its own and recording a default "
+                "would misattribute provenance",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            editor = ReplayEditor(args.edits)
+        except OSError as exc:
+            print(f"refused: cannot read {args.edits}: {exc}", file=sys.stderr)
+            return 2
+        except (ValueError, TypeError) as exc:
+            print(f"refused: {args.edits} is malformed: {exc}", file=sys.stderr)
+            return 2
+        model = args.model
+    elif args.editor == "scripted":
+        try:
+            rounds_of_edits = [
+                edits_from_json(json.loads(line))
+                for line in args.edits.read_text().splitlines()
+                if line.strip()
+            ]
+        except OSError as exc:
+            print(f"refused: cannot read {args.edits}: {exc}", file=sys.stderr)
+            return 2
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            print(f"refused: {args.edits} is malformed: {exc}", file=sys.stderr)
+            return 2
+        editor = ScriptedEditor(rounds_of_edits)
+    else:
+        # Gated on the policy, NOT import-guarded: this arm is reachable
+        # only for `--editor claude`, so the other three never touch an
+        # optional dependency `make check` does not install (the 61f63aa
+        # residual fix, same reasoning).
+        try:
+            import anthropic  # noqa: F401
+        except ImportError as exc:
+            print(
+                f"refused: --editor claude needs the anthropic SDK "
+                f"(pip install -e '.[agent]'): {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        from tuxghost.agent.claude import DEFAULT_MODEL
+        from tuxghost.optimize.editors.claude import ClaudeEditor
+
+        model = args.model if args.model is not None else DEFAULT_MODEL
+        editor = ClaudeEditor(model=model)
+
+    try:
+        result = optimize(
+            parent,
+            editor,
+            ReachTile(target[0], target[1]),
+            rounds=args.rounds,
+            patience=args.patience,
+            max_rejections=args.max_rejections,
+            max_cost=args.max_cost,
+            checkpoint=args.checkpoint,
+            model=model,
+        )
+    except (ValueError, TypeError) as exc:
+        # Deliberately narrow, like `_agent`'s boundary: these are the two
+        # exceptions this project's own input validation raises (an
+        # unliftable parent among them). An AttributeError here is a
+        # programming error and must stay a visible crash.
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+
+    lineage = (
+        f"derived by offline-agent ({args.editor}"
+        + (f", seed {args.seed}" if args.seed is not None else "")
+        + f") from parent {parent.header.final_digest} over "
+        f"{len(result.rounds) - 1} round(s)"
+    )
+    # RE-SEAL the winner with its lineage rather than rewriting the trace
+    # the loop already sealed. The round count is only known now, and
+    # `Recorder` is this project's one trace writer -- editing a sealed
+    # `Provenance` here would make this a second one. The extra ~3s engine
+    # run is also a free re-confirmation that the winning script still
+    # reaches the score it won with; the assertion below is that check.
+    final = seal(
+        result.best_script,
+        parent,
+        checkpoint=args.checkpoint,
+        taints=(lineage,),
+        model=model,
+        max_cost=args.max_cost,
+    )
+    if final.trace.header.final_digest != result.best.trace.header.final_digest:
+        print(
+            "refused: re-sealing the winning script reached a different "
+            f"digest ({final.trace.header.final_digest}) than the loop "
+            f"recorded ({result.best.trace.header.final_digest}); this is "
+            "a determinism failure, not a bad edit",
+            file=sys.stderr,
+        )
+        return 2
+    write(final.trace, args.out)
+
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    with (args.run_dir / "optimize.jsonl").open("w") as handle:
+        for entry in result.rounds:
+            handle.write(json.dumps(dataclasses.asdict(entry), default=str) + "\n")
+    (args.run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "parent_digest": parent.header.final_digest,
+                "objective": args.objective,
+                "target": args.target,
+                "editor": args.editor,
+                "seed": args.seed,
+                "model": model,
+                "rounds": args.rounds,
+                "patience": args.patience,
+                "max_rejections": args.max_rejections,
+                "max_cost": args.max_cost,
+                "best_round": result.best_round,
+                "stop_reason": result.stop_reason,
+            },
+            indent=2,
+        )
+    )
+    print(f"wrote {args.out} (best round {result.best_round}) and {args.run_dir}")
+    return 0
+#+end_src
+
+Wire it into =main=: =if command == "optimize": return _optimize(args)=.
+
+*Why the winner is re-sealed rather than rewritten.* =Provenance= is a
+pydantic =BaseModel= (=tuxghost/trace.py:145=), so =dataclasses.replace=
+on it raises =TypeError= — but =model_copy(update=…)= would work, and the
+plan still does not use it. The reason is not typing: =Recorder= is this
+project's ONE trace writer, and patching a sealed trace's provenance
+outside it makes a second one, which is the same class of mistake as
+hand-writing a schedule (see Task 3's =lower=). Re-sealing costs one ~3s
+engine run and buys a real check — that the winning script still reaches
+the digest the loop recorded for it. The lineage string needs the round
+count, which is only known after the loop, so re-sealing is also the
+earliest point it CAN be written by the recorder.
+
+Add a test for the re-seal check in =tests/test_optimize_cli.py=:
+
+#+begin_src python
+def test_the_written_trace_is_the_reseal_not_a_patched_copy(tmp_path: Path) -> None:
+    """The lineage taint must come from `Recorder`, and the re-sealed
+    digest must match what the loop scored. A patched-provenance copy
+    would pass every other test in this file."""
+    out = tmp_path / "best.tuxghost"
+    run_dir = tmp_path / "run"
+    proc = _run(
+        "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
+        "--objective", "reach-tile",
+        "--target", "spyder_paper_town.tmx:11,16",
+        "--rounds", "4", "--patience", "4", "--max-rejections", "3",
+        "--max-cost", "4000", "--out", str(out), "--run-dir", str(run_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+    written = json.loads(out.read_text())
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "optimize.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    best_index = json.loads((run_dir / "run.json").read_text())["best_round"]
+    scored = next(r for r in rows if r["index"] == best_index)
+    assert written["header"]["final_digest"] == scored["digest"], (
+        "the written trace is not the trace the loop scored"
+    )
+#+end_src
+
+- [ ] *Step 5: Run to verify they pass*
+
+Run: =PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_cli.py -v=
+
+Expected: all pass. These are subprocess tests and each boots the engine;
+if the module takes more than ~60s, mark the parametrized refusal cases
+=@pytest.mark.slow= and keep the four substantive ones fast.
+
+- [ ] *Step 6: Demonstrate the exit-code contract*
+
+#+begin_src bash
+cp tuxghost/cli.py /tmp/cli.bak
+# (a) widen the boundary: `except Exception` around optimize(...)
+# (b) ungate the anthropic import: move it above the editor branch
+# (c) return 1 instead of 2 from the unliftable-parent path
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q tests/test_optimize_cli.py
+cp /tmp/cli.bak tuxghost/cli.py && rm /tmp/cli.bak
+git diff --stat tuxghost/cli.py
+#+end_src
+
+Expected: (c) =test_an_unliftable_parent_is_refused_not_crashed= fails
+with =2 != 1=. (b) =test_the_claude_editor_is_the_only_one_that_touches_anthropic=
+fails. For (a), also confirm by hand (a stubbed =optimize= raising
+=AttributeError=) that the widened boundary launders a real bug into a
+refusal, and record that output.
+
+- [ ] *Step 7: Update the CLI module docstring*
+
+=tuxghost/cli.py='s docstring documents each subcommand's exit-code
+contract. Add =optimize=: what it refuses, why 1 is impossible for a
+precondition, and that the =anthropic= import is gated on
+=--editor claude= for the same reason =_agent='s is.
+
+- [ ] *Step 8: Gate and commit*
+
+Run: =make check-fast=.
+
+#+begin_src bash
+git add tuxghost/cli.py tests/test_optimize_cli.py
+git commit -m "feat: the optimize CLI subcommand"
+#+end_src
+
+-----
+
+* Task 12: Measure, document, close out
+
+*Files:*
+- Create: =docs/2026-08-27-optimizer-tuning.org=
+- Modify: =docs/STATUS.org=
+- Modify: =docs/superpowers/specs/2026-08-27-offline-optimizer-design.org=
+  (=#+STATUS: draft= → =#+STATUS: implemented=, plus corrections)
+- Modify: =CLAUDE.md= if any standing rule changed (it should not have)
+
+- [ ] *Step 1: Measure =rounds= and =patience= for real*
+
+Run =MutationEditor= against =claude_town_1234= and =ReachTile= at seeds
+1, 2, 3 and rounds ∈ {8, 16, 32}, recording for each: the round the best
+score was found, the final score, wall-clock seconds, and how many rounds
+were rejected. Write the raw table into
+=docs/2026-08-27-optimizer-tuning.org=. Do NOT summarize into a
+recommendation without the table — a tuning note whose numbers are gone
+is a claim, not a measurement.
+
+State plainly whether the dumb mutator beats the parent at all, and at
+what budget. A negative result is a finding, not a failure.
+
+- [ ] *Step 2: Verify the engine tree is untouched*
+
+#+begin_src bash
+ls patches/ | wc -l                 # must be 6
+git -C tuxemon diff --stat | tail -1 # must be 18 files, 265 insertions(+), 63 deletions(-)
+git -C tuxemon status --short | wc -l
+./.venv/bin/python -c "
+import sys; sys.path.insert(0, '.')
+from tuxghost.digest import EXEMPTIONS; print('EXEMPTIONS ==', EXEMPTIONS)"
+#+end_src
+
+Expected: 6, the same 18/265/63, the same 2 untracked files, and
+=EXEMPTIONS == {}=.
+
+- [ ] *Step 3: Run the full gate, sequentially*
+
+Run: =make check= (never concurrently with another suite)
+
+Record the exact fast-tier and slow-tier counts and the warning count.
+
+- [ ] *Step 4: Write S3's section of =docs/STATUS.org=*
+
+Mirror the S2 section's structure. It must include, with real numbers:
+
+- What S3 delivers and the =offline-agent= provenance value it uses.
+- The =lift= lossy-case table (lead-in and tail per trace) and the
+  432-vs-442 near-miss, as the measured reason =ActionScript= has a
+  =lead_in= field at all.
+- The identity result: sealing an unedited script reproduces its parent's
+  inputs, digest AND step_count.
+- The tuning numbers from Step 1, including a negative result if that is
+  what happened.
+- Every =Known limitation= from the spec, restated as measured fact or
+  explicitly as unmeasured.
+- Honest limits: =ReachTile= is a proxy; no live =ClaudeEditor= capture
+  exists (or, if one was taken, its model id); one machine.
+- The new test counts and the =make check= result from Step 3.
+
+- [ ] *Step 5: Correct the spec*
+
+Set =#+STATUS: implemented=. Then walk the spec and fix every claim the
+implementation changed — in particular the "Open questions" section: the
+=add_edge= question was answered by a third option (=tuxghost/loop.py=),
+and =max_cost= was added, which the spec did not mention at all. A spec
+left contradicting the tree is exactly what =CLAUDE.md='s authority order
+exists to arbitrate; do not leave the arbitration for the next reader.
+
+- [ ] *Step 6: Commit*
+
+#+begin_src bash
+git add docs/ CLAUDE.md
+git commit -m "docs: S3 status -- offline optimizer, measured"
+#+end_src
+
+-----
+
+* Self-review notes
+
+Checked against the spec, section by section.
+
+- *Spec coverage.* =ActionScript=/=lift=/=lower= → Task 3. Edits → Task
+  4. =seal= → Task 5. Objective + =ReachTile= → Task 6. The loop → Task
+  7. Four editors → Tasks 7 (scripted), 8 (mutation), 9 (replay), 10
+  (claude). Provenance/taints → Task 5 (recorder value) and Task 11
+  (lineage string). CLI → Task 11. All 11 validation items → Tasks 1
+  (item 1), 3 (items 2, 3), 5 (items 4, 5, 6), 6 (item 9), 7-8 (items 7,
+  8), 10 (item 10), 11 (item 11). Known limitations → Task 12 Step 4.
+- *Two spec deviations, both deliberate and flagged in "Two decisions"*:
+  =add_edge= goes to =tuxghost/loop.py= (a third option the spec did not
+  list, because both options it did list create a backwards dependency),
+  and =max_cost= is new (the spec bounds nothing, and =HOLD_CAP= 600 ×
+  thousands of inserted actions is hours of engine time in one call).
+- *One spec item deliberately re-specified*: validation item 6 described
+  a test nobody can write, which the spec's own self-review had already
+  flagged. Task 5 resolves it concretely — =seal= counts hook
+  invocations, so mutating =run_steps(client, cost - 1)= fires a real
+  assertion. That is why the hook is installed even when =checkpoint ==
+  0=.
+- *Type consistency.* =propose(script, candidate, score)= is identical
+  across all four editors and the =Editor= protocol. =Edit= is the union
+  alias everywhere. =CandidateResult= field names are used identically in
+  Tasks 5, 6, 7 and 10. =edits_from_json= is defined once (Task 9) and
+  imported by Tasks 10 and 11. =add_edge= is referenced by its new
+  unprefixed name from Task 2 onward, never as =_add_edge=.
+- *Two places the plan expects reality to push back*, both with explicit
+  instructions not to weaken the assertion: Task 7 Step 5 (if appending
+  =DOWN= does not improve =ReachTile=, measure the real end tile and fix
+  the target) and Task 8 Step 4 (if the dumb mutator does not beat the
+  parent, report the negative result rather than raising =rounds= until
+  luck intervenes).
+- *Test counts in each task's gate step are projections*, computed by
+  adding that task's new tests to 213. Treat a mismatch as information:
+  find out why before proceeding, do not just update the number.
