@@ -1,0 +1,302 @@
+#+title: S4 task 1 -- ghost rendering probes (translucency, animation)
+#+date: 2026-08-27
+
+This is the record required before any S4 ghost-rendering code is
+written. Both probes below are MEASURED, against the real, currently
+applied engine tree, with no engine patch of any kind. Nothing here is
+shipped code; the probe scripts live outside the repo, at
+=/Users/a3madkour/.claude/jobs/797da264/tmp/probe.py= and
+=/Users/a3madkour/.claude/jobs/797da264/tmp/probe2_supplement.py=.
+
+* Corrections to the brief's assumed API (found before probing)
+
+The brief's sketch script (=task-1-brief.md=) does not run as written.
+Three real API facts, found by reading the code rather than guessed:
+
+1. =boot_from_save= returns a *tuple*, =(client, session)=, and its
+   first parameter is a validated =SaveData=, not a raw dict.
+   =seed_all=/=pin_clock= must run first (mirrors
+   =tuxghost/execute.py:137-165=). Both live in
+   =tuxghost/determinism.py= (there is no separate =tuxghost/clock.py=):
+   #+begin_src python
+   def seed_all(seed: int) -> None: ...          # tuxghost/determinism.py:52
+   def pin_clock(epoch: int) -> None: ...         # tuxghost/determinism.py:62
+   #+end_src
+2. =NPC(npc_slug, npc_data, session, instance_id=None)= takes a
+   validated =NpcModel=, not a bare slug string -- the brief's
+   =NPC("allie", session=session)= does not match this signature at
+   all. The real way to build one is the existing classmethod
+   =NPC.create(session, "allie")= (=tuxemon/entity/npc.py=), which
+   looks up the =NpcModel= and constructs it.
+3. =ghost.sprite= (the brief's guessed attribute) does not exist --
+   confirmed empirically below (=hasattr(ghost, 'sprite') == False=).
+   Reading =MapRenderer._get_sprites= (=tuxemon/map/view.py:617=), the
+   real surfaces live on the NPC's own =SpriteRenderer=, reached via
+   =ghost.sprite_controller.get_sprite_renderer()=:
+   - =.standing= -- =dict[EntityFacing, Surface]=, the static/idle
+     frames.
+   - =.sprite= -- =dict[str, SurfaceAnimation]=, the walk animations.
+   =SurfaceAnimation.get_current_frame()=
+   (=tuxemon/surfanim.py:161-162=) calls =FrameManager.get_frame=,
+   which indexes =self.images= directly -- no copy -- so the Surface
+   object =_get_sprites= ends up blitting is the *exact same object*
+   reachable from =.standing=/=.sprite= before any render call. This is
+   what makes probe 1 possible without a patch: mutating those Surface
+   objects in place is mutating what the renderer will draw next.
+
+The corrected boot preamble used by both probe scripts:
+
+#+begin_src python
+import json
+from pathlib import Path
+
+from tuxghost.execute import _bootstrap_vendored_tuxemon
+_bootstrap_vendored_tuxemon()
+
+from tuxemon.save_system.save_state import SaveData
+from tuxghost.boot import boot_from_save
+from tuxghost.determinism import pin_clock, seed_all
+
+raw = json.loads(Path("tests/fixtures/paper_town.save").read_text())
+seed_all(1234)
+pin_clock(1787659200)
+save_data = SaveData.model_validate(raw)
+client, session = boot_from_save(save_data, seed=1234, clock_epoch=1787659200)
+#+end_src
+
+* Probe 1 -- translucency via =set_alpha=, no engine patch
+
+** Question
+
+Does calling =Surface.set_alpha()= on the ghost NPC's own,
+already-loaded sprite surfaces make it render translucent, without
+patching the engine?
+
+** Command
+
+#+begin_src bash
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  uv run python /Users/a3madkour/.claude/jobs/797da264/tmp/probe.py
+#+end_src
+
+** What the probe does
+
+Boots =paper_town.save=, adds a second NPC (=NPC.create(session,
+"allie")=, slug renamed =ghost=, =persistence = False=) one tile east
+of the player, installs a real =FrameRenderer=, renders one frame,
+then:
+
+- Collects every real =Surface= object reachable from
+  =ghost.sprite_controller.get_sprite_renderer()= -- both
+  =.standing.values()= and, for each =SurfaceAnimation= in =.sprite=,
+  its private =._frame_manager.images= list (12 distinct objects: 4
+  facings x 3 frames each, with the idle frame shared between
+  =.standing= and the matching walk animation, matching
+  =SpriteRenderer._load_from_sheet='s construction).
+- Calls =.set_alpha(128)= on every one of them (plain pygame API, no
+  patch).
+- Renders a second frame and diffs the raw pixel buffer and the
+  sampled colour set (=tuxghost.observe.distinct_colors=) against the
+  first.
+
+** Real output
+
+#+begin_example
+hasattr(ghost, 'sprite'): False
+distinct real sprite Surface objects found: 12
+set_alpha(128) errors: none
+get_alpha() after set_alpha, sampled: [128, 128, 128]
+PROBE1 RESULT -- frame bytes changed by set_alpha: True
+PROBE1 before distinct sampled colors: 103
+PROBE1 after distinct sampled colors: 103
+PROBE1 colors only in before: [(58, 59, 63), (118, 126, 255), (207, 29, 29), (207, 110, 110)]
+PROBE1 colors only in after: [(137, 129, 95), (167, 163, 192), (212, 114, 78), (212, 155, 119)]
+#+end_example
+
+** Reading the result
+
+- =ghost.sprite= genuinely does not exist (confirms the brief's
+  attribute guess was wrong, as flagged).
+- =set_alpha(128)= raised no error on any of the 12 real frame
+  surfaces, and =get_alpha()= reads back 128 afterward -- the mutation
+  stuck.
+- The rendered frame's raw bytes changed, and the *same number* of
+  distinct sampled colours (103) persisted but as a *different set* --
+  every colour that disappeared (e.g. =(207, 29, 29)=, a saturated red,
+  presumably part of the sprite/hair) reappeared as a colour blended
+  toward the tile underneath it (e.g. =(212, 114, 78)=, a muted
+  orange-brown -- consistent with 50%-ish alpha blending a red sprite
+  pixel against a warmer ground tile, not a coincidental unrelated
+  change elsewhere in the frame).
+
+This is exactly the signature of successful alpha blending, not some
+unrelated side effect: same pixel count of distinct colours, each
+original sprite colour replaced by a blend of that colour and the
+background it sits on.
+
+** ANSWER
+
+*Yes.* =set_alpha= on the ghost NPC's own sprite surfaces (found via
+=ghost.sprite_controller.get_sprite_renderer().standing=/=.sprite=,
+not the guessed =ghost.sprite=) produces real, visible translucency,
+with zero engine patch. This works because
+=SurfaceAnimation.get_current_frame()= and the =.standing= dict both
+hand back the *same* Surface object every render call -- mutating it
+once is sufficient, no per-frame re-application needed.
+
+** Consequence for design
+
+No seventh patch is needed for translucency. The design can give a
+ghost NPC's constructor/setup code a small helper that walks
+=ghost.sprite_controller.get_sprite_renderer()='s =.standing= and
+=.sprite= surfaces once (at ghost-creation time, or whenever the
+sprite set is reloaded via =update_appearance=, which clears and
+rebuilds both dicts) and calls =set_alpha= on each -- entirely within
+=tuxghost=, no patch. One caveat for later tasks: =.sprite= access
+above uses the private =_frame_manager= attribute of
+=SurfaceAnimation= (there is no public frame-enumeration method on
+that class) -- fine for a probe, but a real implementation should
+either accept that private-attribute reach, or add a tiny public
+accessor to =SurfaceRenderer=/=SurfaceAnimation= via the same
+allowed-patch mechanism if the maintainers want a cleaner seam. This
+is a design nicety, not a blocker: the private attribute is stable
+Python state, not something upstream is likely to remove, and the
+probe above demonstrates it works today.
+
+* Probe 2 -- per-step =set_position=: animation, or sliding statue?
+
+** Question
+
+Does assigning the ghost's position every step produce a walking
+animation, or a sliding statue (position changes, pose does not)?
+
+** Command
+
+#+begin_src bash
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  uv run python /Users/a3madkour/.claude/jobs/797da264/tmp/probe.py
+#+end_src
+
+(same script as probe 1; probe 2 is the second half of its output)
+
+** What the probe does
+
+After probe 1, drives the ghost for 4 iterations of "move 0.25 tiles
+east, then =run_steps(client, 4)=" -- exactly per-step
+=Entity.set_position=, nothing else. At each step it reads
+=ghost.mover.is_moving_state= and asks the *real* renderer method,
+=client.map_renderer._get_sprites(ghost, 0)= (=tuxemon/map/view.py:617=,
+the same method every real frame actually calls), for the
+=WorldSurfaces= it would draw, and records the =id()= of the character
+surface it returns (the last entry -- see that method's own code: drop
+shadow first, then the character). Identity, not pixel content, is
+what distinguishes "still drawing the same static pose" from "cycling
+through a walk animation," since a full-frame pixel diff would differ
+regardless of animation, purely from the position shift.
+
+** Real output
+
+#+begin_example
+ghost.mover.is_moving_state (idle, never moved via mover): False
+step 0: is_moving_state=False tile_pos=(13, 12) character_surface_id=4493128240
+step 1: is_moving_state=False tile_pos=(13, 12) character_surface_id=4493128240
+step 2: is_moving_state=False tile_pos=(13, 12) character_surface_id=4493128240
+step 3: is_moving_state=False tile_pos=(13, 12) character_surface_id=4493128240
+PROBE2 RESULT -- distinct full rendered frames: 4 of 4
+PROBE2 RESULT -- distinct character-sprite Surface identities used across steps: 1 of 4
+#+end_example
+
+** Reading the result
+
+- =ghost.mover.is_moving_state= stayed =False= the entire time: calling
+  =set_position= never touches =ghost.mover.state= at all (confirmed by
+  reading =tuxemon/entity/entity.py='s =Mover= class -- =state=
+  transitions to =WALKING= only via =Mover.move()=, which is what a
+  real path-controller-driven step calls, not =set_position=).
+- =MapRenderer._get_sprites= (=tuxemon/map/view.py:617-632=) branches
+  on exactly that flag: =if npc.mover.is_moving_state:= calls
+  =get_animation_frame=; the =else= branch (what fired here, every
+  step) calls =get_facing_frame=, a static lookup with no time
+  dependence at all.
+- The *same* Surface object (=4493128240=) was returned on all 4
+  steps -- not merely visually similar frames, the literal same
+  Python object, every single time.
+- Meanwhile the 4 full rendered frames were all pixel-distinct, purely
+  because the ghost's on-screen position shifted each step (=tile_pos=
+  itself stayed =(13, 12)= across all 4 samples because tile
+  granularity floors sub-tile offsets of 0.25/0.5/0.75, but the
+  underlying continuous =position= used for blitting moved regardless).
+
+** Supplementary check -- what actually triggers animation
+
+To confirm the *cause*, not just observe the symptom, a second
+throwaway script
+(=/Users/a3madkour/.claude/jobs/797da264/tmp/probe2_supplement.py=)
+repeats the same per-step drive, but first sets
+=ghost.mover.state = EntityState.WALKING= and calls
+=ghost.sprite_controller.get_sprite_renderer().play("front_walk")=
+(existing public API, still no patch) before the loop.
+
+#+begin_src bash
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  uv run python /Users/a3madkour/.claude/jobs/797da264/tmp/probe2_supplement.py
+#+end_src
+
+Real output:
+
+#+begin_example
+step 0: is_moving_state=True character_surface_id=4560995760
+step 1: is_moving_state=True character_surface_id=4560995760
+step 2: is_moving_state=True character_surface_id=4560995376
+step 3: is_moving_state=True character_surface_id=4560995376
+SUPPLEMENT RESULT -- distinct character-sprite Surface identities used across steps once mover.state=WALKING and animation is playing: 2 of 4
+#+end_example
+
+With =mover.state= forced to =WALKING= and the matching
+=SurfaceAnimation= playing, the surface identity now *does* change
+across steps (2 distinct frames observed across the 16 intervening
+=run_steps= ticks) -- confirming the branch in =_get_sprites= is
+exactly what gates real animation, and that it is reachable without
+any patch.
+
+** ANSWER
+
+*Sliding statue.* Calling =ghost.set_position()= alone, every step,
+with nothing else touched, leaves =ghost.mover.is_moving_state= =False=
+forever, so =MapRenderer._get_sprites= always takes the static
+=get_facing_frame= branch: the exact same Surface object is drawn at a
+new screen position every step. It is not merely "hard to tell" from a
+full-frame diff -- confirmed directly against the renderer's own
+sprite-selection method, not inferred from pixel output. Forcing
+=mover.state = EntityState.WALKING= plus playing the matching
+=SurfaceAnimation= (both existing public API) does produce real frame
+cycling, with no patch required either way.
+
+** Consequence for design
+
+A ghost that only gets =set_position= calls per replayed step will
+visibly slide, not walk -- that is very likely to look wrong/uncanny
+to a human watching it, and later tasks should not assume raw position
+replay is sufficient for "looks like a person walking." The fix needs
+no patch: whatever per-step ghost-update code S4 writes must also set
+=ghost.mover.state= (and/or call the existing
+=SpriteController.play_animation=/=stop_animation= helpers) in step
+with whatever movement it is replaying, mirroring what a real
+path-controller-driven NPC does, not just relaying position. This is a
+plain implementation requirement for a later S4 task, not a design
+fork requiring a human decision the way probe 1's (hypothetical)
+failure would have been.
+
+* Summary
+
+| Probe                        | Answer                                             | Patch needed? |
+|-------------------------------+-----------------------------------------------------+---------------|
+| 1: =set_alpha= translucency  | Works -- real visible blending, measured           | No            |
+| 2: per-step =set_position=   | Slides (same static Surface every step); animating | No            |
+|                               | requires also driving =mover.state=/playing the    |               |
+|                               | matching =SurfaceAnimation=, which does work       |               |
+
+Neither probe found a need for a seventh patch. Both answers are
+recorded here as measured facts for later S4 tasks to build on; no
+design change is required beyond consequence 2 above (ghost movement
+code must drive animation state, not just position).
