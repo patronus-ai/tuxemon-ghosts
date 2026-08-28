@@ -61,6 +61,17 @@ def install_recording_events(
     upstream `time.time()` default deliberately never enters the format,
     and live play is the one path where a real timestamp is sitting there
     to be captured by accident.
+
+    Fix round 1 (task 7 review): the synthetic-`source` branch below
+    must construct its `PlayerInput` the same way `tuxghost.loop
+    .install_schedule` does -- `timestamp=0.0` explicit (the third
+    positional argument is `hold_time`, not `timestamp`; leaving
+    `timestamp` unset lets the upstream `time.time()` default through,
+    inert today only because nothing downstream of this wholesale
+    replacement happens to read it) and `.triggered = bool(value)` set
+    explicitly (read by `tuxemon/states/input.py:286`). Matching
+    `install_schedule`'s construction keeps the two interception points
+    this codebase uses in agreement with each other.
     """
     from tuxemon.platform.events import PlayerInput
 
@@ -71,7 +82,11 @@ def install_recording_events(
         if source is not None:
             for button, value in source.get(step, []):
                 recorder.observe(step, button, value)
-                yield PlayerInput(button, value, 0)
+                event = PlayerInput(
+                    button, value, 1 if value else 0, timestamp=0.0
+                )
+                event.triggered = bool(value)
+                yield event
             return
         for event in original():
             recorder.observe(step, event.button, event.value)

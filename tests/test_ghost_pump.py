@@ -133,3 +133,46 @@ def test_no_timestamp_reaches_the_recorded_trace(tmp_path: Path) -> None:
     assert "timestamp" not in json.dumps(written["inputs"])
     for entry in written["inputs"]:
         assert len(entry) == 3, entry
+
+
+def test_synthetic_events_are_constructed_like_install_schedules_are() -> None:
+    """Fix round 1 (task 7 review): the synthetic-`source` branch of
+    `install_recording_events` must build its `PlayerInput` the same way
+    `tuxghost.loop.install_schedule` does -- `timestamp=0.0` and
+    `.triggered = bool(value)` -- rather than leaving `timestamp` on its
+    upstream `time.time()` default (the constructor's third positional
+    argument is `hold_time`, not `timestamp`, so `PlayerInput(button,
+    value, 0)` does not set it).
+
+    Observes the constructed objects DIRECTLY, by calling the installed
+    `process_events` generator and inspecting what it yields, rather than
+    only the written trace file: `test_no_timestamp_reaches_the_recorded_
+    trace` above already proves the recorded TRACE is clean, but the
+    live `PlayerInput` handed to the engine is a distinct object the
+    recorder never touches, and only that object can leak a real
+    timestamp downstream. A version that dropped `timestamp=0.0` would
+    still pass every other test in this file -- this is the one that
+    would actually catch it.
+    """
+    from tuxemon.platform.const import buttons
+
+    from tuxghost.ghost.pump import install_recording_events
+    from tuxghost.loop import PRESSED, RELEASED
+    from tuxghost.record import Recorder
+
+    client, session = _boot()
+
+    rec = Recorder(session, seed=1234, clock_epoch=EPOCH, recorder="human")
+    scripted = {0: [(buttons.DOWN, PRESSED), (buttons.UP, RELEASED)]}
+    install_recording_events(client, rec, lambda: 0, source=scripted)
+
+    events = list(client.input_manager.process_events())
+
+    assert len(events) == 2, "a vacuous pass over zero events"
+    for event in events:
+        assert event.timestamp == 0.0, (
+            "a real time.time() timestamp leaked into the live PlayerInput"
+        )
+    pressed, released = events
+    assert pressed.triggered is True
+    assert released.triggered is False
