@@ -1315,44 +1315,84 @@ misattribution class that =--seed= on a non-mutation editor already
 refuses (=tuxghost/cli.py=). =run.json= is honest either way; the CLI
 is not.
 
-** A4 — half measured
+** A4 — measured, both sides
 
-The =MutationEditor= baseline is run and real; see
-=docs/2026-08-27-editor-comparison.org= for the table. Headline: at 32
-rounds, seeds 1/2/3 reach =(0, -0, -186)=, =(0, -2, -125)= and
-=(0, -0, -185)= from a =(0, -3, -176)= parent — *two of three arrive at
-the target tile*, which never happened once in the whole nine-run sweep
-against the retired parent.
+Six runs, identical parent/objective/target/bounds, three a side. Full
+note: =docs/2026-08-27-editor-comparison.org=. *This is the first
+live-model evidence for =ClaudeEditor= anywhere in this project* —
+model =claude-sonnet-5=, the CLI's resolved default.
 
-*The =ClaudeEditor= side was not run.* No Anthropic credential was
-readable by that session, so there is still *no live-model evidence for
-=ClaudeEditor= anywhere in this project* and every one of its tests
-remains stubbed. That is unchanged from S3's close-out and must not be
-read as anything else.
+| editor | run | stop | best round | best score | arrived |
+|--------+-----+------+------------+------------+---------|
+| claude | 1 | editor returned STOP | 1 | (0, -0, -230) | yes |
+| claude | 2 | rounds exhausted | 3 | (0, -0, -178) | yes |
+| claude | 3 | editor returned STOP | 1 | (0, -0, -230) | yes |
+| mutation | s1 | rounds exhausted | 32 | (0, -0, -186) | yes |
+| mutation | s2 | rounds exhausted | 30 | (0, -2, -125) | *no* |
+| mutation | s3 | rounds exhausted | 19 | (0, -0, -185) | yes |
+
+*Where they separate*: arrival (3/3 vs 2/3) and rounds-to-arrival (round
+1 vs rounds 19-32). All three Claude runs proposed the byte-identical
+first edit =insert index 8, RIGHT, hold 48= — three tiles at 16 steps
+per tile against a target exactly three tiles east. It computed the
+mechanics rather than searching for them.
+
+*Where they do not separate*: final step count. Arriving candidates are
+Claude 178/230/230 against mutation 185/186 — overlapping, and Claude's
+median arrival is worse. Only run 2 beat mutation outright. Mutation's
+shortest trace (125) did not arrive and loses lexicographically.
+
+*Claude's two measured failure modes*: it returned STOP at round 1 in
+two of three runs, leaving 230 steps where the same editor reached 178
+when it kept going; and run 2 then proposed the SAME two edits 29 times
+across rounds 4-32, all scoring =(0.0, -1.0, -176.0)= and none accepted.
+
+*The first evidence in this project that =patience= is a live control.*
+At the =patience = 10= the tuning note derives, run 2 would have stopped
+at round 13 — 19 fewer rounds and 19 fewer API calls, same winner. That
+note could only derive patience as a lower bound because patience never
+fired in its mutation sweep. It fires here.
+
+*Still open, and the highest-value follow-up*: =parse_response= has no
+coverage against real model text. =ClaudeEditor= holds the raw reply on
+=self.last_raw= and nothing persists it — =optimize='s run directory has
+no equivalent of =agent='s =decisions.jsonl= and its =raw= field, which
+S2 added for exactly this reason. The committed artifact is therefore
+the model's PARSED edits, not its answers. One write in
+=tuxghost/cli.py= closes it.
+
+Committed: =tests/fixtures/claude_optimize_town.{edits.jsonl,run.json}=
+and =tests/test_optimize_live_capture.py=, whose replay control re-runs
+the transcript through =ReplayEditor= and requires the live score
+sequence back.
 
 ** Test state after Stream A
 
 =make check= =EXIT=0= on =impl/finish-offline-optimizer=:
 
 #+begin_src text
-fast: 368 passed, 4 skipped, 11 warnings   in 221.78s (3m41s)
-slow:   4 passed, 368 deselected, 1 warning in  61.88s
+fast: 372 passed, 4 skipped, 11 warnings
+slow:   4 passed, 372 deselected, 1 warning
 ruff + lint-patched + mypy --strict: green
 #+end_src
 
-Up from S3's close-out =356 / 4 / 11= — twelve net new tests. The pinned
-=patch_series_id= warning table did *not* drift; still exactly 11. No
-seventh patch, =patches/= still 6 files, =EXEMPTIONS= still =={}=, no
-format change.
+Up from S3's close-out =356 / 4 / 11= — *sixteen* net new tests. The
+pinned =patch_series_id= warning table did *not* drift; still exactly
+11. No seventh patch, =patches/= still 6 files, =EXEMPTIONS= still
+=={}=, no format change.
 
-*On the timing.* The gate began at load average 3.52 and ended at 8.41,
-so 221.78 s is broadly comparable to the 218.00 s S3 measured at load
-4.6 — twelve more tests for under four seconds. It was NOT taken on an
-idle host and should not be treated as a clean benchmark. Every other
-figure produced during Stream A (the fast-suite run at 568 s, all the
-per-file runs, and the three baseline optimize runs) was taken at load
-11-24 and is *not quotable at all* — the same caution the S3 handoff
-raised about its own numbers.
+*On timings: this section deliberately quotes none for the 372-test
+tree.* The final gate ran at load average 19.5 start to finish and
+reported 789.93 s fast / 156.10 s slow; both figures are contaminated
+and must not be inherited. The one Stream A measurement worth keeping is
+an EARLIER gate at *368* tests — 221.78 s fast, 61.88 s slow — taken at
+load 3.52 rising to 8.41, which is broadly comparable to the 218.00 s S3
+measured at load 4.6 and says twelve extra tests cost under four
+seconds. The four tests added after it (=test_optimize_live_capture.py=)
+are ~19 s of engine work measured alone on a quiet host, so a clean
+372-test gate should land near 240 s — *that is an estimate, not a
+measurement, and is flagged as such.* Everything else produced during
+Stream A was taken at load 11-24 and is not quotable at all.
 
 * Next subsystem
 

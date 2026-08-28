@@ -1,6 +1,6 @@
 #+TITLE: Handoff — two parallel streams from S3's merge
 #+DATE: 2026-08-27
-#+STATUS: Stream A is DONE except A4's live half. Stream B is untouched.
+#+STATUS: Stream A is DONE. Stream B is untouched.
 
 * UPDATE, later on 2026-08-27 — read this before the rest of the file
 
@@ -23,29 +23,20 @@ Two things below are *wrong* as written and were corrected by execution:
    parent's shape in ways that were not mechanical renumbering. See
    =STATUS.org=.
 
-*What remains of Stream A: A4's live half only.* The =MutationEditor=
-baseline is run (=docs/2026-08-27-editor-comparison.org=); the
-=ClaudeEditor= runs are not, for want of a readable credential. The
-three commands needed, once =ANTHROPIC_API_KEY= is exported:
+*A4 is done too.* Both sides of the editor comparison were run —
+=docs/2026-08-27-editor-comparison.org=. Claude arrives in 3/3 runs on
+round 1; mutation in 2/3 needing 19-32 rounds. They do NOT separate on
+final step count. Run 2's transcript is committed as a =ReplayEditor=
+fixture with a replay control.
 
-#+begin_src bash
-for R in 1 2 3; do
-  SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
-  ./.venv/bin/python -m tuxghost.cli optimize \
-    --trace tests/golden/scripted_town_1234.tuxghost \
-    --editor claude \
-    --objective reach-tile --target spyder_paper_town.tmx:19,14 \
-    --rounds 32 --patience 32 --max-rejections 32 --max-cost 4000 \
-    --out /tmp/cla_r${R}.tuxghost --run-dir /tmp/cla_r${R}
-done
-#+end_src
-
-Same parent, target and four bounds as the baseline, which is what makes
-the comparison the spec's permitted one. Then commit the three
-transcripts as =ReplayEditor= fixtures with their =run.json=s, add a
-=tests/test_optimize_live_capture.py= in the shape of
-=tests/test_live_capture.py=, and fill in the Claude half of the
-comparison note.
+*The one thing A4 could not close*, and the best next small job in this
+area: =ClaudeEditor.parse_response= still has no coverage against real
+model text, because =optimize='s run directory never persists the raw
+reply. =ClaudeEditor= keeps it on =self.last_raw=; nothing writes it
+out. =agent= records exactly this in =decisions.jsonl='s =raw= field —
+S2 added it for this reason — and =optimize= has no counterpart. One
+write in =tuxghost/cli.py=, then a re-capture, and the live evidence
+covers parsing too.
 
 *Stream B (S4, ghost rendering) is completely untouched* and its section
 below stands as written.
