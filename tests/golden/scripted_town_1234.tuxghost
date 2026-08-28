@@ -1,0 +1,416 @@
+{
+  "format_version": 1,
+  "header": {
+    "upstream_commit": "59a34164f442ddecbaee4c436e3f1a5ba9474e29",
+    "patch_series_id": "sha256:e89a1bdf153e07e41ee0e0c50a02c4d7d8aff84ed175ae90336a8c48bbf73dd4",
+    "platform": "macOS-26.6.1-arm64-arm-64bit",
+    "mod_id": "tuxemon",
+    "mod_version": "0.4.35",
+    "seed": 1234,
+    "step_rate": 60,
+    "clock_epoch": 1787659200,
+    "initial_state_digest": "sha256:18054784661e11196826d0cf375dc5a5ad851e0665c837aec8a4ca9677b3356b",
+    "step_count": 176,
+    "final_digest": "9eed41f8f05a2ac5f4ddab969eb3aba46c6768f541d22e01c6f16a45bd9270d6"
+  },
+  "initial_state": {
+    "screenshot": null,
+    "screenshot_width": null,
+    "screenshot_height": null,
+    "time": "2026-08-25 12:00",
+    "version": 3,
+    "npc_state": {
+      "instance_id": "f149f542e935487097346b4501eaf614",
+      "is_player": true,
+      "position": [
+        12.0,
+        12.0
+      ],
+      "tile_pos": [
+        12,
+        12
+      ],
+      "current_map": "spyder_paper_town.tmx",
+      "facing": "down",
+      "gender": null,
+      "birthdate": null,
+      "game_variables": {
+        "add_monster": "7bf78a4d9f8f4ffba5f80a0a58994953",
+        "cathedral_share": 0.5,
+        "cathedral_interest": 0.1,
+        "cathedral_fee": "100",
+        "scoop_coeff": "50"
+      },
+      "battles": [],
+      "tuxepedia": {
+        "rockitten": {
+          "status": "caught",
+          "appearance_count": 1,
+          "caught_count": 0
+        },
+        "budaye": {
+          "status": "caught",
+          "appearance_count": 1,
+          "caught_count": 0
+        }
+      },
+      "relationships": {},
+      "money": {
+        "money": 500,
+        "bank_account": 0,
+        "bills": {
+          "bill_cathedral": {
+            "amount": 0,
+            "interest_rate": 0.1,
+            "late_fee": 100
+          }
+        },
+        "portfolio": {
+          "investments": []
+        }
+      },
+      "appearance": {
+        "sprite_name": "adventurer",
+        "combat_sheet": "adventurer",
+        "outfit": null,
+        "accessory": null,
+        "palette": null,
+        "color": null,
+        "combat_frame_width": 64,
+        "combat_frame_height": 64,
+        "combat_back_frame_height": null
+      },
+      "missions": [],
+      "items": [
+        {
+          "slug": "potion",
+          "quantity": 1,
+          "wear": 0,
+          "instance_id": "e16682717c9b4fae80ca17b703be0e66"
+        }
+      ],
+      "monsters": [
+        {
+          "current_hp": 75,
+          "name": "Rockitten",
+          "slug": "rockitten",
+          "birthdate": [
+            1,
+            12
+          ],
+          "capture_date": [
+            8,
+            25
+          ],
+          "capture_device": "tuxeball",
+          "height": 55.9,
+          "weight": 9.31,
+          "taste_cold": "dry",
+          "taste_warm": "savory",
+          "steps": 1.0,
+          "instance_id": "08f0ebd4950c4dd98e97b5bdf073eed1",
+          "gender": "male",
+          "acquisition": "unknown",
+          "plague": {},
+          "mother_iid": null,
+          "father_iid": null,
+          "status": [],
+          "moves": [
+            {
+              "slug": "ram",
+              "instance_id": "19322fed157c49c6b16e2d5cabeb9592",
+              "attempts": 0,
+              "successes": 0,
+              "failures": 0
+            },
+            {
+              "slug": "boulder",
+              "instance_id": "04762a223c9f40c99ac96628c4381836",
+              "attempts": 0,
+              "successes": 0,
+              "failures": 0
+            },
+            {
+              "slug": "mudslide",
+              "instance_id": "040e1e30c9ed4248bc9799a707e36d60",
+              "attempts": 0,
+              "successes": 0,
+              "failures": 0
+            }
+          ],
+          "held_item": {},
+          "training_points": {
+            "armour": 0,
+            "dodge": 0,
+            "hp": 0,
+            "melee": 0,
+            "ranged": 0,
+            "speed": 0
+          },
+          "individual_values": {
+            "armour": 2,
+            "dodge": 3,
+            "hp": 11,
+            "melee": 7,
+            "ranged": 0,
+            "speed": 0
+          },
+          "modifiers": {
+            "armour": 0,
+            "dodge": 0,
+            "hp": 0,
+            "melee": 0,
+            "ranged": 0,
+            "speed": 0
+          },
+          "bond_dict": {
+            "bond_dict": {
+              "bond": 25
+            }
+          },
+          "flair_slugs": [],
+          "flairs": {},
+          "level": 5,
+          "total_experience": 125,
+          "exp_group_slug": "default"
+        },
+        {
+          "current_hp": 55,
+          "name": "Budaye",
+          "slug": "budaye",
+          "birthdate": [
+            10,
+            22
+          ],
+          "capture_date": [
+            8,
+            25
+          ],
+          "capture_device": "tuxeball",
+          "height": 73.46,
+          "weight": 20.85,
+          "taste_cold": "soft",
+          "taste_warm": "hearty",
+          "steps": 1.0,
+          "instance_id": "7bf78a4d9f8f4ffba5f80a0a58994953",
+          "gender": "female",
+          "acquisition": "unknown",
+          "plague": {},
+          "mother_iid": null,
+          "father_iid": null,
+          "status": [],
+          "moves": [
+            {
+              "slug": "stick",
+              "instance_id": "175e994126074d5fb6ab14759da618fd",
+              "attempts": 0,
+              "successes": 0,
+              "failures": 0
+            },
+            {
+              "slug": "clamp_on",
+              "instance_id": "d868c2cf1d4a4b12b6a20bb02edf0743",
+              "attempts": 0,
+              "successes": 0,
+              "failures": 0
+            }
+          ],
+          "held_item": {},
+          "training_points": {
+            "armour": 0,
+            "dodge": 0,
+            "hp": 0,
+            "melee": 0,
+            "ranged": 0,
+            "speed": 0
+          },
+          "individual_values": {
+            "armour": 0,
+            "dodge": 15,
+            "hp": 7,
+            "melee": 2,
+            "ranged": 14,
+            "speed": 2
+          },
+          "modifiers": {
+            "armour": 0,
+            "dodge": 0,
+            "hp": 0,
+            "melee": 0,
+            "ranged": 0,
+            "speed": 0
+          },
+          "bond_dict": {
+            "bond_dict": {
+              "bond": 25
+            }
+          },
+          "flair_slugs": [],
+          "flairs": {},
+          "level": 5,
+          "total_experience": 125,
+          "exp_group_slug": "default"
+        }
+      ],
+      "player_name": "Red",
+      "player_slug": "npc_red",
+      "player_steps": 1.0,
+      "monster_boxes": {
+        "quarantine": []
+      },
+      "item_boxes": {
+        "Locker": []
+      },
+      "monster_box_metadata": {
+        "quarantine": {
+          "max_capacity": 30,
+          "is_hidden": true
+        }
+      },
+      "item_box_metadata": {
+        "Locker": {
+          "max_capacity": 30,
+          "is_hidden": false
+        }
+      },
+      "daycare": {
+        "parents": [],
+        "progress_steps": 0.0,
+        "required_steps": 10000,
+        "halfway_notified": false,
+        "ready_notified": false,
+        "training_steps_start": null,
+        "last_training_exp": 0,
+        "last_training_cost": 0,
+        "training_initialized": false,
+        "pending_exp": 0.0
+      },
+      "teleport_faint": {
+        "map_name": "default.tmx",
+        "x": 0,
+        "y": 0
+      },
+      "tracker": {},
+      "step_tracker": {},
+      "unlocked_letters": {
+        "unlocked_letters": {}
+      },
+      "evolution_registry": {
+        "missed": {},
+        "pending": {},
+        "blocked": {}
+      },
+      "routing_policy": "default"
+    },
+    "world_state": {
+      "factions_manager": {
+        "factions_manager": {}
+      },
+      "menu_flags": {
+        "menu_bag": true,
+        "menu_load": true,
+        "menu_monster": true,
+        "menu_save": true,
+        "menu_player": true,
+        "menu_missions": true
+      }
+    },
+    "session_state": {
+      "uuid": "1de9ea6670d34a1f8735df5ef7697fb9",
+      "start_time": "2026-08-25 12:00",
+      "duration": 0.0,
+      "total_playtime": 0.0
+    },
+    "shop_stock": {},
+    "persistent_state": []
+  },
+  "inputs": [
+    [
+      0,
+      2,
+      1.0
+    ],
+    [
+      16,
+      2,
+      0.0
+    ],
+    [
+      22,
+      2,
+      1.0
+    ],
+    [
+      38,
+      2,
+      0.0
+    ],
+    [
+      44,
+      2,
+      1.0
+    ],
+    [
+      60,
+      2,
+      0.0
+    ],
+    [
+      66,
+      2,
+      1.0
+    ],
+    [
+      82,
+      2,
+      0.0
+    ],
+    [
+      88,
+      8,
+      1.0
+    ],
+    [
+      104,
+      8,
+      0.0
+    ],
+    [
+      110,
+      8,
+      1.0
+    ],
+    [
+      126,
+      8,
+      0.0
+    ],
+    [
+      132,
+      8,
+      1.0
+    ],
+    [
+      148,
+      8,
+      0.0
+    ],
+    [
+      154,
+      8,
+      1.0
+    ],
+    [
+      170,
+      8,
+      0.0
+    ]
+  ],
+  "provenance": {
+    "recorder": "human",
+    "model": null,
+    "claimed_outcome": null,
+    "taints": [],
+    "recorded_at": null
+  }
+}

@@ -1,5 +1,46 @@
 #+TITLE: Handoff — two parallel streams from S3's merge
 #+DATE: 2026-08-27
+#+STATUS: Stream A is DONE. Stream B is untouched.
+
+* UPDATE, later on 2026-08-27 — read this before the rest of the file
+
+Stream A was executed on branch =impl/finish-offline-optimizer=.
+*A1, A2 and A3 are done and measured*; =docs/STATUS.org='s "Stream A —
+finishing S3" section is the authority on what landed, and this file's
+Stream A section below is now history, not instructions.
+
+Two things below are *wrong* as written and were corrected by execution:
+
+1. A3 is described as "=optimize='s =run.json= carries no goal ... one
+   line". The =--goal= FLAG already existed on =optimize= and
+   =ClaudeEditor= already read it (=tuxghost/cli.py=); what was missing
+   was only the =run.json= write. Narrower than the text implies.
+2. A1 is described as "commit it ... give it a =verify() == 0= test".
+   That undersells it. Replacing the parent is not a fixture swap:
+   =tests/test_optimize_runner.py= was *architected around the retired
+   parent's immovability*, and the improving/worsening edit pair
+   INVERTS against the new one. Four further tests depended on the old
+   parent's shape in ways that were not mechanical renumbering. See
+   =STATUS.org=.
+
+*A4 is done too.* Both sides of the editor comparison were run —
+=docs/2026-08-27-editor-comparison.org=. Claude arrives in 3/3 runs on
+round 1; mutation in 2/3 needing 19-32 rounds. They do NOT separate on
+final step count. Run 2's transcript is committed as a =ReplayEditor=
+fixture with a replay control.
+
+*The one thing A4 could not close*, and the best next small job in this
+area: =ClaudeEditor.parse_response= still has no coverage against real
+model text, because =optimize='s run directory never persists the raw
+reply. =ClaudeEditor= keeps it on =self.last_raw=; nothing writes it
+out. =agent= records exactly this in =decisions.jsonl='s =raw= field —
+S2 added it for this reason — and =optimize= has no counterpart. One
+write in =tuxghost/cli.py=, then a re-capture, and the live evidence
+covers parsing too.
+
+*Stream B (S4, ghost rendering) is completely untouched* and its section
+below stands as written.
+
 
 Read =CLAUDE.md= and =docs/STATUS.org= first, as always. This file says
 only what a *next* session needs that those two do not: what is done, what
@@ -205,7 +246,14 @@ host, so this costs little.
   the tuple; never replace it.* It currently holds entries from S1, S2 and
   four S3 tasks, plus pinned per-nodeid warning counts.
 
-* Four residuals parked at S3's close-out
+* Four residuals parked at S3's close-out — ALL FOUR NOW CLOSED
+
+Items 1 and 2 were A3 and A2. Items 3 and 4 were closed afterwards; see
+=docs/STATUS.org=, "The two parked residuals, closed". Item 4's claim
+below — that a pin exists — was correct, and the fix wave's contrary
+conclusion was wrong. The section is left as written for the record.
+
+
 
 Raised by the final whole-branch review, adjudicated rather than fixed
 (the process allows one fix wave, and it had run). None blocks anything;

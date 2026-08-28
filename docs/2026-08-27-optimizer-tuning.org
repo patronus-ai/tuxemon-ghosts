@@ -1,5 +1,45 @@
 #+TITLE: How many rounds does the offline optimizer need? — measured
 #+DATE: 2026-08-27
+#+STATUS: measured against a parent that has since been RETIRED
+
+* Read this first: which parent these numbers describe
+
+Every number below was measured against
+=tests/golden/claude_town_1234.tuxghost= — 442 steps, ending inside a
+=DialogState=, with the target at =spyder_paper_town.tmx:11,16=. That
+trace is *no longer the optimizer's parent*. It was replaced by
+=tests/golden/scripted_town_1234.tuxghost= (176 steps, ends tile
+[16, 14] on a bare =WorldState=) because appended input reaches the
+player there and =ReachTile='s distance term is consequently live; see
+=tests/test_scripted_parent.py=, which pins that difference, and
+=docs/STATUS.org=.
+
+*So the step counts, score tuples and best-round numbers in this note do
+not describe the current fixture and must not be quoted as if they did.*
+What survives the swap, because it is about the LOOP rather than the
+trace:
+
+- =rounds= was the binding constraint across the whole sweep — all nine
+  runs stopped on ="rounds exhausted"=, none on patience — and 32 rounds
+  had *not* saturated.
+- =patience >= 10= is a *derived lower bound*, not a measurement, for the
+  reasons the "What this says about =patience=" section states.
+- =max_rejections= is unmeasured: zero rounds were rejected in 168
+  proposals.
+- The wall-clock column is contaminated by host load and was already
+  marked unquotable below.
+
+One reading that the retirement *strengthens*: this sweep never saw an
+acceptance carried by the distance term, and recorded that as a limit of
+the parent rather than of the mutator. Re-measured against the new
+parent, seed 8 improves distance from =-3.0= to =-1.0= — the mutator does
+re-route when a parent lets it. That is pinned by
+=tests/test_optimize_mutation.py::test_an_acceptance_can_be_carried_by_
+the_distance_term=. No full re-sweep has been run against the new parent;
+doing so is the honest way to replace the table below, and it has not
+been done.
+
+* The original note follows, unchanged
 
 The S3 spec left =rounds= and =patience= as an open question
 ("Unmeasured"), and =tuxghost.optimize.runner.optimize= makes all four

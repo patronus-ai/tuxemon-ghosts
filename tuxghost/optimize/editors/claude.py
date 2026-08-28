@@ -102,7 +102,7 @@ class ClaudeEditor:
         model: str = DEFAULT_MODEL,
         goal: str = "",
         # Names for the `Objective`'s score terms, in priority order,
-        # e.g. `"on_target_map, -distance_to_target, -steps"`. Without
+        # e.g. `"-off_target_map, -distance_to_target, -steps"`. Without
         # it the prompt's only quantitative feedback was three unlabelled
         # numbers whose order and sign the model had to guess
         # (whole-branch review, Important 1). Supplied by the CALLER --

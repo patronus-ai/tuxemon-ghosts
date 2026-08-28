@@ -242,3 +242,60 @@ def test_an_insert_index_beyond_the_script_is_the_loops_problem() -> None:
         client=_StubClient('```json\n{"edits": [{"op": "delete", "index": 99}]}\n```')
     )
     assert editor.propose(SCRIPT, _candidate(), (0.0,)) == (Delete(99),)
+
+
+def test_the_system_prompts_button_values_track_upstreams_constants() -> None:
+    """FINAL RESIDUALS, ITEM 4. Whole-branch review Also-fix 2 replaced
+    hardcoded button numbers in `SYSTEM` with values read from
+    `tuxemon.platform.const.buttons`, and a later fix wave concluded no
+    test could pin that. One can.
+
+    The existing coverage (`tests/test_optimize_cli.py`, `assert "UP=1"
+    in system and "LEFT=4" in system`) cannot: those ARE the real values,
+    so a legend built from hardcoded literals emits exactly the same
+    string and passes. What discriminates is remapping upstream and
+    checking the legend follows.
+
+    UP and LEFT are SWAPPED rather than given novel values -- 4 and 1 are
+    both still valid buttons, so the six-name legend stays well-formed
+    and any assertion about its shape stays green. Only a legend that
+    actually reads the constants changes its content:
+
+        reads the constants -> "UP=4, ..., LEFT=1"   (passes)
+        hardcoded literals  -> "UP=1, ..., LEFT=4"   (fails)
+
+    The module is reloaded because `_BUTTON_LEGEND` and `SYSTEM` are
+    built once at import time, and reloaded again in `finally` so a
+    failure here cannot leave a remapped module behind for later tests.
+    """
+    import importlib
+    from unittest import mock
+
+    from tuxemon.platform.const import buttons
+
+    import tuxghost.optimize.editors.claude as claude_module
+
+    assert (buttons.UP, buttons.LEFT) == (1, 4), (
+        "this test swaps UP and LEFT; if upstream's real values are no "
+        "longer 1 and 4 the swap below is not a swap"
+    )
+    try:
+        with (
+            mock.patch.object(buttons, "UP", 4),
+            mock.patch.object(buttons, "LEFT", 1),
+        ):
+            remapped = importlib.reload(claude_module)
+            legend = remapped._BUTTON_LEGEND
+            system = remapped.SYSTEM
+    finally:
+        importlib.reload(claude_module)
+
+    assert "UP=4" in legend, legend
+    assert "LEFT=1" in legend, legend
+    # And in the assembled system prompt, which is what the model sees.
+    assert "UP=4" in system and "LEFT=1" in system, system
+    # The un-remapped values must be GONE, not merely joined by the new
+    # ones -- a legend that appended rather than replaced would satisfy
+    # the assertions above while still telling the model UP=1.
+    assert "UP=1" not in legend, legend
+    assert "LEFT=4" not in legend, legend

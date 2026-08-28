@@ -1,0 +1,154 @@
+#+TITLE: ClaudeEditor vs MutationEditor — measured, both sides
+#+DATE: 2026-08-27
+#+STATUS: measured
+
+* What this note is
+
+S3's spec states that the *only* permitted claim about =ClaudeEditor= is
+a comparison against =MutationEditor= at the same parent, budget and
+objective. This note is that comparison. Both sides were run; this is
+the first live-model evidence for =ClaudeEditor= anywhere in this
+project.
+
+* What was run
+
+Six runs through the real CLI, one at a time, sequentially. Identical
+parent, objective, target and all four bounds on both sides; the only
+difference is =--editor= (and =--seed=, which only =mutation= accepts).
+
+#+begin_src bash
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+./.venv/bin/python -m tuxghost.cli optimize \
+  --trace tests/golden/scripted_town_1234.tuxghost \
+  --editor {mutation --seed $S | claude} \
+  --objective reach-tile --target spyder_paper_town.tmx:19,14 \
+  --rounds 32 --patience 32 --max-rejections 32 --max-cost 4000 \
+  --out ... --run-dir ...
+#+end_src
+
+- Parent: 176 steps, digest =9eed41f8...=, ends tile =[16, 14]= on a bare
+  =WorldState=. Target =[19, 14]=, three tiles east — parent distance
+  =-3=.
+- Model: =claude-sonnet-5=, the =DEFAULT_MODEL= the CLI resolves when
+  =--model= is omitted. No other model id has evidence behind it.
+- =--patience= and =--max-rejections= set equal to =--rounds= so neither
+  can bind, the construction the earlier sweep used. *This turns out to
+  matter — see "What patience would have saved".*
+- Three runs a side: =MutationEditor= has a seed, =ClaudeEditor= does
+  not and varies by sampling, so neither is characterised by one run.
+
+*No wall-clock timings.* Load average was 3-14 from unrelated work.
+Mutation scores are seed-deterministic and unaffected; Claude's are not
+reproducible at all (=docs/STATUS.org=, "Model sampling is not
+determinism").
+
+* The results
+
+| editor | run | stop reason | best round | best score | best steps | arrived |
+|--------+-----+-------------+------------+------------+------------+---------|
+| claude | 1 | editor returned STOP | 1 | (0, -0, -230) | 230 | yes |
+| claude | 2 | rounds exhausted | 3 | *(0, -0, -178)* | *178* | yes |
+| claude | 3 | editor returned STOP | 1 | (0, -0, -230) | 230 | yes |
+| mutation | s1 | rounds exhausted | 32 | (0, -0, -186) | 186 | yes |
+| mutation | s2 | rounds exhausted | 30 | (0, -2, -125) | 125 | *no* |
+| mutation | s3 | rounds exhausted | 19 | (0, -0, -185) | 185 | yes |
+
+* Where the two separate, and where they do not
+
+*They separate on arrival, decisively.* Claude arrived in *3 of 3* runs;
+mutation in *2 of 3*.
+
+*They separate on rounds-to-arrival, by more than an order of
+magnitude.* Claude arrived on *round 1* in all three runs. Mutation
+needed *19, 30 and 32* rounds and in the seed-2 case never got there.
+
+All three Claude runs proposed the *byte-identical* round-1 edit:
+
+#+begin_src json
+{"op": "insert", "index": 8, "action": {"button": 8, "hold": 48, "settle": 6}}
+#+end_src
+
+=hold 48= is three tiles at this game's 16 steps per tile, against a
+target exactly three tiles east. *The model computed the mechanics
+rather than searching for them.* That is the finding with the most
+distance between the two editors, and it is pinned by
+=tests/test_optimize_live_capture.py=.
+
+*They do NOT separate on final step count.* Among arriving candidates,
+Claude reached 178, 230 and 230; mutation reached 185 and 186. The
+ranges overlap, and Claude's median arrival (230) is *worse* than both
+of mutation's. Only Claude run 2 beat mutation outright.
+
+Mutation's shortest trace overall is seed 2's 125 steps — but it did not
+arrive, so it loses lexicographically to every arriving candidate. A
+reader comparing step counts alone would rank it first and be wrong.
+
+* Claude's two failure modes, both measured
+
+*1. It stops while it is still winning.* Runs 1 and 3 returned STOP at
+round 1, immediately after arriving, leaving a 230-step trace on the
+table. Run 2 — the only run that continued — got the same arrival down
+to *178 steps in two more rounds*, by merging the parent's four
+separate DOWN presses into one =hold 64= and its RIGHT presses into one
+=hold 112=. So the 230 the other two runs stopped at was ~23% worse than
+what the same editor demonstrably reaches when it keeps going.
+
+*2. It plateaus and repeats.* Run 2, having reached 178 at round 3,
+proposed the *same two edits 29 times* across rounds 4-32. Each scored
+=(0.0, -1.0, -176.0)= — it lost the arrival and matched the parent's
+step count — and none was accepted. 29 of its 32 rounds bought nothing.
+
+** What patience would have saved
+
+=patience= was set to 32 here so it could not bind, which is why run 2's
+plateau ran to the cap. At the =patience = 10= that
+=docs/2026-08-27-optimizer-tuning.org= derives, run 2 would have stopped
+at round 13: *19 fewer rounds and 19 fewer API calls, with an identical
+winner.*
+
+That note could only derive =patience= as a lower bound, because in its
+own nine-run mutation sweep patience never fired — the mutator kept
+finding improvements. This capture is the first run in the project where
+patience would have done real work. It is evidence that =patience= is a
+live control for =ClaudeEditor= specifically, in a way the mutation
+sweep could not show.
+
+Sampling cost, for the same reason, was not 96 calls but roughly 36: two
+runs stopped after two calls each.
+
+* Honest limits
+
+- *n = 3 a side, and effectively n = 2 for Claude*: runs 1 and 3 are
+  byte-identical in their proposals and outcomes, so the three runs
+  exhibit two distinct behaviours, not three.
+- *One parent, one target, one map, one model.* Nothing here generalises
+  to a different objective or a longer trace, and the target being
+  exactly three tiles along one axis is about as legible a goal as this
+  objective admits. A target requiring a turn, a detour, or passage
+  through another map is untested.
+- *=parse_response= is still not covered against real model text.*
+  =ClaudeEditor= holds the raw reply on =self.last_raw= and nothing
+  persists it; =optimize='s run directory has no equivalent of =agent='s
+  =decisions.jsonl= and its =raw= field. So the committed artifact is
+  the model's *parsed edits*, not its answers. S2 closed this hole for
+  =agent=; it is open for =optimize=. Closing it is one write in
+  =tuxghost/cli.py=, and it is the single highest-value follow-up here.
+- The comparison is at *one budget* (32 rounds). Mutation was still
+  improving at its cap in the earlier sweep and reached best-round 30 and
+  32 here, so it is not saturated; Claude's plateau means it is.
+
+* Committed artifacts
+
+Run 2 is committed, being the only run that improved across more than a
+single round:
+
+- =tests/fixtures/claude_optimize_town.edits.jsonl= — its 32 proposal
+  rounds, one JSON array per line, exactly the shape =--edits= reads.
+- =tests/fixtures/claude_optimize_town.run.json= — its own record of
+  parent digest, goal, objective, target, model and bounds.
+- =tests/test_optimize_live_capture.py= — four tests, including a replay
+  control that re-runs the transcript through =ReplayEditor= and requires
+  it to reproduce the live score sequence exactly.
+
+Runs 1 and 3 are not committed: their single proposal is byte-identical
+to run 2's round 1, already covered by that fixture.
