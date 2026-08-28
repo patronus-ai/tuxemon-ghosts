@@ -1,0 +1,121 @@
+"""The one windowed entry point in this project, and its only exception
+to the dummy-SDL rule.
+
+`CLAUDE.md` requires `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` on
+every invocation touching the client, because a headless run must not
+block on window creation or vary machine to machine. This module is the
+single deliberate exception: a human at a real window is the one consumer
+that needs one.
+
+It does NOT threaten determinism. `tuxghost.boot.boot_from_save`'s own
+docstring records the measurement that settles it -- record and replay
+may use different display contexts, and a 300-step per-step digest
+sequence (`tuxghost.digest.digest_of`, not just the final digest) was
+identical at every index between the two. A window changes what is
+DRAWN, not what HAPPENS.
+
+Kept deliberately thin: `make check` runs headless, so nothing here is
+gated. Every decision lives in `tuxghost.ghost`, which is fully tested.
+
+Ordering note: the ghost track is built BEFORE the real session boots,
+not after. `tuxghost.boot.boot_from_save` restores state onto
+`tuxemon.session.local_session`, a process-wide singleton, and resets it
+on every call -- building the track first (its own throwaway headless
+boot) and only then booting the real, windowed session ensures the
+reset that matters last is the human's own, not the ghost's replay.
+Building it the other way around would silently reset the live player's
+session out from under them.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+from tuxghost.determinism import pin_clock, seed_all
+from tuxghost.ghost.entity import advance_ghost, install_ghost
+from tuxghost.ghost.pump import install_recording_events, steps_owed
+from tuxghost.ghost.track import build_track
+from tuxghost.loop import run_steps
+from tuxghost.record import Recorder
+from tuxghost.trace import read, write
+
+#: Catch-up bound. Past this, wall-clock time is dropped rather than
+#: banked -- see `steps_owed`.
+CATCH_UP_CAP = 5
+
+
+def play(
+    ghost_trace: Path | None,
+    save: Path,
+    seed: int,
+    clock_epoch: int,
+    out: Path,
+    run_dir: Path,
+) -> int:
+    import pygame as pg
+    from tuxemon.prepare import pygame_init
+    from tuxemon.save_system.save_state import SaveData
+
+    from tuxghost.boot import boot_from_save
+    from tuxghost.observe import FrameRenderer
+
+    context = pygame_init()
+
+    track = build_track(read(ghost_trace)) if ghost_trace is not None else None
+
+    seed_all(seed)
+    pin_clock(clock_epoch)
+    save_data = SaveData.model_validate(json.loads(save.read_text()))
+    _client, session = boot_from_save(
+        save_data, seed=seed, clock_epoch=clock_epoch, context=context
+    )
+    client = session.client
+
+    npc = (
+        install_ghost(session, track, sprite_slug="allie")
+        if track is not None
+        else None
+    )
+
+    recorder = Recorder(session, seed=seed, clock_epoch=clock_epoch, recorder="human")
+    state: dict[str, int] = {"step": 0}
+    install_recording_events(client, recorder, lambda: state["step"])
+
+    frames = FrameRenderer(client, upscale=1)
+    display = context.screen
+
+    accumulator = 0.0
+    last = time.monotonic()
+    while client.is_running:
+        now = time.monotonic()
+        steps, accumulator = steps_owed(accumulator, now - last, CATCH_UP_CAP)
+        last = now
+
+        for _ in range(steps):
+            run_steps(client, 1)
+            state["step"] += 1
+            if npc is not None and track is not None:
+                advance_ghost(
+                    client, npc, track, state["step"], client.get_map_name()
+                )
+
+        display.blit(frames.surface(), (0, 0))
+        pg.display.flip()
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write(recorder.finish(step_count=state["step"]), out)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "seed": seed,
+                "clock_epoch": clock_epoch,
+                "steps": state["step"],
+                "ghost": str(ghost_trace) if ghost_trace is not None else None,
+                "ghost_digest": track.source_digest if track is not None else None,
+            },
+            indent=2,
+        )
+    )
+    return 0
