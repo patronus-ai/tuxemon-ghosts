@@ -69,8 +69,22 @@ def _apply_translucency(npc: Any, alpha: int = 128) -> None:
             surface.set_alpha(alpha)
 
 
-def install_ghost(session: Any, track: GhostTrack, sprite_slug: str = "allie") -> Any:
+def install_ghost(session: Any, track: GhostTrack, sprite_slug: str | None = None) -> Any:
     """Add the ghost NPC to the session and return it.
+
+    `sprite_slug` defaults to `None`, meaning "the session's own player's
+    sprite" -- derived from `session.player.slug` (`npc_red` for the
+    committed save), not hardcoded. The spec requires the ghost use the
+    PLAYER's own sprite, so it reads as "another you", with a visually
+    distinct sprite only as a FALLBACK if the translucency probe (probe
+    1) had failed -- it succeeded (see `_apply_translucency`'s
+    docstring), so no fallback is warranted. M1, whole-branch review: the
+    plan hardcoded `"allie"` here (and in `tuxghost.play`) and the
+    implementation followed the plan over the spec; CLAUDE.md is explicit
+    that the spec outranks the plan when they disagree. An explicit
+    `sprite_slug` argument still overrides this default -- tests that
+    want a fixed, known sprite to assert against (rather than "whatever
+    this fixture's save's player happens to be") pass one directly.
 
     Refuses (a `ValueError` naming `GHOST_SLUG`) if the slug is already
     taken on the map: `NPCRepository` is keyed by slug, so adding under
@@ -86,6 +100,9 @@ def install_ghost(session: Any, track: GhostTrack, sprite_slug: str = "allie") -
     data happens to default to.
     """
     from tuxemon.entity.npc import NPC
+
+    if sprite_slug is None:
+        sprite_slug = session.player.slug
 
     manager = session.client.npc_manager
     if manager.npc_exists(GHOST_SLUG):

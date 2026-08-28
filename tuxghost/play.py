@@ -91,7 +91,11 @@ def play(
     client = session.client
 
     npc = (
-        install_ghost(session, track, sprite_slug="allie")
+        # No explicit `sprite_slug`: defaults to the session's own
+        # player's sprite (M1, whole-branch review -- see
+        # `install_ghost`'s docstring). The spec requires the ghost read
+        # as "another you", not a hardcoded stranger.
+        install_ghost(session, track)
         if track is not None
         else None
     )
