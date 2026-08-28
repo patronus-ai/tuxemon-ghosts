@@ -1452,13 +1452,39 @@ here, as the S3 handoff already warned.
 
 * Next subsystem
 
-*S4* (ghost rendering) and *S5* (finish lines / rewards) are next, in
-that order. Each gets its own spec — this project's original spec covered
+*S4* (ghost rendering) is next, and has a dedicated handoff:
+=docs/2026-08-27-s4-ghost-rendering-handoff.org=. It records what S4 can
+already build on (the public, digest-neutral render seam; ghost tracks
+recoverable by replay with no format change; a walking fixture and a
+reproducible ghost-RACE pair, both new from Stream A), the two obstacles
+that are genuinely unresolved (no live windowed mode; a step-indexed
+format meeting a wall-clock player), and the questions a human must
+answer before anything is designed. *It needs a brainstorming pass
+first.*
+
+*S5* (finish lines / rewards) follows.
+
+Each subsystem gets its own spec. This project's original spec covered
 only S1 (the trace/replay core); S2 (the CU-agent harness) and S3 (the
 offline optimizer) each have their own, both now =#+STATUS: implemented=.
 
 S5 is where =ReachTile= gets replaced rather than extended: it supplies
 its own =Objective= and nothing in S3's loop, seal or edit vocabulary
-changes. The measured argument for doing that, rather than growing
-=ReachTile=, is in S3's section above — on the one parent trace this
-project has, a positional objective could not improve position at all.
+changes.
+
+*The argument for S5 changed during Stream A, and the old wording here
+was left standing too long.* This section used to say that a positional
+objective "could not improve position at all" on the only parent the
+project had. That was true of =claude_town_1234=, whose trailing dialogue
+swallowed every appended input — and it is *false now*. Against
+=scripted_town_1234=, =MutationEditor= reaches the target tile in two of
+three seeds and =ClaudeEditor= in three of three (see "A4 — measured,
+both sides"). =ReachTile= works.
+
+So S5's case is no longer "the positional objective is inert". It is the
+narrower and more honest one: *position is a proxy for progress, and
+this project has never measured progress.* =ReachTile='s own docstring
+has said exactly that from the start — it "measures position, not
+progress: it says nothing about whether the game advanced". A finish-line
+objective is what tests that claim, and nothing in S3 has to change for
+it to be tried.

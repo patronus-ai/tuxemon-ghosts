@@ -1,6 +1,8 @@
 #+TITLE: Handoff — two parallel streams from S3's merge
 #+DATE: 2026-08-27
-#+STATUS: Stream A is DONE. Stream B is untouched.
+#+STATUS: Stream A is DONE. For Stream B/S4, read
+#+STATUS: docs/2026-08-27-s4-ghost-rendering-handoff.org INSTEAD -- this
+#+STATUS: file's Stream B section is superseded.
 
 * UPDATE, later on 2026-08-27 — read this before the rest of the file
 

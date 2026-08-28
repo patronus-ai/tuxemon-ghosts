@@ -1,0 +1,248 @@
+#+TITLE: Handoff — S4, ghost rendering
+#+DATE: 2026-08-27
+#+STATUS: prep only. No S4 code exists. Brainstorm before implementing.
+
+Read =CLAUDE.md= and =docs/STATUS.org= first, as always. This file says
+only what a session picking up *S4* needs and those two do not: what is
+true of the tree now, what S4 can already build on (verified, not
+assumed), the questions a human has to answer before anything is
+designed, and what in the older documents is stale.
+
+It supersedes the Stream B section of
+=docs/2026-08-27-next-session-handoff.org=, which was written before
+Stream A landed and describes a tree that no longer exists.
+
+* State at handoff
+
+=main= is at *2b84960*. S1 (trace core), S2 (CU-agent harness), S3
+(offline optimizer) and *Stream A* (finishing S3) are all merged.
+
+#+begin_src text
+fast: 382 passed, 4 skipped, 11 warnings   (single session; warning gate did not drift)
+slow:   4 passed, 382 deselected, 1 warning
+ruff + lint-patched + mypy --strict: green
+#+end_src
+
+=patches/= is *6 files*; =git -C tuxemon diff --stat= is *18 files
+changed, 265 insertions(+), 63 deletions(-)* plus 2 untracked;
+=EXEMPTIONS= is =={}=. *S4 should expect to need a seventh patch only if
+it proves it needs one* — see "The translucency question" below, which
+may well not.
+
+*Nothing has ever been pushed; there is no git remote.* If that changes,
+=58a2a36= still carries a 3.5 MB blob (~75% of history) — squash it out
+first. Note also that =uv.lock= entered the tree during Stream A via an
+over-broad =git add -A=; it was never a deliberate decision and can be
+removed if unwanted.
+
+* What S4 can build on, each verified on this tree
+
+Not inherited claims — these were re-checked while writing this file.
+
+** The rendering seam is public, proven, and digest-neutral
+
+=tuxghost/observe.py='s =FrameRenderer= installs a real =MapRenderer=
+through the *public* =BaseClient.set_renderer= seam and composites via
+upstream's =StateDrawer=. *No engine patch.* Measured: a stock
+=NullRenderer= frame samples to *1* colour (pure black); the same call
+with =MapRenderer= samples to *48*.
+
+Its surface:
+
+- =FrameRenderer.surface()= — fills the background, draws the active
+  state stack, returns *the full frame surface*.
+- =FrameRenderer.png()= — the frame as PNG bytes, cropped to the drawn
+  region and integer-upscaled.
+
+*The property S4 most depends on*: rendering does not perturb the
+digest. Pinned twice, in =tests/test_observe.py= —
+=test_rendering_does_not_change_the_digest= and
+=test_recording_renders_matches_a_render_free_replay=. A ghost overlay
+must preserve that, and there is already a test shape to copy.
+
+Constructing a =FrameRenderer= *mutates the client* (it swaps the
+renderer). It is not a read-only observer; its own docstring says so.
+
+** A ghost's path is recoverable without touching the format
+
+A trace stores only =(step, button, value)= — no positions. But replay
+is deterministic, and =execute(trace, checkpoint=N, capture_states=True)=
+already samples =state_of= per checkpoint. =state_of= yields =map=,
+=tile_pos=, =facing= and =state_stack= (plus =npc_state=,
+=world_state=, =persistent_npc_state=).
+
+So a ghost track = replay once, keep the sampled states. *No new format
+field, no format-version bump, no patch.* Prefer this to stepping a
+second engine instance alongside: it is far cheaper and it inherits the
+deterministic-replay guarantee rather than needing its own.
+
+Note the resolution limit: =capture_states= samples *at checkpoints*,
+so a per-step track needs =checkpoint=1=, which takes a =state_of=
+snapshot on every step. That is affordable for 176 steps and probably
+not for 4945.
+
+** A ghost can be labelled by origin
+
+=provenance.recorder= is a =Literal["cu-agent", "offline-agent",
+"human"]=, and =provenance.model= carries the model id. The three
+committed traces already differ:
+
+| trace | steps | inputs | recorder | model |
+|-------+-------+--------+----------+-------|
+| =scripted_town_1234= | 176 | 16 | human | — |
+| =claude_town_1234= | 442 | 36 | cu-agent | claude-sonnet-5 |
+| =walk_1234= | 900 | 80 | human | — |
+
+** Stream A left S4 a subject that actually walks
+
+*This is new and it matters.* Before Stream A, no committed trace was a
+good ghost demo: =walk_1234=, despite its name, presses =A= for all 80
+of its inputs and never moves; =claude_town_1234= walks but ends stuck
+in a =DialogState=.
+
+=tests/golden/scripted_town_1234.tuxghost= — added by Stream A — is 8
+directional actions, 176 steps, walking from the =paper_town.save= spawn
+to tile =[16, 14]= on =spyder_paper_town.tmx=, ending on a bare
+=WorldState=. A player visibly crossing tiles is exactly what a ghost
+needs to be legible.
+
+** And a ghost RACE pair, reproducible from committed artifacts
+
+The canonical ghost scenario is "your old run against your better run",
+and one now exists without recording anything new:
+
+- *The runner*: =scripted_town_1234= — 176 steps, ends =[16, 14]=.
+- *The ghost*: replay =tests/fixtures/claude_stop_town.edits.jsonl=
+  through =ReplayEditor= against that parent. Round 1 is a single
+  inserted RIGHT with =hold 48= and reaches tile =[19, 14]= in 230
+  steps — a real model's real edit, and it *arrives* where the parent
+  stops three tiles short.
+
+Same save, same seed, same map, same clock epoch; one strictly better on
+=ReachTile=. Both sides are committed or deterministically derivable, so
+the demo needs no API key and no fresh capture.
+
+*Run end to end while writing this file*, not asserted from the run
+logs:
+
+#+begin_src text
+parent : 176 steps, ends [16, 14]
+ghost  : 230 steps, ends [19, 14] on spyder_paper_town.tmx
+stack  : ['WorldState']          <- both end walkable, neither in a menu
+#+end_src
+
+via =optimize(parent, ReplayEditor("tests/fixtures/claude_stop_town.
+edits.jsonl"), ReachTile("spyder_paper_town.tmx", (19, 14)), rounds=1,
+...)=. =tests/test_optimize_live_capture.py= replays transcripts the same
+way and asserts the live scores come back, so the mechanism is pinned as
+well as demonstrated.
+
+* The two real obstacles, unchanged by Stream A
+
+** 1. There is no live mode to host a ghost
+
+Nothing in this project ever opens a window. Every boot is headless with
+dummy SDL drivers, and =CLAUDE.md= requires that of *every* invocation
+touching the client — it is the rule the whole determinism effort rests
+on.
+
+*Windowed play is a deliberate exception to that rule and is the
+human's call, not the implementer's.* Do not open a window because it
+seemed necessary; ask.
+
+** 2. A step-indexed format meets a wall-clock player
+
+The format is step-indexed on purpose. =PlayerInput.timestamp=
+deliberately never enters it; =clock_epoch= is one pinned instant, not a
+stream. Anything reading real time to decide what happens next is a
+determinism bug by this project's own rules.
+
+A human playing in real time is the one consumer that reintroduces the
+wall clock. "Which trace step is the ghost on right now" needs an
+explicit, stated mapping. =STEP_RATE= is *60* (=tuxghost/loop.py=,
+=FIXED_DT = 1/60=), and =step_rate= is a header field checked on read
+(=THIS_STEP_RATE= in =tuxghost/trace.py=), so one step ≈ one frame at
+60 fps — but a machine that drops frames changes the ghost's apparent
+speed, and that drift has to be a stated design decision rather than an
+emergent one.
+
+*Note this obstacle only exists for the live-window path.* Rendering
+into recorded frames has no wall clock in it at all.
+
+* The questions a human must answer before designing
+
+1. *Live windowed session, or rendering into recorded frames?* The
+   second — a filmstrip, contact sheet, or video of one trace with
+   another overlaid — needs no windowed mode, dodges obstacle 1
+   entirely, dodges obstacle 2 entirely, and is very likely the cheaper
+   first cut. The first is the more compelling product and the bigger
+   commitment.
+2. *What is a ghost FOR here?* Three different features wear the same
+   name: a debugging overlay (why did these two runs diverge?), a
+   regression artifact (visual diff between a trace and its optimized
+   descendant), or a game feature (race your past self). They imply
+   different designs. The optimizer pair above serves the middle one
+   with zero new infrastructure.
+3. *What identifies a ghost to a viewer* — the =model= field, the
+   =recorder= kind, a name in =taints=, a colour?
+4. *One ghost or many?* N overlaid traces is a different data structure
+   and a different legibility problem than one.
+
+* The translucency question, and a cheaper answer than the old handoff assumed
+
+The prior handoff asked whether drawing a second, alpha-blended entity
+needs a seventh patch, or whether =npc_manager= plus =set_renderer=
+reaches it — and marked it *unmeasured*. It is still unmeasured, but the
+framing was too pessimistic.
+
+=FrameRenderer.surface()= hands the caller *the composited frame surface
+itself*. So the cheapest ghost is a *post-hoc blit onto that surface* —
+draw the world, then blit a translucent marker at the ghost's tile,
+computed from the recovered track. That involves no engine entity, no
+=npc_manager=, no patch, and cannot perturb the digest because it
+happens after drawing.
+
+*Probe that before designing anything heavier.* The engine-entity route
+(a real translucent NPC the engine knows about) is only necessary if the
+ghost must interact with the world — occlusion behind buildings, correct
+draw-order among sprites — and that requirement should be established,
+not assumed. Note S2 already found a related rendering gap worth
+knowing: at spawn the player sprite is hidden behind a roof, so draw
+order in this engine is not trivially "player on top".
+
+* What in the existing documents should not be trusted
+
+- *=docs/2026-08-27-next-session-handoff.org='s Stream B section.*
+  Superseded by this file. Its A1-A4 items are all done; its Stream B
+  facts are mostly right but its translucency framing is pessimistic
+  (above) and it predates the walking fixture.
+- *=docs/2026-08-27-optimizer-tuning.org='s nine rows.* Measured against
+  the RETIRED parent, and marked as such in the file itself.
+- *Every wall-clock timing produced during Stream A.* The host ran at
+  load 3-29 across the day; two full gate runs were killed outright
+  mid-run. The one usable figure is 215.32 s at 375 tests as load fell
+  to 2.0. Check =uptime= before quoting anything.
+- *Any implementation plan, on principle.* S3's plan had nine defects
+  that would each have shipped green, and Stream A found two more
+  test-level traps by measurement: an edit pair that inverted against a
+  new fixture, and a test of mine that was vacuous on its first draft
+  and only caught by the mandatory fail-first demonstration. Verify
+  every step against the real code before trusting it.
+
+* Ground rules a new session will otherwise rediscover the hard way
+
+- =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy= on *every* invocation
+  touching the client.
+- Never edit =tuxemon/= directly; every engine change is a patch under
+  =patches/=, and =make unpatch= destroys the applied tree without
+  recovery.
+- Never run two full suites at once — they race on
+  =~/.tuxemon/cache/l18n/*.mo=, which has been corrupted before. Give a
+  parallel session its own =$HOME= (verified: Tuxemon's user dir follows
+  it) and copy =tuxemon.yaml= in first, because boot asserts
+  =display.fps=.
+- Every regression test must be *demonstrated* to fail against the
+  defect it pins, with the real before/after output in the report. This
+  is the project's one non-negotiable, and it earned its place: six
+  tests here have passed vacuously.
+- Docs are =.org=, never =.md=. =CLAUDE.md= is the sole exception.
