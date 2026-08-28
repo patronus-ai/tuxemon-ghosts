@@ -1450,19 +1450,244 @@ reported up to 789.93 s, and two background gate runs were killed
 outright mid-run at that load. Check =uptime= before quoting anything
 here, as the S3 handoff already warned.
 
+* S4 — ghost rendering, delivered
+
+A translucent, non-solid, digest-invisible NPC that replays a previously
+recorded trace's positions and facing inside a *live, windowed* session,
+alongside a real human player — plus the one windowed entry point this
+project has, =tuxghost play=. Spec:
+=docs/superpowers/specs/2026-08-27-ghost-rendering-design.org=. Branch:
+=impl/ghost-rendering= (still unmerged — see "What is NOT covered" and
+"Manual acceptance" below for why merging is a human decision, not this
+close-out's).
+
+=tuxghost/ghost/= (=track.py=, =entity.py=, =pump.py=) is the entire
+gated surface; =tuxghost/play.py= is the thin, deliberately-ungated shell
+that wires it to a real window. No seventh patch, no trace-format change,
+=format_version= still *1*, =EXEMPTIONS= still =={}=.
+
+** No seventh patch, re-measured at this close-out
+
+#+begin_src bash
+$ ls patches/ | wc -l
+       6
+$ git -C tuxemon diff --stat | tail -1
+ 18 files changed, 265 insertions(+), 63 deletions(-)
+$ grep -n "^EXEMPTIONS" tuxghost/digest.py
+65:EXEMPTIONS: dict[str, str] = {}
+$ grep -n "^FORMAT_VERSION" tuxghost/trace.py
+54:FORMAT_VERSION = 1
+#+end_src
+
+Same six patches, same 18/265/63, =EXEMPTIONS= still =={}=, trace format
+unchanged and =format_version= unchanged. S4 needed none of the three.
+
+** Three properties make a ghost safe, and all three were DEMONSTRATED, not asserted
+
+=tuxghost/ghost/entity.py='s =install_ghost= puts a second real
+=NPC= (`NPC.create`, sprite ~allie~) into the live session with three
+properties, none of which needed an engine patch:
+
+- *DRAWN, with correct occlusion* — because =MapRenderer._get_npc_surfaces=
+  (=tuxemon/map/view.py=) iterates =npc_manager.npcs= and feeds the
+  layered draw; =NPCManager.add_npc= alone is sufficient. Task 2 pinned
+  this with a real render-inertness gate comparing digest sequences (a
+  stock headless =NullRenderer= frame samples to a single colour; a real
+  =MapRenderer='s frame samples to dozens), and Task 4's animation test
+  installs a real =MapRenderer= and asserts the ghost's own sprite
+  Surface identity actually changes across ticks — reverting the walk
+  step to a no-op produced a real, captured failure ("the ghost's
+  character-sprite Surface identity never changed across 90 ticks after
+  a moved step — a sliding statue, not a walk cycle"), restoring it made
+  the test pass again.
+- *NOT SOLID* — because =CollisionManager= keeps a separate
+  =_entity_map=, populated only by explicit =add_collision= calls, which
+  =install_ghost= never makes. Task 5 demonstrated this directly: the
+  brief's own suggested one-line mutation (a single static
+  =add_collision= call at install time) turned out to be a *vacuous*
+  mutation — it registered collision at the ghost's spawn tile, which is
+  identical to the player's own spawn tile before any step runs, and
+  never updated as the ghost moved, so the test kept passing even with
+  that "fix" applied. The genuine demonstration required a DYNAMIC
+  mutation — wrapping =set_position= to re-register collision at the
+  ghost's current tile on every move — which produced a real, captured
+  failure (the player's end tile shifted from =(16, 14)= to =(15, 12)=,
+  visibly deflected by a solid ghost). Restored, the test passed again.
+  This is a genuine finding about the BRIEF, not about =install_ghost='s
+  (correct) behaviour: a naively-written regression test here would have
+  been the project's seventh vacuous test.
+- *INVISIBLE TO THE DIGEST* — because =tuxghost.digest='s
+  =get_persistent_npc_states= filters on =npc.persistence=, and
+  =install_ghost= overrides it to =False= explicitly (rather than
+  trusting whatever the sprite's own database entry defaults to). Task 5
+  demonstrated this too: flipping that one line to =True= produced a
+  real, captured digest divergence at step 0 (=19662f05… != e60cad02…=)
+  — the ghost's own persistent state leaking into
+  =persistent_npc_state= the instant it was installed. Restored, the
+  per-step digest sequence matched again.
+
+Each of the three has the same shape the project's history warns about:
+a plausible one-line demonstration that would have proven nothing (the
+collision case), caught only because someone ran it and looked at the
+real output rather than trusting the brief's sketch.
+
+** Both Task 1 probe results (measured before any implementation)
+
+- *Translucency*: =set_alpha(128)= on the real sprite Surface objects
+  reachable from =ghost.sprite_controller.get_sprite_renderer()=
+  (=.standing.values()= plus each walk animation's
+  =._frame_manager.images=) works with *no engine patch*. Measured: the
+  same 103 distinct sampled colours before and after, each original
+  saturated sprite colour replaced by one blended toward the ground tile
+  beneath it — the actual signature of alpha blending, not an unrelated
+  change.
+- *Per-step =set_position= alone yields a sliding statue, not a walk*:
+  measured by tracking the =id()= of the character-sprite Surface
+  =MapRenderer._get_sprites= returns across four stepped positions — the
+  *same object* every step, because =set_position= never touches
+  =npc.mover.state=, so =is_moving_state= stays =False= forever and the
+  renderer always takes its static branch. The measured fix (still no
+  patch): drive =npc.mover.state= into =WALKING= and play the matching
+  =SurfaceAnimation= via the existing public
+  =SpriteController.play_animation=/=stop_animation= API whenever the
+  ghost's tile actually changed since the previous call — confirmed
+  directly, the surface identity cycles (2 of 4 distinct) once state and
+  animation are driven together. =advance_ghost= implements exactly this;
+  it is why the module exists as more than a =set_position= wrapper.
+
+Both probes are recorded in full, with real command output, in
+=docs/2026-08-27-ghost-probes.org=.
+
+** The full gate, run alone, per this project's standing rule
+
+#+begin_src bash
+$ uptime   # before starting
+23:28  up 17 days, 12:58, 2 users, load averages: 8.94 9.13 13.23
+$ make check
+./.venv/bin/python -m ruff check tuxghost tests
+All checks passed!                                  # lint
+All checks passed!                                  # lint-patched
+./.venv/bin/python -m mypy tuxghost tests
+Success: no issues found in 75 source files
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q
+402 passed, 4 skipped, 11 warnings in 1482.14s (0:24:42)
+PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 ./.venv/bin/python -m pytest -q -m slow
+4 passed, 402 deselected, 1 warning in 91.64s (0:01:31)
+EXIT=0
+$ uptime   # after finishing
+23:57  up 17 days, 13:27, 2 users, load averages: 10.27 23.62 27.60
+#+end_src
+
+- *Fast tier: 402 passed, 4 skipped, 11 warnings.* Up from Stream A's
+  382 — 20 net new tests, all four new S4 files (=test_ghost_track.py=,
+  =test_ghost_entity.py=, =test_ghost_pump.py=, =test_play_cli.py=), each
+  tracked in =tests/conftest.py='s =patch_series_id= tripwire with zero
+  pinned warnings (all four were written against the current patch
+  series, so they must warn zero times — and did). The pinned-warning
+  count is unchanged at 11.
+- *Slow tier: 4 passed, 402 deselected, 1 warning* — unchanged from
+  Stream A's 4.
+- =mypy --strict= now covers *75* source files (was 64 at S3 close, then
+  grew through Stream A).
+- =EXIT=0=. Nothing failed.
+
+*On the timing — NOT a clean benchmark, stated plainly rather than
+quoted as one.* Load was *8.94/9.13/13.23* at the start of this run,
+already above the ~5 this project's history treats as the point past
+which a full-suite timing stops being trustworthy; it rose to *14.46*
+mid-run, *peaked at 39.80/37.53/29.65*, and stood at
+*10.27/23.62/27.60* by the time the gate finished. A second, unrelated
+=pytest= process (`gym-cua-lucidchart`, a different repo with its own
+=.venv=, confirmed by =ps aux= at close-out) was running concurrently on
+the same host for part of this window. That process is NOT a tuxemon
+suite and does not touch =~/.tuxemon/cache/l18n=, so it is not a
+violation of this project's one-suite-at-a-time rule and did not
+contaminate this run — but it does share the CPU, so the *1482.14s
+(24:42)* fast-tier wall clock is not a benchmark and must not be
+inherited as one by a future session. For context, the cleanest prior
+reference points are Stream A's *215.32s at 375 tests* and *218.00s at
+356 tests*, both taken at load under 5 — neither is comparable to this
+run either, precisely because this run's load never got near that. The
+pass/fail result and the counts are trustworthy regardless of load; only
+the duration is not.
+
+** What is NOT covered — stated plainly, not buried
+
+=make check= runs entirely headless (=SDL_VIDEODRIVER=dummy
+SDL_AUDIODRIVER=dummy=), and =tuxghost/play.py= is therefore *untested by
+construction*: nothing in the gate opens a window, sends a real keyboard
+event, or looks at a single pixel =play.py= draws. This is a *deliberate
+design choice*, not an oversight discovered late — every decision that
+can be gated (whether the ghost is drawn, whether it is solid, whether
+it is digest-visible, whether it animates, the fixed-timestep
+accumulator, the live-recording event installer) lives in the fully
+tested =tuxghost/ghost/= package, and =play.py= is kept deliberately thin
+(99 lines of function body) specifically so that the *only* untested
+surface is the wiring a window forces on it, not any judgment call. See
+Task 8's report for why a test that fakes a window and asserts nothing
+was deliberately not written — this project has already been burned six
+times by tests that passed while proving nothing, and a seventh,
+window-shaped one would be an obvious eighth.
+
+Concretely, NONE of the following has ever been observed by anyone,
+human or automated:
+
+- The window opening at all.
+- The ghost being visible, walking its recorded route, or looking
+  distinguishable from the player.
+- Real keyboard input reaching and moving the player.
+- The world or the ghost rendering at the *correct scale* — see the next
+  section.
+
+** MANUAL ACCEPTANCE — the one outstanding item, and it needs a human at a real screen
+
+This is not something this close-out task can perform, and nothing above
+should be read as implying it was. It requires a human to actually watch
+a window. The command:
+
+#+begin_src bash
+tuxghost play --ghost tests/golden/scripted_town_1234.tuxghost \
+  --from-save tests/fixtures/paper_town.save --seed 1234 \
+  --clock-epoch 1787659200 --out /tmp/played.tuxghost \
+  --run-dir /tmp/playrun
+#+end_src
+
+This is the *one* invocation in the entire project that runs *without*
+the dummy SDL drivers — =CLAUDE.md= carries this as its single named
+exception.
+
+A human running it should check, and record what they actually saw
+(including anything that looks wrong, per this project's standing rule
+against describing an expected result instead of a real one):
+
+1. The window opens at all.
+2. The ghost is visible and walks the route recorded in
+   =scripted_town_1234.tuxghost=.
+3. The ghost is visually distinguishable from the player (translucent,
+   per Task 1's probe — but never seen rendered in a real window).
+4. The player can walk *through* the ghost — no collision, no
+   deflection.
+5. After quitting, the recorded trace at =/tmp/played.tuxghost=
+   =verify()=s to 0.
+6. *Specifically*: whether the ghost and the world render at the
+   *correct scale*. Task 8 found that =tuxemon.map.view=/
+   =tuxemon.graphics= bind =tuxemon.prepare.DISPLAY_CONTEXT= at their own
+   first import, and fixed it by importing both modules immediately
+   after =pygame_init()= and before the ghost's internal headless boot —
+   confirmed mechanistically with a headless probe (scale 5 established
+   first is preserved on =map.view=/=graphics='s own bound names even
+   after a later headless =build_client= reassigns the global back to
+   scale 1). But a headless probe can only confirm which number a
+   variable holds; it cannot confirm what the screen actually looks
+   like, and *no human has ever seen the visual result of this fix*.
+
+Until a human runs this and reports back, "the ghost renders correctly
+in a real window" is unverified — the entire feature's actual,
+user-facing behaviour rests on this one check.
+
 * Next subsystem
 
-*S4* (ghost rendering) is next, and has a dedicated handoff:
-=docs/2026-08-27-s4-ghost-rendering-handoff.org=. It records what S4 can
-already build on (the public, digest-neutral render seam; ghost tracks
-recoverable by replay with no format change; a walking fixture and a
-reproducible ghost-RACE pair, both new from Stream A), the two obstacles
-that are genuinely unresolved (no live windowed mode; a step-indexed
-format meeting a wall-clock player), and the questions a human must
-answer before anything is designed. *It needs a brainstorming pass
-first.*
-
-*S5* (finish lines / rewards) follows.
+*S5* (finish lines / rewards) follows S4.
 
 Each subsystem gets its own spec. This project's original spec covered
 only S1 (the trace/replay core); S2 (the CU-agent harness) and S3 (the
