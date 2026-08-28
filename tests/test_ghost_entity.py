@@ -208,7 +208,24 @@ def test_the_ghost_stands_still_when_it_does_not_move() -> None:
     NOT change between calls, the ghost must return to (or stay at) a
     single static pose -- the same Surface object identity every tick,
     not a walk cycle left running in place.
-    """
+
+    Whole-branch review, I1: an earlier version of this test called
+    `advance_ghost` exactly once, at step 0, where the ghost has never
+    walked -- `npc.mover.state` was already IDLE and no animation was
+    running, so the standing assertion held trivially, without
+    exercising `_stand` at all. PROVEN vacuous: no-op'ing `_stand`
+    (`tuxghost/ghost/entity.py`) left that version passing.
+
+    Fixed by first driving the ghost into a WALKING state (frames 16 ->
+    17 of this golden track, the same real moved transition
+    `test_the_ghost_animates_a_walk_cycle_when_it_moves` uses -- `(12,
+    12) -> (12, 13)` on the same map), asserting it actually got there
+    (`npc.mover.is_moving_state`, the sanity check that makes the next
+    assertion meaningful rather than accidental), and only THEN advancing
+    to frame 18, where the tile does not move again (`17 -> 18` is
+    `(12, 13) -> (12, 13)`), and asserting the WALKING state was actually
+    undone. A no-op `_stand` leaves `mover.state` at WALKING here, so this
+    assertion is the one that would have failed."""
     from tuxghost.ghost.entity import advance_ghost
     from tuxghost.loop import run_steps
     from tuxghost.observe import FrameRenderer
@@ -219,10 +236,28 @@ def test_the_ghost_stands_still_when_it_does_not_move() -> None:
     npc = install_ghost(session, track)
     FrameRenderer(client)
 
-    frame0 = track.at(0)
-    assert frame0 is not None
+    frame16 = track.at(16)
+    frame17 = track.at(17)
+    frame18 = track.at(18)
+    assert frame16 is not None and frame17 is not None and frame18 is not None
+    assert frame16.map_name == frame17.map_name == frame18.map_name
+    assert frame16.tile != frame17.tile, "16 -> 17 must be a real move"
+    assert frame17.tile == frame18.tile, "17 -> 18 must NOT move"
 
-    advance_ghost(client, npc, track, 0, frame0.map_name)
+    advance_ghost(client, npc, track, 16, frame16.map_name)
+    advance_ghost(client, npc, track, 17, frame17.map_name)
+    assert npc.mover.is_moving_state, (
+        "sanity check: the ghost must actually enter a WALKING state "
+        "after a moved step, or the no-move assertion below would hold "
+        "vacuously regardless of whether _stand does anything"
+    )
+
+    advance_ghost(client, npc, track, 18, frame18.map_name)
+    assert not npc.mover.is_moving_state, (
+        "the ghost was still in a WALKING state after a step where its "
+        "tile did not change -- _stand never ran, or ran and had no "
+        "effect"
+    )
 
     surface_ids = set()
     for _ in range(90):
