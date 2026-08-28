@@ -66,7 +66,14 @@ The governing constraint is that =make check= runs headless, so anything
 requiring a window cannot be gated. The split follows from it: *put every
 decision in the headless-testable half and leave the window a shell.*
 
-** =tuxghost/ghost.py= — all behaviour, fully gated
+** =tuxghost/ghost/= — all behaviour, fully gated
+
+A *package*, matching =tuxghost/agent/= and =tuxghost/optimize/=, split
+by responsibility: =track.py= derives positions from a trace,
+=entity.py= manages the ghost NPC's lifecycle in a session, =pump.py=
+holds the real-time stepping maths and input recording. =__init__.py=
+stays empty and consumers import from submodules, as they already do for
+=optimize=. Three jobs, three files.
 
 - =GhostTrack= — =step -> (map, tile_pos, facing)=, plus the source
   trace's =final_digest= and =provenance= so a ghost can say what it is
@@ -77,6 +84,7 @@ decision in the headless-testable half and leave the window a shell.*
 - =steps_owed(accumulator, elapsed, cap) -> (n, remainder)= — the
   accumulator maths, pure, so the catch-up cap is tested rather than
   trusted.
+- =install_recording_events(client, recorder, step_source, source=None)=.
 
 ** =tuxghost/play.py= — the window, and as little else as possible
 

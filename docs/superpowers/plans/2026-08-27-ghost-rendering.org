@@ -12,8 +12,8 @@ with correct occlusion, visible but untouchable — while the session
 records itself as a normal trace.
 
 *Architecture*: everything with a decision in it lives in
-=tuxghost/ghost.py= and is gated headlessly; =tuxghost/play.py= is a thin
-window shell. The ghost is a real NPC added through =npc_manager.add_npc=,
+the =tuxghost/ghost/= package and is gated headlessly; =tuxghost/play.py=
+is a thin window shell. The ghost is a real NPC added through =npc_manager.add_npc=,
 which gets drawing and occlusion for free, is non-solid because collision
 is opt-in, and is digest-invisible because =persistence= is =False=.
 
@@ -39,12 +39,72 @@ Read it alongside this plan.
 - Do not run two full suites at once — they race on
   =~/.tuxemon/cache/l18n/*.mo=.
 
+* Parallel execution
+
+This plan is a DAG, not a queue. Four tasks have *no dependencies at
+all* — 1 (probes), 2 (track), 6 (=steps_owed=), 7 (recording) — and the
+package split above means they touch disjoint files.
+
+#+begin_src text
+wave 1   {1} {2} {6 then 7}   THREE streams, not four -- see below
+wave 2   {3}                  needs 2; gated by 1
+wave 3   {4}                  needs 3 (same file, so strictly after)
+wave 4   {5, 8}               5 needs 4; 8 needs 2,3,4,6,7
+wave 5   {9}                  needs 8
+wave 6   {10}                 needs everything
+#+end_src
+
+*Tasks 6 and 7 are independent of everything else but NOT of each
+other*: both write =tuxghost/ghost/pump.py= and
+=tests/test_ghost_pump.py=. Give them to one worker in sequence (they are
+both small), or split Task 7 into =tuxghost/ghost/events.py= if you
+genuinely want a fourth stream. Handing them to two workers against the
+same file is how a plan that looks parallel produces a merge conflict and
+a lost test.
+
+Six waves instead of ten. Max concurrency 3. The tail (3→4→8→9→10) is
+inherently serial and contains the two heaviest tasks, so expect roughly
+1.5-1.7x in task-count terms and less in wall clock. *Do not over-promise
+this to yourself* — the win is wave 1, not the whole plan.
+
+** THE HAZARD THAT MATTERS, and worktrees do not fix it
+
+=CLAUDE.md=: the suite depends on =~/.tuxemon/cache/l18n/*.mo=, and *two
+concurrent runs have corrupted it before*. That is a =$HOME=-level path,
+so it is shared even between two separate clones — *isolating the
+checkout in a git worktree leaves the race completely untouched*.
+
+Two ways to run wave 1 safely; pick one and say which in the report.
+
+1. *Per-worker =$HOME=* (verified: Tuxemon's user directory follows
+   =$HOME=). Copy the real =~/.tuxemon/tuxemon.yaml= in FIRST —
+   =tuxghost.boot= asserts =display.fps= against =STEP_RATE= and raises
+   =ValueError= if it disagrees. Scope the override to the gate command;
+   exporting =HOME= globally also moves git config and ssh.
+2. *Serialise the gates.* Workers run only *their own test file* during
+   the task, and a full =make check-fast= runs once per wave boundary,
+   never concurrently. Simpler, and the fast tier is minutes.
+
+*Option 2 is the default for this plan.* Per-task workers run only their
+own test file; wave boundaries run the full fast gate, alone.
+
 * File structure
+
+=tuxghost/ghost/= is a PACKAGE, matching =tuxghost/agent/= and
+=tuxghost/optimize/=. =__init__.py= stays *empty* and consumers import
+from submodules (=from tuxghost.ghost.track import build_track=), which
+is already how =optimize= is consumed. That is a design choice on
+responsibility grounds — deriving positions, managing an NPC's lifecycle,
+and real-time stepping are three different jobs — and it has the
+happy side effect that *no file is shared between parallel streams*.
 
 | file | responsibility |
 |------+----------------|
-| =tuxghost/ghost.py= (create) | =GhostTrack=, =build_track=, =install_ghost=, =advance_ghost=, =steps_owed=. All gated. |
-| =tuxghost/play.py= (create) | Window boot, real-time pump, draw/flip, Recorder wiring. Target <100 lines, no decisions. |
+| =tuxghost/ghost/__init__.py= (create) | Empty. |
+| =tuxghost/ghost/track.py= (create) | =GhostFrame=, =GhostTrack=, =build_track=. Task 2. |
+| =tuxghost/ghost/entity.py= (create) | =GHOST_SLUG=, =install_ghost=, =hide_ghost=, =show_ghost=, =advance_ghost=. Tasks 3-4. |
+| =tuxghost/ghost/pump.py= (create) | =steps_owed=, =install_recording_events=. Tasks 6-7. |
+| =tuxghost/play.py= (create) | Window boot, the loop, draw/flip, Recorder wiring. Target <100 lines, no decisions. Task 8. |
 | =tuxghost/cli.py= (modify) | New =play= subcommand. |
 | =tests/test_ghost_track.py= (create) | Track derivation, the tail invariant, agreement with =state_of=. |
 | =tests/test_ghost_entity.py= (create) | Install/hide/show, slug refusal, the two safety claims. |
@@ -153,8 +213,11 @@ git commit -m "docs: S4 probes -- translucency and ghost animation, measured"
 * Task 2: =GhostTrack= and =build_track=
 
 *Files*
-- Create: =tuxghost/ghost.py=
+- Create: =tuxghost/ghost/__init__.py= (empty)
+- Create: =tuxghost/ghost/track.py=
 - Test: =tests/test_ghost_track.py=
+
+*Wave 1* — runs in parallel with Tasks 1, 6, 7. Touches no file they touch.
 
 *Interfaces*
 - Consumes: nothing from earlier tasks.
@@ -172,7 +235,7 @@ git commit -m "docs: S4 probes -- translucency and ghost animation, measured"
 """tests/test_ghost_track.py"""
 from pathlib import Path
 
-from tuxghost.ghost import build_track
+from tuxghost.ghost.track import build_track
 from tuxghost.trace import read
 
 PARENT = Path(__file__).parent / "golden" / "scripted_town_1234.tuxghost"
@@ -204,12 +267,17 @@ SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
 
 Expected: =ModuleNotFoundError: No module named 'tuxghost.ghost'=.
 
-- [ ] *Step 3: Implement =ghost.py='s track half*
+- [ ] *Step 3: Implement =tuxghost/ghost/track.py=*
+
+Create an EMPTY =tuxghost/ghost/__init__.py= first. It stays empty:
+consumers import from submodules, as they already do for
+=tuxghost.optimize=, and an empty package file means parallel streams
+share no file at all.
 
 #+begin_src python
-"""Ghost tracks and the ghost entity.
+"""Deriving a ghost's path from a trace.
 
-Everything with a decision in it lives here rather than in
+Everything with a decision in it lives in this package rather than in
 `tuxghost.play`, because `make check` runs headless and `play` cannot be
 gated. A reviewer should be able to satisfy themselves about ghost
 behaviour without ever opening a window.
@@ -334,10 +402,20 @@ Append =: "tests/test_ghost_track.py::",= to the tuple in
 =scripted_town_1234=, recorded against the current =patches/=, so it must
 warn ZERO times and gets no pinned count.
 
-- [ ] *Step 8: Run =make check-fast=, then commit*
+- [ ] *Step 8: Run this task's OWN test file, then commit*
+
+Per the parallel-execution section: while running as one of several
+concurrent workers, run only your own test file. The full
+=make check-fast= runs once at the wave boundary, alone.
 
 #+begin_src bash
-git add tuxghost/ghost.py tests/test_ghost_track.py tests/conftest.py
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  uv run python -m pytest tests/test_ghost_track.py -q
+#+end_src
+
+#+begin_src bash
+git add tuxghost/ghost/__init__.py tuxghost/ghost/track.py \
+        tests/test_ghost_track.py tests/conftest.py
 git commit -m "feat: GhostTrack and build_track"
 #+end_src
 
@@ -346,11 +424,14 @@ git commit -m "feat: GhostTrack and build_track"
 * Task 3: =install_ghost=, hide and show
 
 *Files*
-- Modify: =tuxghost/ghost.py=
+- Create: =tuxghost/ghost/entity.py=
 - Test: =tests/test_ghost_entity.py=
 
+*Wave 2* — needs Task 2's =GhostTrack=, and is *gated by Task 1's probe 1*:
+if translucency needs a patch, stop before writing the sprite handling.
+
 *Interfaces*
-- Consumes: =GhostTrack= (Task 2).
+- Consumes: =from tuxghost.ghost.track import GhostTrack= (Task 2).
 - Produces:
   - =GHOST_SLUG = "ghost"=
   - =install_ghost(session, track, sprite_slug="allie") -> Any= (the NPC)
@@ -367,7 +448,8 @@ from pathlib import Path
 import pytest
 
 from tuxghost.boot import boot_from_save
-from tuxghost.ghost import GHOST_SLUG, build_track, install_ghost
+from tuxghost.ghost.entity import GHOST_SLUG, install_ghost
+from tuxghost.ghost.track import build_track
 from tuxghost.trace import read
 
 SAVE = Path(__file__).parent / "fixtures" / "paper_town.save"
@@ -474,7 +556,7 @@ def test_hiding_removes_the_ghost_from_the_drawn_set() -> None:
     """Asserted on `npc_manager.npcs` -- the exact collection the
     renderer iterates -- and not on anything about the camera or what
     happens to be on screen."""
-    from tuxghost.ghost import hide_ghost, show_ghost
+    from tuxghost.ghost.entity import hide_ghost, show_ghost
 
     session = _session()
     client = session.client
@@ -501,8 +583,10 @@ failure (=DID NOT RAISE=), restore, re-run, capture the pass.
 * Task 4: =advance_ghost=
 
 *Files*
-- Modify: =tuxghost/ghost.py=
+- Modify: =tuxghost/ghost/entity.py=
 - Test: =tests/test_ghost_entity.py=
+
+*Wave 3* — same file as Task 3, so strictly after it, not beside it.
 
 *Interfaces*
 - Consumes: =GhostTrack.at= (Task 2), =hide_ghost=/=show_ghost= (Task 3).
@@ -515,7 +599,7 @@ def test_the_ghost_is_hidden_past_the_end_of_its_track() -> None:
     """Hidden, not frozen and not teleported: a ghost standing motionless
     at its final tile forever reads as a bug, and one left at a stale
     position is worse -- it is drawing a position the trace never had."""
-    from tuxghost.ghost import advance_ghost
+    from tuxghost.ghost.entity import advance_ghost
 
     session = _session()
     client = session.client
@@ -527,7 +611,7 @@ def test_the_ghost_is_hidden_past_the_end_of_its_track() -> None:
 
 
 def test_the_ghost_is_hidden_on_a_different_map() -> None:
-    from tuxghost.ghost import advance_ghost
+    from tuxghost.ghost.entity import advance_ghost
 
     session = _session()
     client = session.client
@@ -539,7 +623,7 @@ def test_the_ghost_is_hidden_on_a_different_map() -> None:
 
 
 def test_the_ghost_follows_its_track_on_the_matching_map() -> None:
-    from tuxghost.ghost import advance_ghost
+    from tuxghost.ghost.entity import advance_ghost
 
     session = _session()
     client = session.client
@@ -611,6 +695,10 @@ not the test.
 
 *Files*
 - Test: =tests/test_ghost_entity.py=
+
+*Wave 4*, beside Task 8. Tests only — adds no source file. Shares a test
+file with Tasks 3-4, which are already done by this point, so no
+collision.
 
 *Interfaces*
 - Consumes: =install_ghost= (Task 3), =advance_ghost= (Task 4).
@@ -718,8 +806,11 @@ this plan assumes, and Task 3's safety argument needs re-deriving.
 * Task 6: =steps_owed=
 
 *Files*
-- Modify: =tuxghost/ghost.py=
+- Create: =tuxghost/ghost/pump.py=
 - Test: =tests/test_ghost_pump.py=
+
+*Wave 1* — a pure function of =FIXED_DT=. Depends on nothing; runs beside
+Tasks 1, 2 and 7.
 
 *Interfaces*
 - Produces: =steps_owed(accumulator: float, elapsed: float, cap: int) ->
@@ -729,7 +820,7 @@ this plan assumes, and Task 3's safety argument needs re-deriving.
 
 #+begin_src python
 """tests/test_ghost_pump.py"""
-from tuxghost.ghost import steps_owed
+from tuxghost.ghost.pump import steps_owed
 from tuxghost.loop import FIXED_DT
 
 
@@ -802,10 +893,17 @@ restore, re-run, capture the pass.
 * Task 7: Recording live input
 
 *Files*
-- Modify: =tuxghost/ghost.py=
+- Modify: =tuxghost/ghost/pump.py=
 - Test: =tests/test_ghost_pump.py=
 
+*Wave 1*, but *same file and same test file as Task 6*. If both run
+concurrently they collide. Either give Task 6 and Task 7 to ONE worker in
+sequence (recommended — they are small), or have Task 7 create
+=tuxghost/ghost/events.py= instead. Do not hand them to two workers
+against the same file.
+
 *Interfaces*
+- Consumes: nothing from Tasks 2-6.
 - Produces: =install_recording_events(client, recorder, step_source) ->
   None=, where =step_source= is a zero-argument callable returning the
   current step index.
@@ -827,7 +925,7 @@ def test_a_recorded_session_replays_faithfully(tmp_path) -> None:
     from tuxemon.platform.const import buttons
     from tuxghost.boot import boot_from_save
     from tuxghost.execute import verify
-    from tuxghost.ghost import install_recording_events
+    from tuxghost.ghost.pump import install_recording_events
     from tuxghost.loop import PRESSED, RELEASED, run_steps
     from tuxghost.record import Recorder
     from tuxghost.trace import write
@@ -924,7 +1022,7 @@ def test_no_timestamp_reaches_the_recorded_trace(tmp_path) -> None:
 
     from tuxemon.platform.const import buttons
     from tuxghost.boot import boot_from_save
-    from tuxghost.ghost import install_recording_events
+    from tuxghost.ghost.pump import install_recording_events
     from tuxghost.loop import PRESSED, RELEASED, run_steps
     from tuxghost.record import Recorder
     from tuxghost.trace import write
@@ -974,6 +1072,9 @@ yourself wanting to test something here, it belongs in =ghost.py=.
 *Files*
 - Create: =tuxghost/play.py=
 
+*Wave 4*, beside Task 5. Needs Tasks 2, 3, 4, 6 and 7 — but NOT Task 5,
+which is tests only.
+
 *Interfaces*
 - Consumes: everything from Tasks 2-7.
 - Produces: =play(ghost_trace, save, seed, clock_epoch, out, run_dir) -> int=
@@ -1006,13 +1107,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from tuxghost.ghost import (
-    advance_ghost,
-    build_track,
-    install_ghost,
-    install_recording_events,
-    steps_owed,
-)
+from tuxghost.ghost.entity import advance_ghost, install_ghost
+from tuxghost.ghost.pump import install_recording_events, steps_owed
+from tuxghost.ghost.track import build_track
 from tuxghost.loop import run_steps
 from tuxghost.record import Recorder
 from tuxghost.trace import read, write
@@ -1254,3 +1351,15 @@ them say so.
 first run, which makes its Step 3 demonstration the only thing standing
 between it and vacuity. The step says explicitly to STOP if the mutation
 does not make it fail.
+
+*Parallelism, honestly.* Six waves against ten tasks, max concurrency
+three. The serial tail (3→4→8→9→10) is five of the ten tasks and holds
+the two heaviest, so the realistic gain is well under 2x. The package
+split that enables it is justified on responsibility grounds anyway, and
+would be the right structure even executed serially — which is the test
+of whether a parallelism-driven refactor was a good idea.
+
+*The collision this review caught*: Tasks 6 and 7 are independent of
+every other task but not of each other — same source file, same test
+file. An earlier draft of the wave schedule said "4 workers" and would
+have handed them to two. They are one stream.
