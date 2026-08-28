@@ -1,0 +1,1256 @@
+#+TITLE: S4 — ghost rendering, implementation plan
+#+DATE: 2026-08-27
+
+*For agentic workers*: REQUIRED SUB-SKILL — use
+=superpowers:subagent-driven-development= (recommended) or
+=superpowers:executing-plans= to implement this plan task by task. Steps
+use =[ ]= checkboxes for tracking.
+
+*Goal*: let a human play Tuxemon in a real window with a ghost — a second
+character replaying a recorded =.tuxghost= trace, drawn by the engine
+with correct occlusion, visible but untouchable — while the session
+records itself as a normal trace.
+
+*Architecture*: everything with a decision in it lives in
+=tuxghost/ghost.py= and is gated headlessly; =tuxghost/play.py= is a thin
+window shell. The ghost is a real NPC added through =npc_manager.add_npc=,
+which gets drawing and occlusion for free, is non-solid because collision
+is opt-in, and is digest-invisible because =persistence= is =False=.
+
+*Tech stack*: Python 3.12, pygame-ce, pytest, the vendored =tuxemon= tree.
+
+*Spec*: =docs/superpowers/specs/2026-08-27-ghost-rendering-design.org=.
+Read it alongside this plan.
+
+* Global constraints
+
+- *Every* invocation touching the client runs with
+  =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy=, with the single
+  deliberate exception of =tuxghost/play.py= (Task 9).
+- *Never* edit =tuxemon/= directly. This plan expects *no seventh patch*;
+  if Task 1 proves one is needed, stop and argue it in the open.
+- =EXEMPTIONS= stays =={}=. No format change, no format-version bump.
+- Docs are =.org=, never =.md=.
+- Every regression test must be *demonstrated to fail* against the defect
+  it pins — mutate, run, capture the real failure, restore, run, capture
+  the pass. Real output in the report, not a description of it.
+- Run =make check-fast= per task; =make check= before close-out, *alone*,
+  on a host whose =uptime= was checked.
+- Do not run two full suites at once — they race on
+  =~/.tuxemon/cache/l18n/*.mo=.
+
+* File structure
+
+| file | responsibility |
+|------+----------------|
+| =tuxghost/ghost.py= (create) | =GhostTrack=, =build_track=, =install_ghost=, =advance_ghost=, =steps_owed=. All gated. |
+| =tuxghost/play.py= (create) | Window boot, real-time pump, draw/flip, Recorder wiring. Target <100 lines, no decisions. |
+| =tuxghost/cli.py= (modify) | New =play= subcommand. |
+| =tests/test_ghost_track.py= (create) | Track derivation, the tail invariant, agreement with =state_of=. |
+| =tests/test_ghost_entity.py= (create) | Install/hide/show, slug refusal, the two safety claims. |
+| =tests/test_ghost_pump.py= (create) | =steps_owed=, and the recording wrapper's faithful replay. |
+| =tests/conftest.py= (modify) | =_TRACKED_FILES= entries — *append*, never replace. |
+| =docs/2026-08-27-ghost-probes.org= (create) | Task 1's measured answers. |
+| =CLAUDE.md= (modify) | The dummy-SDL carve-out, Task 9. |
+| =docs/STATUS.org= (modify) | Close-out section, Task 10. |
+
+---
+
+* Task 1: The two probes
+
+*This task produces an ANSWER, not shipped code.* Both probes can change
+the design, so nothing else starts until they are recorded. Anything
+built here is throwaway and must be labelled so.
+
+*Files*
+- Create: =docs/2026-08-27-ghost-probes.org=
+
+*Interfaces*
+- Produces: two recorded measurements later tasks depend on — whether
+  =set_alpha= yields translucency without a patch, and whether per-step
+  =set_position= animates or slides.
+
+- [ ] *Step 1: Write a throwaway probe script*
+
+Put it in a scratch directory, NOT in the repo. It boots headless, adds
+an NPC, renders two frames, and reports.
+
+#+begin_src python
+import json
+from pathlib import Path
+from tuxghost.execute import _bootstrap_vendored_tuxemon
+_bootstrap_vendored_tuxemon()
+
+from tuxghost.boot import boot_from_save
+from tuxghost.observe import FrameRenderer, distinct_colors
+from tuxghost.loop import run_steps
+
+save = json.loads(Path("tests/fixtures/paper_town.save").read_text())
+session = boot_from_save(save, seed=1234, clock_epoch=1787659200)
+client = session.client
+player = session.player
+
+from tuxemon.entity.npc import NPC
+ghost = NPC("allie", session=session)
+ghost.slug = "ghost"
+ghost.persistence = False
+ghost.set_position([float(player.tile_pos[0]) + 1.0,
+                    float(player.tile_pos[1])])
+client.npc_manager.add_npc(ghost)
+
+fr = FrameRenderer(client, upscale=1)
+before = fr.surface().copy()
+
+# PROBE 1: does set_alpha on the ghost's own sprite surfaces work?
+for surf in getattr(ghost, "sprite", {}).values() if hasattr(ghost, "sprite") else []:
+    try:
+        surf.set_alpha(128)
+    except Exception as exc:
+        print("set_alpha failed:", exc)
+after = fr.surface().copy()
+print("frame changed by set_alpha:",
+      bytes(before.get_buffer()) != bytes(after.get_buffer()))
+
+# PROBE 2: does per-step set_position animate, or slide?
+frames = []
+for i in range(4):
+    ghost.set_position([float(player.tile_pos[0]) + 1.0 + i * 0.25,
+                        float(player.tile_pos[1])])
+    run_steps(client, 4)
+    frames.append(bytes(fr.surface().get_buffer()))
+print("distinct ghost frames:", len(set(frames)), "of", len(frames))
+#+end_src
+
+- [ ] *Step 2: Run it*
+
+#+begin_src bash
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  uv run python /path/to/scratch/probe.py
+#+end_src
+
+*The sprite attribute name is a guess.* If =ghost.sprite= does not exist,
+find the real one — read =MapRenderer._get_sprites= in
+=tuxemon/map/view.py=, which is the code that actually turns an NPC into
+surfaces — and fix the probe. Do not skip the probe because the attribute
+guess was wrong.
+
+- [ ] *Step 3: Record both answers in =docs/2026-08-27-ghost-probes.org=*
+
+State, for each probe: the exact command, the real output, and the
+consequence for the design. If probe 1 fails, say plainly that
+translucency needs either a distinct sprite or a seventh patch, and
+*stop* — that decision is the human's.
+
+- [ ] *Step 4: Commit*
+
+#+begin_src bash
+git add docs/2026-08-27-ghost-probes.org
+git commit -m "docs: S4 probes -- translucency and ghost animation, measured"
+#+end_src
+
+---
+
+* Task 2: =GhostTrack= and =build_track=
+
+*Files*
+- Create: =tuxghost/ghost.py=
+- Test: =tests/test_ghost_track.py=
+
+*Interfaces*
+- Consumes: nothing from earlier tasks.
+- Produces:
+  - =GhostTrack= — frozen dataclass with =frames: tuple[GhostFrame, ...]=,
+    =source_digest: str=, =recorder: str=, =model: str | None=.
+  - =GhostFrame= — frozen dataclass =(map_name: str, tile: tuple[int, int],
+    facing: str)=.
+  - =build_track(trace: Trace) -> GhostTrack=
+  - =GhostTrack.at(step: int) -> GhostFrame | None= — =None= past the end.
+
+- [ ] *Step 1: Write the failing test for the tail invariant*
+
+#+begin_src python
+"""tests/test_ghost_track.py"""
+from pathlib import Path
+
+from tuxghost.ghost import build_track
+from tuxghost.trace import read
+
+PARENT = Path(__file__).parent / "golden" / "scripted_town_1234.tuxghost"
+
+
+def test_the_track_has_one_frame_per_step_plus_the_final_state() -> None:
+    """`run_steps` calls `hook(i)` BEFORE `client.update(FIXED_DT)`, so a
+    track built from the hook alone observes the state ENTERING each step
+    and never sees the state after the final update -- it is one sample
+    short.
+
+    Asserted ARITHMETICALLY, never via a digest. This project has been
+    bitten by this exact class twice: `lift` produced a 432-step script
+    for a 442-step trace, and `seal`'s identity control dropped the
+    parent's last 10 steps. In BOTH cases the digest matched anyway,
+    because the dropped steps changed nothing already settled.
+    """
+    trace = read(PARENT)
+    track = build_track(trace)
+    assert len(track.frames) == trace.header.step_count + 1
+#+end_src
+
+- [ ] *Step 2: Run it, verify it fails*
+
+#+begin_src bash
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  uv run python -m pytest tests/test_ghost_track.py -q
+#+end_src
+
+Expected: =ModuleNotFoundError: No module named 'tuxghost.ghost'=.
+
+- [ ] *Step 3: Implement =ghost.py='s track half*
+
+#+begin_src python
+"""Ghost tracks and the ghost entity.
+
+Everything with a decision in it lives here rather than in
+`tuxghost.play`, because `make check` runs headless and `play` cannot be
+gated. A reviewer should be able to satisfy themselves about ghost
+behaviour without ever opening a window.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from tuxghost.boot import boot_from_save
+from tuxghost.execute import _schedule_of
+from tuxghost.loop import install_schedule, run_steps
+from tuxghost.trace import Trace
+
+
+@dataclass(frozen=True)
+class GhostFrame:
+    map_name: str
+    tile: tuple[int, int]
+    facing: str
+
+
+@dataclass(frozen=True)
+class GhostTrack:
+    frames: tuple[GhostFrame, ...]
+    source_digest: str
+    recorder: str
+    model: str | None
+
+    def at(self, step: int) -> GhostFrame | None:
+        """The ghost's frame entering `step`, or None past the end."""
+        if step < 0 or step >= len(self.frames):
+            return None
+        return self.frames[step]
+
+
+def _sample(session: Any) -> GhostFrame:
+    player = session.player
+    return GhostFrame(
+        map_name=session.client.get_map_name(),
+        tile=(int(player.tile_pos[0]), int(player.tile_pos[1])),
+        facing=str(player.facing),
+    )
+
+
+def build_track(trace: Trace) -> GhostTrack:
+    """Replay `trace` once, keeping only what a ghost needs to be drawn.
+
+    Deliberately NOT `execute(checkpoint=1, capture_states=True)`: that
+    hook runs `digest_of` AND `state_of` on every step -- a full hash
+    plus a full save serialisation (party, items, monsters) -- when three
+    attribute reads suffice. On a 900-step trace that is 900 of each, and
+    the digest half is entirely wasted work for a ghost.
+    """
+    session = boot_from_save(
+        trace.initial_state,
+        seed=trace.header.seed,
+        clock_epoch=trace.header.clock_epoch,
+    )
+    client = session.client
+    install_schedule(client, _schedule_of(trace))
+
+    frames: list[GhostFrame] = []
+
+    def hook(i: int) -> None:
+        del i
+        frames.append(_sample(session))
+
+    run_steps(client, trace.header.step_count, hook=hook)
+    # The final sample the hook can never take: `run_steps` calls
+    # `hook(i)` BEFORE `update`, so the state after the last update is
+    # unobserved. See this module's test for why this is asserted
+    # arithmetically rather than trusted to a digest.
+    frames.append(_sample(session))
+
+    return GhostTrack(
+        frames=tuple(frames),
+        source_digest=trace.header.final_digest,
+        recorder=trace.provenance.recorder,
+        model=trace.provenance.model,
+    )
+#+end_src
+
+- [ ] *Step 4: Run the test, verify it passes*
+
+- [ ] *Step 5: Add the agreement test*
+
+#+begin_src python
+def test_the_cheap_hook_agrees_with_state_of() -> None:
+    """`build_track` reads three attributes directly instead of calling
+    `state_of`. If the fast path ever disagrees with the canonical one,
+    the ghost is drawing a lie -- so they are compared at every sampled
+    step, not spot-checked at the end."""
+    from tuxghost.execute import execute
+
+    trace = read(PARENT)
+    track = build_track(trace)
+    result = execute(trace, checkpoint=16, capture_states=True)
+
+    assert result.checkpoint_states, "fixture must produce checkpoints"
+    for step, state in result.checkpoint_states.items():
+        frame = track.at(step)
+        assert frame is not None, step
+        assert frame.map_name == state["map"], step
+        assert list(frame.tile) == state["tile_pos"], step
+        assert frame.facing == state["facing"], step
+#+end_src
+
+- [ ] *Step 6: Demonstrate the tail test fails against the defect*
+
+Delete the final =frames.append(_sample(session))= line, run
+=test_the_track_has_one_frame_per_step_plus_the_final_state=, capture the
+real failure (=assert 176 == 177=), restore it, run again, capture the
+pass, and =git diff= to confirm restoration. *Put both outputs in the
+report.*
+
+- [ ] *Step 7: Add the =_TRACKED_FILES= entry*
+
+Append =: "tests/test_ghost_track.py::",= to the tuple in
+=tests/conftest.py=. *Append; never replace.* It reads
+=scripted_town_1234=, recorded against the current =patches/=, so it must
+warn ZERO times and gets no pinned count.
+
+- [ ] *Step 8: Run =make check-fast=, then commit*
+
+#+begin_src bash
+git add tuxghost/ghost.py tests/test_ghost_track.py tests/conftest.py
+git commit -m "feat: GhostTrack and build_track"
+#+end_src
+
+---
+
+* Task 3: =install_ghost=, hide and show
+
+*Files*
+- Modify: =tuxghost/ghost.py=
+- Test: =tests/test_ghost_entity.py=
+
+*Interfaces*
+- Consumes: =GhostTrack= (Task 2).
+- Produces:
+  - =GHOST_SLUG = "ghost"=
+  - =install_ghost(session, track, sprite_slug="allie") -> Any= (the NPC)
+  - =hide_ghost(client, npc) -> None=
+  - =show_ghost(client, npc) -> None=
+
+- [ ] *Step 1: Write the failing refusal test*
+
+#+begin_src python
+"""tests/test_ghost_entity.py"""
+import json
+from pathlib import Path
+
+import pytest
+
+from tuxghost.boot import boot_from_save
+from tuxghost.ghost import GHOST_SLUG, build_track, install_ghost
+from tuxghost.trace import read
+
+SAVE = Path(__file__).parent / "fixtures" / "paper_town.save"
+PARENT = Path(__file__).parent / "golden" / "scripted_town_1234.tuxghost"
+
+
+def _session():
+    return boot_from_save(
+        json.loads(SAVE.read_text()), seed=1234, clock_epoch=1787659200
+    )
+
+
+def test_install_refuses_when_the_reserved_slug_is_taken() -> None:
+    """A slug collision would mean `install_ghost` silently DISPLACING a
+    real map NPC -- `NPCRepository` is keyed by slug, so adding under a
+    taken slug overwrites. Refusing is the same choice `optimize` makes
+    for an unused `--seed`: never silently do something other than what
+    the caller asked."""
+    session = _session()
+    track = build_track(read(PARENT))
+
+    from tuxemon.entity.npc import NPC
+
+    squatter = NPC("allie", session=session)
+    squatter.slug = GHOST_SLUG
+    session.client.npc_manager.add_npc(squatter)
+
+    with pytest.raises(ValueError, match=GHOST_SLUG):
+        install_ghost(session, track)
+#+end_src
+
+- [ ] *Step 2: Run it, verify it fails* (=ImportError= on =install_ghost=).
+
+- [ ] *Step 3: Implement*
+
+#+begin_src python
+#: Reserved, and asserted free before use. Chosen so it cannot collide
+#: with the player slug (`npc_red` in the committed save) or any map NPC.
+GHOST_SLUG = "ghost"
+
+
+def install_ghost(session: Any, track: GhostTrack,
+                  sprite_slug: str = "allie") -> Any:
+    """Add the ghost NPC to the session and return it.
+
+    Three properties, none of which needs an engine patch:
+
+    * DRAWN, with correct occlusion, because
+      `MapRenderer._get_npc_surfaces` iterates `npc_manager.npcs` and
+      feeds the layered draw.
+    * NOT SOLID, because `CollisionManager` keeps a separate
+      `_entity_map` populated only by explicit `add_collision` calls --
+      and we never call it. A solid ghost could BLOCK the player, moving
+      them, changing `tile_pos`, and corrupting every recorded trace.
+    * INVISIBLE TO THE DIGEST, because `get_persistent_npc_states`
+      filters on `npc.persistence`.
+
+    `persistence` is assigned in `NPC.__init__` from the npc DATABASE
+    entry for `sprite_slug`, not from an argument, so it is overridden
+    here explicitly. Every shipped NPC already defaults to False; the
+    override is belt-and-braces, and cheaper than depending on that.
+    """
+    from tuxemon.entity.npc import NPC
+
+    manager = session.client.npc_manager
+    if manager.npc_exists(GHOST_SLUG):
+        raise ValueError(
+            f"an NPC with the reserved slug {GHOST_SLUG!r} is already on "
+            "this map; refusing to displace it"
+        )
+
+    npc = NPC(sprite_slug, session=session)
+    npc.slug = GHOST_SLUG
+    npc.persistence = False
+
+    first = track.at(0)
+    if first is not None:
+        npc.set_position([float(first.tile[0]), float(first.tile[1])])
+    manager.add_npc(npc)
+    return npc
+
+
+def hide_ghost(client: Any, npc: Any) -> None:
+    """Move the ghost off-map, which REMOVES it from the drawn set.
+
+    `NPCManager` keeps two repositories and the `npcs` property -- the
+    one `MapRenderer._get_npc_surfaces` iterates -- returns `_on_map`
+    only. So this is a real hide, not a park behind the camera: the NPC
+    object and its state survive, but nothing draws it.
+    """
+    client.npc_manager.add_npc_off_map(npc)
+
+
+def show_ghost(client: Any, npc: Any) -> None:
+    client.npc_manager.add_npc(npc)
+#+end_src
+
+- [ ] *Step 4: Run, verify it passes*
+
+- [ ] *Step 5: Add the hide/show test*
+
+#+begin_src python
+def test_hiding_removes_the_ghost_from_the_drawn_set() -> None:
+    """Asserted on `npc_manager.npcs` -- the exact collection the
+    renderer iterates -- and not on anything about the camera or what
+    happens to be on screen."""
+    from tuxghost.ghost import hide_ghost, show_ghost
+
+    session = _session()
+    client = session.client
+    npc = install_ghost(session, build_track(read(PARENT)))
+    assert GHOST_SLUG in client.npc_manager.npcs
+
+    hide_ghost(client, npc)
+    assert GHOST_SLUG not in client.npc_manager.npcs
+
+    show_ghost(client, npc)
+    assert GHOST_SLUG in client.npc_manager.npcs
+#+end_src
+
+- [ ] *Step 6: Demonstrate the refusal test fails*
+
+Delete the =npc_exists= guard, run the refusal test, capture the real
+failure (=DID NOT RAISE=), restore, re-run, capture the pass.
+
+- [ ] *Step 7: Append the =_TRACKED_FILES= entry for
+  =tests/test_ghost_entity.py::=, run =make check-fast=, commit*
+
+---
+
+* Task 4: =advance_ghost=
+
+*Files*
+- Modify: =tuxghost/ghost.py=
+- Test: =tests/test_ghost_entity.py=
+
+*Interfaces*
+- Consumes: =GhostTrack.at= (Task 2), =hide_ghost=/=show_ghost= (Task 3).
+- Produces: =advance_ghost(client, npc, track, step, player_map) -> None=
+
+- [ ] *Step 1: Write the failing boundary tests*
+
+#+begin_src python
+def test_the_ghost_is_hidden_past_the_end_of_its_track() -> None:
+    """Hidden, not frozen and not teleported: a ghost standing motionless
+    at its final tile forever reads as a bug, and one left at a stale
+    position is worse -- it is drawing a position the trace never had."""
+    from tuxghost.ghost import advance_ghost
+
+    session = _session()
+    client = session.client
+    track = build_track(read(PARENT))
+    npc = install_ghost(session, track)
+
+    advance_ghost(client, npc, track, len(track.frames), "spyder_paper_town.tmx")
+    assert GHOST_SLUG not in client.npc_manager.npcs
+
+
+def test_the_ghost_is_hidden_on_a_different_map() -> None:
+    from tuxghost.ghost import advance_ghost
+
+    session = _session()
+    client = session.client
+    track = build_track(read(PARENT))
+    npc = install_ghost(session, track)
+
+    advance_ghost(client, npc, track, 10, "somewhere_else.tmx")
+    assert GHOST_SLUG not in client.npc_manager.npcs
+
+
+def test_the_ghost_follows_its_track_on_the_matching_map() -> None:
+    from tuxghost.ghost import advance_ghost
+
+    session = _session()
+    client = session.client
+    track = build_track(read(PARENT))
+    npc = install_ghost(session, track)
+
+    frame = track.at(100)
+    assert frame is not None
+    advance_ghost(client, npc, track, 100, frame.map_name)
+    assert GHOST_SLUG in client.npc_manager.npcs
+    assert (int(npc.tile_pos[0]), int(npc.tile_pos[1])) == frame.tile
+#+end_src
+
+- [ ] *Step 2: Run, verify they fail*
+
+- [ ] *Step 3: Implement*
+
+#+begin_src python
+def advance_ghost(
+    client: Any, npc: Any, track: GhostTrack, step: int, player_map: str
+) -> None:
+    """Place the ghost for `step`, or hide it when it cannot be placed
+    honestly -- past the end of its track, or on a different map."""
+    frame = track.at(step)
+    if frame is None or frame.map_name != player_map:
+        hide_ghost(client, npc)
+        return
+
+    show_ghost(client, npc)
+    npc.set_position([float(frame.tile[0]), float(frame.tile[1])])
+    _set_facing(npc, frame.facing)
+
+
+def _set_facing(npc: Any, facing: str) -> None:
+    """`facing` is stored as `str(Direction.X)`; convert back by name.
+
+    Silently ignores an unrecognised value rather than raising: a facing
+    this build does not know is a cosmetic problem, and a ghost that
+    crashes the player's session over a sprite direction is a worse one.
+    """
+    from tuxemon.map import Direction
+
+    for direction in Direction:
+        if str(direction) == facing:
+            npc.set_facing(direction)
+            return
+#+end_src
+
+*Note*: =Direction='s import path is a guess. Confirm it by reading how
+=tuxghost/digest.py= produces =str(player.facing)=, and fix if wrong.
+
+- [ ] *Step 4: Run, verify they pass*
+
+- [ ] *Step 5: Demonstrate*
+
+Change =frame.map_name != player_map= to =False= so the ghost is never
+hidden on a map mismatch; run =test_the_ghost_is_hidden_on_a_different_map=,
+capture the failure, restore, re-run, capture the pass.
+
+- [ ] *Step 6: =make check-fast=, commit*
+
+---
+
+* Task 5: The two safety claims
+
+*The most important task in this plan.* Both claims are what make a real
+engine entity acceptable at all; if either fails, the design is wrong,
+not the test.
+
+*Files*
+- Test: =tests/test_ghost_entity.py=
+
+*Interfaces*
+- Consumes: =install_ghost= (Task 3), =advance_ghost= (Task 4).
+
+- [ ] *Step 1: Write the digest-invisibility test*
+
+#+begin_src python
+def test_a_ghost_does_not_change_the_per_step_digest_sequence() -> None:
+    """The claim that makes a real engine entity acceptable.
+
+    Asserted on the PER-STEP digest sequence, never on the final digest
+    alone. A final-digest comparison would be vacuous here: this project
+    measured candidates 146 steps apart reaching the identical digest,
+    because a settled end state cannot detect a perturbation. See
+    docs/STATUS.org, "Settled end states cannot detect a perturbation".
+    """
+    from tuxghost.digest import digest_of
+    from tuxghost.execute import _schedule_of
+    from tuxghost.loop import install_schedule, run_steps
+
+    trace = read(PARENT)
+    track = build_track(trace)
+
+    def digests(with_ghost: bool) -> list[str]:
+        session = _session()
+        client = session.client
+        install_schedule(client, _schedule_of(trace))
+        if with_ghost:
+            install_ghost(session, track)
+        seen: list[str] = []
+        run_steps(
+            client,
+            trace.header.step_count,
+            hook=lambda i: seen.append(digest_of(session)),
+        )
+        seen.append(digest_of(session))
+        return seen
+
+    assert digests(with_ghost=True) == digests(with_ghost=False)
+#+end_src
+
+- [ ] *Step 2: Run, verify it PASSES*
+
+This one is expected to pass immediately — it is a claim about the design,
+not a new behaviour. Its value comes from Step 3.
+
+- [ ] *Step 3: Demonstrate it can fail*
+
+Set =npc.persistence = True= in =install_ghost=, run this test, and
+capture the real divergence. Restore, re-run, capture the pass.
+
+*If it does NOT fail with =persistence=True=, stop.* That would mean the
+test cannot see the ghost at all and is vacuous — exactly the failure
+mode this project's six vacuous tests share. Investigate before
+proceeding: the likely cause is that the fixture's map has no persistent
+NPCs to serialise, in which case the test needs a fixture where
+=persistent_npc_state= is non-empty.
+
+- [ ] *Step 4: Write the non-collision test*
+
+#+begin_src python
+def test_the_player_walks_through_the_ghost() -> None:
+    """The claim that would silently corrupt every recorded trace. A
+    solid ghost blocks the player, changing where they end up -- so the
+    ghost is placed DIRECTLY in the player's path and the run is compared
+    against the same run with no ghost at all."""
+    from tuxghost.execute import _schedule_of
+    from tuxghost.loop import install_schedule, run_steps
+
+    trace = read(PARENT)
+    track = build_track(trace)
+
+    def end_tile(with_ghost: bool) -> tuple[int, int]:
+        session = _session()
+        client = session.client
+        install_schedule(client, _schedule_of(trace))
+        if with_ghost:
+            npc = install_ghost(session, track)
+            # One tile DOWN of spawn: the parent's first four actions are
+            # DOWN, so this is squarely in its path.
+            npc.set_position([float(session.player.tile_pos[0]),
+                              float(session.player.tile_pos[1]) + 1.0])
+        run_steps(client, trace.header.step_count)
+        return (int(session.player.tile_pos[0]),
+                int(session.player.tile_pos[1]))
+
+    assert end_tile(with_ghost=True) == end_tile(with_ghost=False) == (16, 14)
+#+end_src
+
+- [ ] *Step 5: Demonstrate it can fail*
+
+In =install_ghost=, register the ghost with the collision manager:
+=session.client.map_manager.collision_manager.add_collision(npc, tuple(npc.tile_pos))=
+(confirm the real accessor path first). Run the test, capture the
+blocked-player failure, restore, re-run, capture the pass.
+
+*If the player is NOT blocked, stop and investigate* — either the
+collision registration did not take, or collision works differently than
+this plan assumes, and Task 3's safety argument needs re-deriving.
+
+- [ ] *Step 6: =make check-fast=, commit*
+
+---
+
+* Task 6: =steps_owed=
+
+*Files*
+- Modify: =tuxghost/ghost.py=
+- Test: =tests/test_ghost_pump.py=
+
+*Interfaces*
+- Produces: =steps_owed(accumulator: float, elapsed: float, cap: int) ->
+  tuple[int, float]= — =(steps_to_run, new_accumulator)=.
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""tests/test_ghost_pump.py"""
+from tuxghost.ghost import steps_owed
+from tuxghost.loop import FIXED_DT
+
+
+def test_a_short_frame_owes_no_steps() -> None:
+    steps, rest = steps_owed(0.0, FIXED_DT / 4, cap=5)
+    assert steps == 0
+    assert 0.0 < rest < FIXED_DT
+
+
+def test_a_long_frame_owes_several_steps() -> None:
+    steps, rest = steps_owed(0.0, FIXED_DT * 3.5, cap=5)
+    assert steps == 3
+    assert rest == pytest.approx(FIXED_DT * 0.5)
+
+
+def test_the_cap_drops_TIME_not_steps() -> None:
+    """Past the cap we discard wall-clock time rather than skipping step
+    indices. This is the property that makes frame drops harmless: the
+    game feels slow, but the recording's step indices stay exact and the
+    ghost -- indexed by step, never by time -- cannot desync.
+
+    A version that skipped steps instead would silently corrupt every
+    trace recorded on a loaded machine.
+    """
+    steps, rest = steps_owed(0.0, FIXED_DT * 100, cap=5)
+    assert steps == 5
+    assert rest == 0.0, "leftover time must be discarded, not banked"
+#+end_src
+
+Add =import pytest= at the top.
+
+- [ ] *Step 2: Run, verify they fail*
+
+- [ ] *Step 3: Implement*
+
+#+begin_src python
+def steps_owed(
+    accumulator: float, elapsed: float, cap: int
+) -> tuple[int, float]:
+    """How many fixed steps a frame owes, and the time left over.
+
+    Past `cap`, leftover time is DISCARDED rather than banked. Banking it
+    is the spiral of death: a slow frame owes more steps, which take
+    longer, which owes more still. Discarding makes the game run slow
+    under load -- but every step index stays exact, so the recorded trace
+    and the ghost, both indexed by step rather than by time, stay
+    correct. Frame drops degrade smoothness, never correctness.
+    """
+    from tuxghost.loop import FIXED_DT
+
+    total = accumulator + elapsed
+    steps = int(total // FIXED_DT)
+    if steps > cap:
+        return cap, 0.0
+    return steps, total - steps * FIXED_DT
+#+end_src
+
+- [ ] *Step 4: Run, verify they pass*
+
+- [ ] *Step 5: Demonstrate*
+
+Change the cap branch to =return cap, total - cap * FIXED_DT= (banking
+the time). Run =test_the_cap_drops_TIME_not_steps=, capture the failure,
+restore, re-run, capture the pass.
+
+- [ ] *Step 6: =make check-fast=, commit*
+
+---
+
+* Task 7: Recording live input
+
+*Files*
+- Modify: =tuxghost/ghost.py=
+- Test: =tests/test_ghost_pump.py=
+
+*Interfaces*
+- Produces: =install_recording_events(client, recorder, step_source) ->
+  None=, where =step_source= is a zero-argument callable returning the
+  current step index.
+
+- [ ] *Step 1: Write the failing faithful-replay test*
+
+#+begin_src python
+def test_a_recorded_session_replays_faithfully(tmp_path) -> None:
+    """The whole point of the module split: this exercises the recording
+    path with NO window, so it runs in the gate.
+
+    Synthetic events stand in for a keyboard. What is being tested is not
+    pygame but the wiring: that an event delivered at step N is recorded
+    at step N, so replay delivers it at step N.
+    """
+    import json
+    from pathlib import Path
+
+    from tuxemon.platform.const import buttons
+    from tuxghost.boot import boot_from_save
+    from tuxghost.execute import verify
+    from tuxghost.ghost import install_recording_events
+    from tuxghost.loop import PRESSED, RELEASED, run_steps
+    from tuxghost.record import Recorder
+    from tuxghost.trace import write
+
+    save = json.loads(
+        (Path(__file__).parent / "fixtures" / "paper_town.save").read_text()
+    )
+    session = boot_from_save(save, seed=1234, clock_epoch=1787659200)
+    client = session.client
+
+    rec = Recorder(session, seed=1234, clock_epoch=1787659200,
+                   recorder="human")
+    state = {"step": 0}
+    scripted = {8: [(buttons.DOWN, PRESSED)],
+                24: [(buttons.DOWN, RELEASED)]}
+    install_recording_events(
+        client, rec, lambda: state["step"], source=scripted
+    )
+
+    def hook(i: int) -> None:
+        state["step"] = i
+
+    run_steps(client, 64, hook=hook)
+    trace = rec.finish(step_count=64)
+
+    out = tmp_path / "played.tuxghost"
+    write(trace, out)
+    assert verify(trace) == 0
+    assert (8, buttons.DOWN, PRESSED) in trace.inputs
+#+end_src
+
+- [ ] *Step 2: Run, verify it fails*
+
+- [ ] *Step 3: Implement*
+
+#+begin_src python
+def install_recording_events(
+    client: Any,
+    recorder: Any,
+    step_source: Any,
+    source: dict[int, list[tuple[int, float]]] | None = None,
+) -> None:
+    """Record every input the session delivers, at the step it arrives.
+
+    Replaces `client.input_manager.process_events`, the same interception
+    `tuxghost.loop.install_schedule` uses -- established practice here,
+    not a new mechanism.
+
+    `source` exists ONLY so this can be tested without a keyboard: given
+    one, events are synthesised from it; given none, real events are read
+    from the wrapped `process_events`. The recording path is identical
+    either way, which is the point -- a test that exercised a different
+    recording path would prove nothing about live play.
+
+    `PlayerInput.timestamp` is never read or recorded. `CLAUDE.md`: the
+    upstream `time.time()` default deliberately never enters the format,
+    and live play is the one path where a real timestamp is sitting there
+    to be captured by accident.
+    """
+    from tuxemon.platform.events import PlayerInput
+
+    original = client.input_manager.process_events
+
+    def process_events() -> Any:
+        step = int(step_source())
+        if source is not None:
+            for button, value in source.get(step, []):
+                recorder.observe(step, button, value)
+                yield PlayerInput(button, value, 0)
+            return
+        for event in original():
+            recorder.observe(step, event.button, event.value)
+            yield event
+
+    client.input_manager.process_events = process_events
+#+end_src
+
+- [ ] *Step 4: Run, verify it passes*
+
+- [ ] *Step 5: Add the timestamp test*
+
+#+begin_src python
+def test_no_timestamp_reaches_the_recorded_trace(tmp_path) -> None:
+    """Asserted on the written FILE, not on an in-memory object: the
+    format is what must stay clean.
+
+    `PlayerInput`'s upstream default for `timestamp` is `time.time()`.
+    Live play is the only path in this project where a real wall-clock
+    value is sitting in the object being observed, so this is the only
+    place it can leak in.
+    """
+    import json
+    from pathlib import Path
+
+    from tuxemon.platform.const import buttons
+    from tuxghost.boot import boot_from_save
+    from tuxghost.ghost import install_recording_events
+    from tuxghost.loop import PRESSED, RELEASED, run_steps
+    from tuxghost.record import Recorder
+    from tuxghost.trace import write
+
+    save = json.loads(
+        (Path(__file__).parent / "fixtures" / "paper_town.save").read_text()
+    )
+    session = boot_from_save(save, seed=1234, clock_epoch=1787659200)
+    client = session.client
+
+    rec = Recorder(session, seed=1234, clock_epoch=1787659200,
+                   recorder="human")
+    state = {"step": 0}
+    scripted = {8: [(buttons.DOWN, PRESSED)],
+                24: [(buttons.DOWN, RELEASED)]}
+    install_recording_events(
+        client, rec, lambda: state["step"], source=scripted
+    )
+    run_steps(client, 64, hook=lambda i: state.__setitem__("step", i))
+
+    out = tmp_path / "played.tuxghost"
+    write(rec.finish(step_count=64), out)
+
+    written = json.loads(out.read_text())
+    assert written["inputs"], "a vacuous pass over zero inputs"
+    assert "timestamp" not in json.dumps(written["inputs"])
+    for entry in written["inputs"]:
+        assert len(entry) == 3, entry
+#+end_src
+
+- [ ] *Step 6: Demonstrate*
+
+Make =recorder.observe= record =step + 1= instead of =step=. Run the
+faithful-replay test, capture the =verify() != 0= failure, restore,
+re-run, capture the pass.
+
+- [ ] *Step 7: Append =tests/test_ghost_pump.py::= to =_TRACKED_FILES=,
+  =make check-fast=, commit*
+
+---
+
+* Task 8: =play.py=, the window shell
+
+*Nothing in this file may contain a decision worth testing.* If you find
+yourself wanting to test something here, it belongs in =ghost.py=.
+
+*Files*
+- Create: =tuxghost/play.py=
+
+*Interfaces*
+- Consumes: everything from Tasks 2-7.
+- Produces: =play(ghost_trace, save, seed, clock_epoch, out, run_dir) -> int=
+
+- [ ] *Step 1: Implement*
+
+#+begin_src python
+"""The one windowed entry point in this project, and its only exception
+to the dummy-SDL rule.
+
+`CLAUDE.md` requires `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` on
+every invocation touching the client, because a headless run must not
+block on window creation or vary machine to machine. This module is the
+single deliberate exception: a human at a real window is the one consumer
+that needs one.
+
+It does NOT threaten determinism. `tuxghost.boot` records the measurement
+that settles it -- record and replay may use different display contexts,
+and a 300-step per-step digest sequence was identical at every index
+between them. A window changes what is drawn, not what happens.
+
+Kept deliberately thin: `make check` runs headless, so nothing here is
+gated. Every decision lives in `tuxghost.ghost`, which is fully tested.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+from tuxghost.ghost import (
+    advance_ghost,
+    build_track,
+    install_ghost,
+    install_recording_events,
+    steps_owed,
+)
+from tuxghost.loop import run_steps
+from tuxghost.record import Recorder
+from tuxghost.trace import read, write
+
+#: Catch-up bound. Past this, wall-clock time is dropped rather than
+#: banked -- see `steps_owed`.
+CATCH_UP_CAP = 5
+
+
+def play(
+    ghost_trace: Path | None,
+    save: Path,
+    seed: int,
+    clock_epoch: int,
+    out: Path,
+    run_dir: Path,
+) -> int:
+    import pygame as pg
+    from tuxemon.prepare import pygame_init
+
+    from tuxghost.boot import boot_from_save
+
+    context = pygame_init()
+    session = boot_from_save(
+        json.loads(save.read_text()), seed=seed,
+        clock_epoch=clock_epoch, context=context,
+    )
+    client = session.client
+
+    track = build_track(read(ghost_trace)) if ghost_trace else None
+    npc = install_ghost(session, track) if track else None
+
+    recorder = Recorder(session, seed=seed, clock_epoch=clock_epoch,
+                        recorder="human")
+    state = {"step": 0}
+    install_recording_events(client, recorder, lambda: state["step"])
+
+    from tuxghost.observe import FrameRenderer
+
+    frames = FrameRenderer(client, upscale=1)
+    display = pg.display.get_surface()
+
+    accumulator = 0.0
+    last = time.monotonic()
+    running = True
+    while running:
+        for event in pg.event.get():
+            if event.type == pg.QUIT:
+                running = False
+
+        now = time.monotonic()
+        steps, accumulator = steps_owed(
+            accumulator, now - last, CATCH_UP_CAP
+        )
+        last = now
+
+        for _ in range(steps):
+            run_steps(client, 1)
+            state["step"] += 1
+            if npc is not None and track is not None:
+                advance_ghost(
+                    client, npc, track, state["step"],
+                    client.get_map_name(),
+                )
+
+        display.blit(frames.surface(), (0, 0))
+        pg.display.flip()
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write(recorder.finish(step_count=state["step"]), out)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "seed": seed,
+                "clock_epoch": clock_epoch,
+                "steps": state["step"],
+                "ghost": str(ghost_trace) if ghost_trace else None,
+                "ghost_digest": track.source_digest if track else None,
+            },
+            indent=2,
+        )
+    )
+    return 0
+#+end_src
+
+- [ ] *Step 2: Check the line count*
+
+#+begin_src bash
+wc -l tuxghost/play.py
+#+end_src
+
+If it exceeds ~100 lines of code, something with a decision in it has
+leaked in. Move it to =ghost.py= and test it there.
+
+- [ ] *Step 3: Run ruff and mypy*
+
+#+begin_src bash
+uv run ruff check tuxghost tests && uv run mypy --strict tuxghost
+#+end_src
+
+- [ ] *Step 4: Commit*
+
+---
+
+* Task 9: The =play= CLI subcommand and the =CLAUDE.md= carve-out
+
+*Files*
+- Modify: =tuxghost/cli.py=
+- Modify: =CLAUDE.md=
+- Test: =tests/test_ghost_pump.py=
+
+- [ ] *Step 1: Add the subcommand parser*
+
+Mirror =p_agent='s shape in =_build_parser=:
+
+#+begin_src python
+    p_play = sub.add_parser(
+        "play", help="Play in a window with a ghost, recording the session."
+    )
+    p_play.add_argument("--ghost", type=Path, default=None)
+    p_play.add_argument("--from-save", type=Path, required=True,
+                        dest="from_save")
+    p_play.add_argument("--seed", type=int, required=True)
+    p_play.add_argument("--clock-epoch", type=int, required=True,
+                        dest="clock_epoch")
+    p_play.add_argument("--out", type=Path, required=True)
+    p_play.add_argument("--run-dir", type=Path, required=True,
+                        dest="run_dir")
+#+end_src
+
+Add ="ghost"=, ="from_save"=, ="out"=, ="run_dir"= to =_PATH_ARGS["play"]=
+so relative paths resolve BEFORE the process chdirs into =tuxemon/=. A
+CLI path test once passed only because every path it used was absolute;
+do not repeat that.
+
+- [ ] *Step 2: Write a refusal test that needs no window*
+
+#+begin_src python
+def test_play_refuses_a_missing_ghost_trace(tmp_path) -> None:
+    """Exit 2, the code this CLI uses for every anticipated
+    precondition. Runs in the gate because the refusal happens BEFORE any
+    window is opened -- which is itself the thing being pinned."""
+    proc = _run_cli(
+        "play", "--ghost", str(tmp_path / "nope.tuxghost"),
+        "--from-save", str(SAVE), "--seed", "1234",
+        "--clock-epoch", "1787659200",
+        "--out", str(tmp_path / "o.tuxghost"),
+        "--run-dir", str(tmp_path / "run"),
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "Traceback" not in proc.stderr
+#+end_src
+
+- [ ] *Step 3: Wire =_play= in =main=*, reading the ghost trace through
+  the existing =_read_trace_or_refuse= boundary so a malformed trace is a
+  refusal, not an exit-1 traceback.
+
+- [ ] *Step 4: Amend =CLAUDE.md=*
+
+Under "Never run the game without dummy SDL drivers", append:
+
+#+begin_src markdown
+**The one exception: `tuxghost play`.** A human at a real window is the
+only consumer in this project that needs one, and it is the only entry
+point permitted to run without the dummy drivers. This does not weaken
+the determinism guarantee: `tuxghost/boot.py` records the measurement —
+record and replay may use *different* display contexts, and a 300-step
+per-step digest sequence was identical at every index between them. A
+window changes what is drawn, not what happens. Every other invocation,
+including every test, still requires both dummy drivers.
+#+end_src
+
+- [ ] *Step 5: =make check-fast=, commit*
+
+---
+
+* Task 10: Close-out
+
+- [ ] *Step 1: Run the full gate, alone*
+
+#+begin_src bash
+uptime   # quote no timing taken above load ~5
+make check
+#+end_src
+
+- [ ] *Step 2: Re-assert the invariants*
+
+#+begin_src bash
+ls patches/ | wc -l        # must be 6
+git -C tuxemon diff --stat # must be 18 files, 265 insertions(+), 63 deletions(-)
+#+end_src
+
+And =EXEMPTIONS == {}= in =tuxghost/digest.py=.
+
+- [ ] *Step 3: Manual acceptance — the part no gate can do*
+
+Run =tuxghost play= against =scripted_town_1234= and look at it. Confirm:
+the window opens, the ghost is visible, it walks its route, it is
+distinguishable from the player, the player passes through it, and the
+recorded trace =verify()=s to 0 afterwards.
+
+*Record what you actually saw*, including anything that looked wrong.
+This is the only check on whether the feature works as a feature.
+
+- [ ] *Step 4: Add a =docs/STATUS.org= section*
+
+Measured counts, the gate output, what is covered and what is not
+(the window, real input, and appearance are ungated), and both probe
+results from Task 1.
+
+- [ ] *Step 5: Commit*
+
+---
+
+* Self-review of this plan
+
+*Spec coverage.* Every spec section maps to a task: architecture → 2/3/8;
+track → 2; entity → 3/4; pump and recording → 6/7; CLI → 9; the dummy-SDL
+carve-out → 9; validation items 1-9 → tasks 2-7 and 9; the two probes →
+1; invariants → 10. The spec's non-goal (a filmstrip differ) has no task,
+correctly.
+
+*Type consistency.* =GhostTrack=/=GhostFrame=/=GhostTrack.at= are defined
+in Task 2 and used unchanged in 3, 4, 5, 8. =install_ghost(session,
+track, sprite_slug)= is defined in 3 and called with the same shape in 4,
+5, 8. =steps_owed(accumulator, elapsed, cap) -> (int, float)= is defined
+in 6 and used in 8. =install_recording_events(client, recorder,
+step_source, source=None)= is defined in 7 and called in 8 without
+=source=, which is its default.
+
+*Three guesses are flagged in place rather than hidden*, each with
+instructions for finding the real answer: the NPC sprite-surface
+attribute (Task 1), =Direction='s import path (Task 4), and the collision
+manager's accessor path (Task 5). They are guesses because the plan
+should not invent an API it has not read — and the tasks that depend on
+them say so.
+
+*Known risk.* Task 5's digest-invisibility test is expected to pass on
+first run, which makes its Step 3 demonstration the only thing standing
+between it and vacuity. The step says explicitly to STOP if the mutation
+does not make it fail.

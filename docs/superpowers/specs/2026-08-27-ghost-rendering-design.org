@@ -127,21 +127,33 @@ control). In both cases *the digest could not see it*.
 the player's current map, or when =step= runs past the track. A ghost
 standing motionless on the wrong map reads as a bug.
 
-*Hidden means REMOVED from the NPC manager* (=remove_npc(slug)=), and
-re-added on return. Not "parked off-screen": an NPC left in
-=npc_manager.npcs= is still iterated by =_get_npc_surfaces= every frame,
-so parking it relies on the camera never reaching it — which a player can
-falsify by walking there. Transitions are rare (a map change, the end of
-the track), so the add/remove churn is negligible.
+*Hidden means MOVED OFF-MAP*: =npc_manager.add_npc_off_map(npc)=, and
+=add_npc(npc)= to show it again.
+
+(An earlier draft of this spec said "removed via =remove_npc=" and
+explicitly rejected an off-map park as relying on the camera never
+reaching the ghost. That was wrong, found while writing the plan:
+=NPCManager= keeps *two* repositories, and the =npcs= property — the one
+=MapRenderer._get_npc_surfaces= iterates — returns =_on_map= ONLY.
+=add_npc_off_map= is therefore a real hide, not a park: the ghost leaves
+the drawn set entirely while the NPC object and its state survive. It is
+both cheaper and more idiomatic than destroy-and-rebuild.)
 
 *The ghost's slug* is a fixed, reserved value — =ghost= — chosen so it
 cannot collide with the player slug (=npc_red= in the committed save) or
-with any map NPC. The slug is load-bearing twice over:
-=get_persistent_npc_states= filters on =npc.slug != player_slug=, and
-=remove_npc= is keyed by slug. A slug collision with a real map NPC would
-mean =install_ghost= silently displacing that NPC, so the reserved slug
-must be asserted absent from =npc_manager.npcs= before the ghost is added,
-and =install_ghost= must refuse rather than overwrite.
+with any map NPC. The slug is load-bearing: =get_persistent_npc_states=
+filters on =npc.slug != player_slug=, and both repositories are keyed by
+slug. =install_ghost= must *refuse* rather than overwrite when the slug is
+already taken; =NPCManager.npc_exists(slug)= is the public check.
+
+Two mechanics found while writing the plan, which the implementation must
+respect. =NPC.__init__= reads =self.persistence = npc_data.persistence=
+from the NPC *database entry* for its slug, so persistence is not a
+constructor argument — the ghost is built from an existing DB slug and
+then has =persistence= and =slug= overridden explicitly (both are plain
+attributes). Overriding =persistence= is belt-and-braces: it already
+defaults =False= for every shipped NPC, and an assertion is cheaper than
+depending on that staying true.
 
 *The ghost's sprite* is the same one the player uses, so a ghost reads as
 "another you" rather than a stranger. Distinction comes from the
