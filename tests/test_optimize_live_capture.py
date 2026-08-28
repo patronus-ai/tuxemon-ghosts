@@ -46,18 +46,33 @@ mechanics rather than searching for them: `MutationEditor` needed 19-32
 rounds to arrive on the same parent, and arrived in only two of three
 seeds.
 
-WHAT THESE TESTS DO NOT COVER, and it is a real gap rather than an
-oversight. `ClaudeEditor.parse_response` is NOT exercised against real
-model text here. `ClaudeEditor` keeps the raw reply on `self.last_raw`
-but nothing persists it: `optimize`'s run directory has no equivalent of
-`agent`'s `decisions.jsonl` and its `raw` field, so a live optimize run's
-actual model answers are unrecoverable once the process exits. S2 closed
-exactly this hole for `agent` (see `tests/test_live_capture.py`, whose
-`test_transcript_raw_answers_reparse_to_their_recorded_actions` has no
-counterpart here, and cannot until `optimize` records raw replies). What
-IS covered is everything downstream of parsing: the edits the model
-actually produced, validated by the same `edits_from_json` the live path
-used, and replayed to the same scores.
+THE SECOND CAPTURE, and why there are two. The fixture above predates
+`answers.jsonl`, so it holds the model's PARSED edits but not its
+answers -- `optimize` did not record raw replies when it was made. Once
+it did, a further run was captured as a matched pair:
+
+  * `tests/fixtures/claude_stop_town.answers.jsonl` -- the model's own
+    replies, verbatim, one per line, recorded BEFORE parsing.
+  * `tests/fixtures/claude_stop_town.edits.jsonl` -- what was parsed out
+    of those same replies, from the same run.
+  * `tests/fixtures/claude_stop_town.run.json` -- its run record.
+
+It is short (two proposal rounds) because it exhibits the behaviour four
+of this project's five live runs did: arrive on round 1, then STOP. What
+makes it valuable is not length but the SHAPE of its two replies, which
+no stub in this repo produces:
+
+  call 1 -- a fenced json block whose JSON spans MULTIPLE LINES. This is
+    the exact case S2's missing `re.DOTALL` failed on while sixteen
+    single-line stub tests stayed green.
+  call 2 -- PROSE BEFORE THE FENCE ("We already reached the target
+    exactly (19,14). No changes needed.") followed by a fenced block
+    holding an empty `edits` list -- i.e. the STOP path, arrived at
+    through text a regex has to find its way past.
+
+Between them the two captures cover both halves: the first replays a
+multi-round optimization to its live scores, the second exercises
+`parse_response` against real model text.
 """
 
 from __future__ import annotations
@@ -66,6 +81,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from tuxghost.optimize.editors.claude import ClaudeEditor
 from tuxghost.optimize.editors.replay import ReplayEditor, edits_from_json
 from tuxghost.optimize.edits import Insert
 from tuxghost.optimize.objective import ReachTile
@@ -195,3 +211,76 @@ def test_replaying_the_transcript_reproduces_the_live_scores() -> None:
         f"  replayed: {replayed}"
     )
     assert result.best_round == 3
+
+
+STOP_ANSWERS = _HERE / "fixtures" / "claude_stop_town.answers.jsonl"
+STOP_EDITS = _HERE / "fixtures" / "claude_stop_town.edits.jsonl"
+STOP_RUN_INFO = _HERE / "fixtures" / "claude_stop_town.run.json"
+
+
+def _stop_answers() -> list[dict[str, Any]]:
+    lines = STOP_ANSWERS.read_text().splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+def _stop_edits() -> list[list[dict[str, Any]]]:
+    lines = STOP_EDITS.read_text().splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+def test_transcript_raw_answers_reparse_to_their_recorded_edits() -> None:
+    """THE GAP THIS SECOND CAPTURE EXISTS TO CLOSE, and the direct
+    counterpart to `tests/test_live_capture.py`'s
+    `test_transcript_raw_answers_reparse_to_their_recorded_actions`.
+
+    `parse_response` had no coverage against real model text anywhere in
+    this project, because `optimize` never persisted a reply. It does
+    now. Feeding each recorded answer back through the SAME
+    `parse_response` the live run used must yield exactly the edits that
+    run recorded for that round -- so the committed `edits.jsonl` is
+    demonstrably what this text parses to, not a separate assertion about
+    it.
+    """
+    answers = _stop_answers()
+    edits = _stop_edits()
+    assert len(answers) == len(edits) == 2, (len(answers), len(edits))
+
+    editor = ClaudeEditor()
+    for answer, recorded in zip(answers, edits, strict=True):
+        parsed, _notes = editor.parse_response(answer["raw"])
+        expected = tuple(edits_from_json(recorded))
+        assert parsed == expected, (answer["call"], parsed, expected)
+
+
+def test_the_real_replies_carry_the_shapes_no_stub_produces() -> None:
+    """The two properties that make this capture worth its bytes. Both
+    are asserted about the RAW TEXT, so a future re-capture that happened
+    to be single-line-only and fence-only would fail here rather than
+    silently weakening `parse_response`'s only real-text coverage.
+
+    S2 recorded that its stub answers were all single-line while every
+    real model answer was multi-line, which is how a fence regex without
+    `re.DOTALL` passed sixteen tests and failed in production.
+    """
+    answers = _stop_answers()
+    first, second = answers[0]["raw"], answers[1]["raw"]
+
+    # 1. A fence whose JSON spans more than one line -- the DOTALL case.
+    fenced = first.split("```json", 1)[1].split("```", 1)[0]
+    assert "\n" in fenced.strip(), fenced
+
+    # 2. Prose BEFORE the fence, which the regex must skip past.
+    assert not second.lstrip().startswith("```"), second
+    assert "```json" in second, second
+
+    # And that second reply is the STOP path: an empty edits list.
+    parsed, _notes = ClaudeEditor().parse_response(second)
+    assert parsed == (), parsed
+
+
+def test_the_stop_captures_run_info_matches_its_parent() -> None:
+    info = json.loads(STOP_RUN_INFO.read_text())
+    assert info["editor"] == "claude"
+    assert info["model"] == "claude-sonnet-5"
+    assert info["parent_digest"] == _parent().header.final_digest
+    assert info["stop_reason"] == "editor returned STOP"

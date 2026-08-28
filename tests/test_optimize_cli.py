@@ -1052,6 +1052,51 @@ def test_editors_that_read_no_goal_record_none_rather_than_empty_string(
     assert info["goal"] is None, info
 
 
+def test_a_claude_run_writes_the_models_own_answers(tmp_path: Path) -> None:
+    """`answers.jsonl` is the counterpart to `agent`'s `decisions.jsonl`
+    and its `raw` field, which S2 added and `optimize` lacked.
+
+    Without it `ClaudeEditor.parse_response` could not be tested against
+    real model text at all, because no real model text survived a run:
+    `optimize.jsonl` records what was PARSED out of a reply, so it says
+    nothing whatever about a reply that failed to parse -- and a missing
+    json fence is the one live failure this project has been bitten by.
+    """
+    proc, calls = _claude_prompt(tmp_path)
+    assert "main() RETURNED 0" in proc.stdout, (proc.stdout, proc.stderr)
+
+    answers = [
+        json.loads(line)
+        for line in (tmp_path / "run" / "answers.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(answers) == len(calls), (answers, calls)
+    assert answers[0]["call"] == 1
+    # The VERBATIM reply, not a re-serialization of what was parsed out
+    # of it: the whole value of this artifact is that it preserves text
+    # the parser may have rejected.
+    assert answers[0]["raw"], answers[0]
+
+
+def test_editors_with_no_answers_write_no_answers_file(tmp_path: Path) -> None:
+    """`answers` is a `ClaudeEditor` detail; the other three editors have
+    no equivalent. An empty `answers.jsonl` beside a mutation run would
+    imply a capture happened, so the file is written only when there is
+    something to put in it."""
+    run_dir = tmp_path / "run"
+    proc = _run(
+        "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
+        "--objective", "reach-tile",
+        "--target", "spyder_paper_town.tmx:19,14",
+        "--rounds", "2", "--patience", "2", "--max-rejections", "2",
+        "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
+        "--run-dir", str(run_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert (run_dir / "optimize.jsonl").exists()
+    assert not (run_dir / "answers.jsonl").exists()
+
+
 def test_the_target_reaches_the_claude_editors_prompt(tmp_path: Path) -> None:
     """WHOLE-BRANCH REVIEW, IMPORTANT 1. `_optimize` built
     `ClaudeEditor(model=model)` and there was no `--goal` on this parser,

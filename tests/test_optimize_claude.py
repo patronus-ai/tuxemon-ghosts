@@ -299,3 +299,47 @@ def test_the_system_prompts_button_values_track_upstreams_constants() -> None:
     # the assertions above while still telling the model UP=1.
     assert "UP=1" not in legend, legend
     assert "LEFT=4" not in legend, legend
+
+
+def test_an_unparseable_reply_is_still_recorded() -> None:
+    """The ordering inside `propose` is the whole point of `answers`.
+
+    `parse_response` raises `ValueError` on a reply carrying no fenced
+    json block. The append that records the reply sits BEFORE that call,
+    so the text survives the raise; with it after -- where `last_raw`'s
+    assignment still is, deliberately, because `last_raw` means "the last
+    reply that PARSED" -- the single most diagnostic answer a live run
+    can produce would be discarded and no artifact would remember it.
+
+    That failure mode is not hypothetical for this project: S2's missing
+    `re.DOTALL` made every real multi-line model answer unparseable while
+    sixteen single-line stub tests stayed green.
+    """
+    editor = ClaudeEditor(client=_StubClient("no fence here, just prose"))
+    with pytest.raises(ValueError, match="no fenced json block"):
+        editor.propose(SCRIPT, _candidate(), (0.0, -2.0, -48.0))
+
+    assert editor.answers == [{"call": 1, "raw": "no fence here, just prose"}]
+    # And `last_raw` is untouched, because nothing parsed. The two fields
+    # mean different things and this pins that they are not merged.
+    assert editor.last_raw is None
+
+
+def test_answers_accumulate_across_calls_and_number_themselves() -> None:
+    """One record per `propose`, in order, each carrying the call number
+    it came from rather than relying on its position in the list.
+
+    The number is taken from a counter incremented at the TOP of
+    `propose`, so a call that dies before any text arrives (an API error,
+    say) leaves a visible gap -- `call` jumping 1, 3 -- instead of
+    silently shifting every later record down by one and making the file
+    quietly disagree with `optimize.jsonl`'s round numbering.
+    """
+    reply = '```json\n{"edits": [{"op": "delete", "index": 0}]}\n```'
+    editor = ClaudeEditor(client=_StubClient(reply))
+    for _ in range(3):
+        editor.propose(SCRIPT, _candidate(), (0.0, -2.0, -48.0))
+
+    assert [a["call"] for a in editor.answers] == [1, 2, 3]
+    assert all(a["raw"] == reply for a in editor.answers)
+    assert editor.last_raw == reply

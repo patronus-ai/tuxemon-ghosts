@@ -1,0 +1,15 @@
+{
+  "parent_digest": "9eed41f8f05a2ac5f4ddab969eb3aba46c6768f541d22e01c6f16a45bd9270d6",
+  "goal": "reach tile (19, 14) on map spyder_paper_town.tmx",
+  "objective": "reach-tile",
+  "target": "spyder_paper_town.tmx:19,14",
+  "editor": "claude",
+  "seed": null,
+  "model": "claude-sonnet-5",
+  "rounds": 32,
+  "patience": 32,
+  "max_rejections": 32,
+  "max_cost": 4000,
+  "best_round": 1,
+  "stop_reason": "editor returned STOP"
+}

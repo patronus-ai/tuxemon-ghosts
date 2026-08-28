@@ -87,7 +87,9 @@ reader comparing step counts alone would rank it first and be wrong.
 
 *1. It stops while it is still winning.* Runs 1 and 3 returned STOP at
 round 1, immediately after arriving, leaving a 230-step trace on the
-table. Run 2 — the only run that continued — got the same arrival down
+table. Two further runs were made later the same day, after
+=answers.jsonl= landed, and *both did the same* — so this is 4 of 5
+live runs, not 2 of 3, and run 2 is the outlier rather than the norm. Run 2 — the only run that continued — got the same arrival down
 to *178 steps in two more rounds*, by merging the parent's four
 separate DOWN presses into one =hold 64= and its RIGHT presses into one
 =hold 112=. So the 230 the other two runs stopped at was ~23% worse than
@@ -126,13 +128,13 @@ runs stopped after two calls each.
   exactly three tiles along one axis is about as legible a goal as this
   objective admits. A target requiring a turn, a detour, or passage
   through another map is untested.
-- *=parse_response= is still not covered against real model text.*
-  =ClaudeEditor= holds the raw reply on =self.last_raw= and nothing
-  persists it; =optimize='s run directory has no equivalent of =agent='s
-  =decisions.jsonl= and its =raw= field. So the committed artifact is
-  the model's *parsed edits*, not its answers. S2 closed this hole for
-  =agent=; it is open for =optimize=. Closing it is one write in
-  =tuxghost/cli.py=, and it is the single highest-value follow-up here.
+- *=parse_response= coverage against real model text: CLOSED after this
+  note was first written.* =optimize= now writes =answers.jsonl= and a
+  second run is committed as a matched answers+edits pair. The fix also
+  moved the recording to BEFORE parsing — a reply with no json fence used
+  to be discarded, which is precisely the reply worth keeping. See
+  =docs/STATUS.org=. The six runs tabled above predate the change and
+  have no =answers.jsonl=; that is why a later run supplies it.
 - The comparison is at *one budget* (32 rounds). Mutation was still
   improving at its cap in the earlier sweep and reached best-round 30 and
   32 here, so it is not saturated; Claude's plateau means it is.

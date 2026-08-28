@@ -121,6 +121,16 @@ class ClaudeEditor:
         self.score_legend = score_legend
         self.notes = ""
         self.last_raw: str | None = None
+        #: Every reply this editor has received, in order, recorded
+        #: BEFORE it is parsed -- see `propose`. `last_raw` is kept
+        #: beside it because it is a different thing: the most recent
+        #: SUCCESSFULLY PARSED reply, which existing callers read.
+        self.answers: list[dict[str, Any]] = []
+        #: Incremented at the top of every `propose`, so a call that dies
+        #: before any text arrives leaves a visible GAP in `answers`
+        #: numbering rather than silently shifting every later record
+        #: down by one.
+        self.calls = 0
         self._client = client
 
     def build_prompt(
@@ -196,6 +206,7 @@ class ClaudeEditor:
         candidate: CandidateResult,
         score: tuple[float, ...],
     ) -> Sequence[Edit]:
+        self.calls += 1
         response = self._ensure_client().messages.create(
             model=self.model,
             max_tokens=EDITOR_MAX_TOKENS,
@@ -212,6 +223,14 @@ class ClaudeEditor:
             for block in response.content
             if getattr(block, "type", None) == "text"
         )
+        # Recorded BEFORE parsing, and this ordering is the whole point.
+        # `parse_response` raises `ValueError` on a reply carrying no
+        # fenced json block -- the single failure mode a live capture
+        # most needs to preserve, and the one S2's missing `re.DOTALL`
+        # hid behind for sixteen stub tests. With the append below the
+        # fence, that reply was discarded and the run directory kept no
+        # trace of what the model actually said.
+        self.answers.append({"call": self.calls, "raw": raw})
         edits, notes = self.parse_response(raw)
         self.last_raw = raw
         if notes:

@@ -29,14 +29,16 @@ round 1; mutation in 2/3 needing 19-32 rounds. They do NOT separate on
 final step count. Run 2's transcript is committed as a =ReplayEditor=
 fixture with a replay control.
 
-*The one thing A4 could not close*, and the best next small job in this
-area: =ClaudeEditor.parse_response= still has no coverage against real
-model text, because =optimize='s run directory never persists the raw
-reply. =ClaudeEditor= keeps it on =self.last_raw=; nothing writes it
-out. =agent= records exactly this in =decisions.jsonl='s =raw= field —
-S2 added it for this reason — and =optimize= has no counterpart. One
-write in =tuxghost/cli.py=, then a re-capture, and the live evidence
-covers parsing too.
+*A4's one remaining gap is closed too.* =optimize= now writes
+=answers.jsonl= (the counterpart to =agent='s =decisions.jsonl= =raw=
+field), recorded BEFORE parsing so an unparseable reply survives, and a
+second live run is committed as a matched answers+edits pair.
+=parse_response= has real-text coverage. See =docs/STATUS.org=.
+
+*Stream A is complete.* The next substantive work in this repo is
+Stream B below, or re-running the tuning sweep against the new parent
+(=docs/2026-08-27-optimizer-tuning.org= is marked as measuring the
+retired one).
 
 *Stream B (S4, ghost rendering) is completely untouched* and its section
 below stands as written.

@@ -1355,13 +1355,31 @@ at round 13 — 19 fewer rounds and 19 fewer API calls, same winner. That
 note could only derive patience as a lower bound because patience never
 fired in its mutation sweep. It fires here.
 
-*Still open, and the highest-value follow-up*: =parse_response= has no
-coverage against real model text. =ClaudeEditor= holds the raw reply on
-=self.last_raw= and nothing persists it — =optimize='s run directory has
-no equivalent of =agent='s =decisions.jsonl= and its =raw= field, which
-S2 added for exactly this reason. The committed artifact is therefore
-the model's PARSED edits, not its answers. One write in
-=tuxghost/cli.py= closes it.
+*CLOSED, later the same day.* =optimize='s run directory now writes
+=answers.jsonl= — the model's own replies, verbatim, one per line, the
+counterpart to =agent='s =decisions.jsonl= and its =raw= field.
+
+The fix is not only the new file. =ClaudeEditor= recorded the reply
+*after* =parse_response=, so a reply carrying no json fence — the single
+failure mode a capture most needs to preserve, and the one S2's missing
+=re.DOTALL= hid behind for sixteen green stub tests — was discarded and
+left no trace anywhere. The append now sits BEFORE the parse, and a
+=calls= counter incremented at the top of =propose= means a call that
+dies before any text arrives leaves a visible GAP in the numbering
+rather than silently shifting every later record down by one.
+
+A second live run was captured as a matched answers+edits pair
+(=tests/fixtures/claude_stop_town.*=) and =parse_response= now has
+coverage against genuinely model-produced text — the direct counterpart
+to =tests/test_live_capture.py='s
+=test_transcript_raw_answers_reparse_to_their_recorded_actions=. Note
+what is and is not new: =re.DOTALL= was ALREADY pinned by a synthetic
+multi-line stub; what had never existed is real text.
+
+The captured replies carry two shapes no stub in this repo produces: a
+fence whose JSON spans multiple lines, and prose BEFORE the fence
+("We already reached the target exactly (19,14). No changes needed.")
+followed by an empty =edits= list.
 
 Committed: =tests/fixtures/claude_optimize_town.{edits.jsonl,run.json}=
 and =tests/test_optimize_live_capture.py=, whose replay control re-runs
@@ -1409,26 +1427,28 @@ coverage.
 =make check= =EXIT=0= on =impl/finish-offline-optimizer=:
 
 #+begin_src text
-fast: 375 passed, 4 skipped, 11 warnings   in 215.32s (3m35s)
-slow:   4 passed, 375 deselected, 1 warning in  52.65s
+fast: 382 passed, 4 skipped, 11 warnings   in 288.25s (4m48s), load 6.6-11.7
+slow:   4 passed, 382 deselected, 1 warning in 100.85s
 ruff + lint-patched + mypy --strict: green
 #+end_src
 
-Up from S3's close-out =356 / 4 / 11= — *nineteen* net new tests, 379
+Up from S3's close-out =356 / 4 / 11= — *twenty-six* net new tests, 386
 collected against 360. The pinned =patch_series_id= warning table did
 *not* drift; still exactly 11, verified in a SINGLE-session run (the
 gate is a session-finish hook, so a chunked run would not exercise it
 properly). No seventh patch, =patches/= still 6 files, =EXEMPTIONS=
 still =={}=, no format change.
 
-*On the timing, which is usable.* The 215.32 s run finished with load
-average falling from ~14 to 2.0, so it sits fairly beside S3's 218.00 s
-at 356 tests and load 4.6: *nineteen extra tests for slightly less wall
-clock*. Do not inherit any other figure produced during Stream A —
-several full-suite attempts were made at load 19-29 and reported up to
-789.93 s, and two background gate runs were killed outright mid-run at
-that load. Check =uptime= before quoting anything here, as the S3
-handoff already warned.
+*On timings, and none of these is a clean benchmark.* The 288.25 s above
+was taken at load 6.6-11.7. The cleanest Stream A measurement is an
+earlier gate at *375* tests — 215.32 s — taken as load fell from ~14 to
+2.0, which sits fairly beside S3's 218.00 s at 356 tests and load 4.6.
+The 288 s figure is therefore NOT evidence that the last seven tests
+cost 73 s; most of that is host load. Do not inherit any other figure
+from Stream A at all — several full-suite attempts ran at load 19-29 and
+reported up to 789.93 s, and two background gate runs were killed
+outright mid-run at that load. Check =uptime= before quoting anything
+here, as the S3 handoff already warned.
 
 * Next subsystem
 

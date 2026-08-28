@@ -1297,6 +1297,27 @@ def _optimize(args: argparse.Namespace) -> int:
     with (args.run_dir / "optimize.jsonl").open("w") as handle:
         for entry in result.rounds:
             handle.write(json.dumps(_round_json(entry), default=str) + "\n")
+    # `answers.jsonl`: the model's OWN replies, verbatim, one per line --
+    # the counterpart to `agent`'s `decisions.jsonl` and its `raw` field,
+    # which S2 added for exactly this reason and `optimize` has lacked
+    # ever since.
+    #
+    # `optimize.jsonl` records what was PARSED out of each reply, so it
+    # can say nothing about a reply that failed to parse -- and
+    # `parse_response` raising on a missing json fence is the one live
+    # failure this project has already been bitten by. Without this file,
+    # `ClaudeEditor.parse_response` cannot be tested against real model
+    # text at all, because no real model text survives a run.
+    #
+    # `getattr`, not an isinstance check: `answers` is a `ClaudeEditor`
+    # detail and the other three editors have no equivalent, so this
+    # writes the file only when there is something to put in it rather
+    # than leaving an empty artifact that implies a capture happened.
+    answers = getattr(editor, "answers", None)
+    if answers:
+        with (args.run_dir / "answers.jsonl").open("w") as handle:
+            for answer in answers:
+                handle.write(json.dumps(answer) + "\n")
     (args.run_dir / "run.json").write_text(
         json.dumps(
             {
