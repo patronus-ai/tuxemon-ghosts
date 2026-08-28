@@ -1570,46 +1570,50 @@ All checks passed!                                  # lint-patched
 ./.venv/bin/python -m mypy tuxghost tests
 Success: no issues found in 75 source files
 PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q
-402 passed, 4 skipped, 11 warnings in 1482.14s (0:24:42)
+404 passed, 4 skipped, 11 warnings in 269.70s (0:04:29)
 PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 ./.venv/bin/python -m pytest -q -m slow
-4 passed, 402 deselected, 1 warning in 91.64s (0:01:31)
+4 passed, 404 deselected, 1 warning in 54.95s
 EXIT=0
 $ uptime   # after finishing
-23:57  up 17 days, 13:27, 2 users, load averages: 10.27 23.62 27.60
+00:57  up 17 days, 14:27, 2 users, load averages: 3.61 4.22 5.02
 #+end_src
 
-- *Fast tier: 402 passed, 4 skipped, 11 warnings.* Up from Stream A's
-  382 — 20 net new tests, all four new S4 files (=test_ghost_track.py=,
+This is the FINAL gate, re-run after the whole-branch review's fix wave
+(four commits: the vacuous stand-still test, two missing CLI refusals,
+the advance-driven safety coverage, and the sprite). An earlier gate at
+=e5b83e0= measured 402 / 4 / 11 at load 9-40; those counts and that
+timing are superseded by the numbers above.
+
+- *Fast tier: 404 passed, 4 skipped, 11 warnings.* Up from Stream A's
+  382 — 22 net new tests, all four new S4 files (=test_ghost_track.py=,
   =test_ghost_entity.py=, =test_ghost_pump.py=, =test_play_cli.py=), each
   tracked in =tests/conftest.py='s =patch_series_id= tripwire with zero
   pinned warnings (all four were written against the current patch
   series, so they must warn zero times — and did). The pinned-warning
   count is unchanged at 11.
-- *Slow tier: 4 passed, 402 deselected, 1 warning* — unchanged from
+- *Slow tier: 4 passed, 404 deselected, 1 warning* — unchanged from
   Stream A's 4.
 - =mypy --strict= now covers *75* source files (was 64 at S3 close, then
   grew through Stream A).
 - =EXIT=0=. Nothing failed.
 
-*On the timing — NOT a clean benchmark, stated plainly rather than
-quoted as one.* Load was *8.94/9.13/13.23* at the start of this run,
-already above the ~5 this project's history treats as the point past
-which a full-suite timing stops being trustworthy; it rose to *14.46*
-mid-run, *peaked at 39.80/37.53/29.65*, and stood at
-*10.27/23.62/27.60* by the time the gate finished. A second, unrelated
-=pytest= process (`gym-cua-lucidchart`, a different repo with its own
-=.venv=, confirmed by =ps aux= at close-out) was running concurrently on
-the same host for part of this window. That process is NOT a tuxemon
-suite and does not touch =~/.tuxemon/cache/l18n=, so it is not a
-violation of this project's one-suite-at-a-time rule and did not
-contaminate this run — but it does share the CPU, so the *1482.14s
-(24:42)* fast-tier wall clock is not a benchmark and must not be
-inherited as one by a future session. For context, the cleanest prior
-reference points are Stream A's *215.32s at 375 tests* and *218.00s at
-356 tests*, both taken at load under 5 — neither is comparable to this
-run either, precisely because this run's load never got near that. The
-pass/fail result and the counts are trustworthy regardless of load; only
-the duration is not.
+*On the timing — this one IS usable, unlike the run it replaced.* The
+final gate ran at load *4.37* rising to no more than *5.02*, below the
+~5 this project treats as the threshold past which a full-suite timing
+stops being trustworthy. So *269.70 s at 404 tests* sits fairly beside
+Stream A's *215.32 s at 375 tests* and S3's *218.00 s at 356 tests*,
+both also taken under load 5: twenty-nine more tests for fifty-four more
+seconds.
+
+The EARLIER gate on this branch is the one that must not be inherited.
+It measured 402 / 4 / 11 in *1482.14 s (24:42)* with load starting at
+8.94/9.13/13.23, peaking at *39.80/37.53/29.65*, and still at
+10.27/23.62/27.60 at the end — with an unrelated =pytest= from another
+repo (=gym-cua-lucidchart=, its own =.venv=) sharing the CPU for part of
+the window. That process is NOT a tuxemon suite and never touches
+=~/.tuxemon/cache/l18n=, so it broke no rule and did not contaminate the
+result — but it did share the machine, and 1482 s is not a benchmark.
+Its pass/fail verdict was trustworthy; only its duration was not.
 
 ** What is NOT covered — stated plainly, not buried
 
