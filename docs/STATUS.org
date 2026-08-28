@@ -1409,28 +1409,26 @@ coverage.
 =make check= =EXIT=0= on =impl/finish-offline-optimizer=:
 
 #+begin_src text
-fast: 372 passed, 4 skipped, 11 warnings
-slow:   4 passed, 372 deselected, 1 warning
+fast: 375 passed, 4 skipped, 11 warnings   in 215.32s (3m35s)
+slow:   4 passed, 375 deselected, 1 warning in  52.65s
 ruff + lint-patched + mypy --strict: green
 #+end_src
 
-Up from S3's close-out =356 / 4 / 11= — *sixteen* net new tests. The
-pinned =patch_series_id= warning table did *not* drift; still exactly
-11. No seventh patch, =patches/= still 6 files, =EXEMPTIONS= still
-=={}=, no format change.
+Up from S3's close-out =356 / 4 / 11= — *nineteen* net new tests, 379
+collected against 360. The pinned =patch_series_id= warning table did
+*not* drift; still exactly 11, verified in a SINGLE-session run (the
+gate is a session-finish hook, so a chunked run would not exercise it
+properly). No seventh patch, =patches/= still 6 files, =EXEMPTIONS=
+still =={}=, no format change.
 
-*On timings: this section deliberately quotes none for the 372-test
-tree.* The final gate ran at load average 19.5 start to finish and
-reported 789.93 s fast / 156.10 s slow; both figures are contaminated
-and must not be inherited. The one Stream A measurement worth keeping is
-an EARLIER gate at *368* tests — 221.78 s fast, 61.88 s slow — taken at
-load 3.52 rising to 8.41, which is broadly comparable to the 218.00 s S3
-measured at load 4.6 and says twelve extra tests cost under four
-seconds. The four tests added after it (=test_optimize_live_capture.py=)
-are ~19 s of engine work measured alone on a quiet host, so a clean
-372-test gate should land near 240 s — *that is an estimate, not a
-measurement, and is flagged as such.* Everything else produced during
-Stream A was taken at load 11-24 and is not quotable at all.
+*On the timing, which is usable.* The 215.32 s run finished with load
+average falling from ~14 to 2.0, so it sits fairly beside S3's 218.00 s
+at 356 tests and load 4.6: *nineteen extra tests for slightly less wall
+clock*. Do not inherit any other figure produced during Stream A —
+several full-suite attempts were made at load 19-29 and reported up to
+789.93 s, and two background gate runs were killed outright mid-run at
+that load. Check =uptime= before quoting anything here, as the S3
+handoff already warned.
 
 * Next subsystem
 
