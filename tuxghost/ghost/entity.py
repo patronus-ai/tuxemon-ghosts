@@ -122,3 +122,105 @@ def hide_ghost(client: Any, npc: Any) -> None:
 def show_ghost(client: Any, npc: Any) -> None:
     """Move the ghost back on-map, restoring it to the drawn set."""
     client.npc_manager.add_npc(npc)
+
+
+def advance_ghost(
+    client: Any, npc: Any, track: GhostTrack, step: int, player_map: str
+) -> None:
+    """Place the ghost for `step`, or hide it when it cannot be placed
+    honestly -- past the end of its track, or on a different map.
+
+    Hidden, never frozen at a stale position and never teleported: a
+    ghost standing motionless on the wrong map reads as a bug, and one
+    left at a stale tile is drawing a position the trace never had.
+
+    Also drives ANIMATION STATE, not just position -- this is the part
+    the brief's original sketch got wrong, per Task 1's probe 2
+    (`docs/2026-08-27-ghost-probes.org`). Measured there: assigning
+    `set_position` alone, every step, leaves `npc.mover.is_moving_state`
+    False forever, so `MapRenderer._get_sprites`
+    (`tuxemon/map/view.py`) always takes its static `get_facing_frame`
+    branch and hands back the *identical* Surface object every step --
+    a sliding statue, not a walk cycle. The probe's measured fix, with
+    no engine patch, is forcing `npc.mover.state` into `WALKING` and
+    playing the matching walk `SurfaceAnimation`
+    (`SpriteController.play_animation`, existing public API) whenever
+    the ghost's tile actually changed since the call before this one,
+    and returning it to `IDLE`/stopped otherwise. "Since the call
+    before this one" is read off `npc.tile_pos` itself -- whatever this
+    function last set it to -- rather than tracked separately, since
+    the NPC object already carries exactly that state between calls.
+    """
+    frame = track.at(step)
+    if frame is None or frame.map_name != player_map:
+        hide_ghost(client, npc)
+        return
+
+    show_ghost(client, npc)
+
+    previous_tile = (int(npc.tile_pos[0]), int(npc.tile_pos[1]))
+    npc.set_position([float(frame.tile[0]), float(frame.tile[1])])
+
+    direction = _direction_from_facing(frame.facing)
+    if direction is not None:
+        npc.set_facing(direction)
+
+    if previous_tile != frame.tile:
+        _walk(npc, direction)
+    else:
+        _stand(npc)
+
+
+def _walk(npc: Any, direction: Any) -> None:
+    """Enter the walking state and play the matching walk animation.
+
+    `direction` may be `None` (an unrecognised facing, see
+    `_direction_from_facing`) -- state still moves to WALKING so
+    `MapRenderer._get_sprites` takes the animated branch, but no
+    specific animation is selected in that case, matching this
+    project's general choice (see `_direction_from_facing`) that a
+    cosmetic gap should never escalate into a crash.
+    """
+    from tuxemon.entity.entity import EntityState
+
+    npc.mover.set_state(EntityState.WALKING)
+    if direction is not None:
+        npc.sprite_controller.play_animation(direction)
+
+
+def _stand(npc: Any) -> None:
+    """Return the ghost to its idle standing pose.
+
+    Both calls matter: `set_state(IDLE)` is what flips
+    `npc.mover.is_moving_state` back to False, which is what
+    `MapRenderer._get_sprites` branches on; `stop_animation()` halts
+    the walk `SurfaceAnimation` so it does not keep silently advancing
+    (unobserved, since the static branch is what actually gets drawn)
+    while the ghost stands still.
+    """
+    from tuxemon.entity.entity import EntityState
+
+    npc.mover.set_state(EntityState.IDLE)
+    npc.sprite_controller.stop_animation()
+
+
+def _direction_from_facing(facing: str) -> Any:
+    """`facing` is stored as `str(Direction.X)` -- confirmed, not
+    guessed: `Direction` (`tuxemon.db`) is a `str, Enum` mixin, and on
+    this project's Python version `str(Direction.UP) ==
+    "Direction.UP"`, not the bare value `"up"` -- matching
+    `tuxghost.digest`'s own `str(player.facing)`. Converts back by
+    name, over `tuxemon.db.Direction` (the brief's guessed
+    `tuxemon.map` does not export it).
+
+    Returns `None` for an unrecognised value rather than raising: a
+    facing this build does not know is a cosmetic problem, and a ghost
+    that crashes the player's session over a sprite direction is a
+    worse one.
+    """
+    from tuxemon.db import Direction
+
+    for direction in Direction:
+        if str(direction) == facing:
+            return direction
+    return None
