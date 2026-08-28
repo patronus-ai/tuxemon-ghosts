@@ -7,24 +7,35 @@ block on window creation or vary machine to machine. This module is the
 single deliberate exception: a human at a real window is the one consumer
 that needs one.
 
-It does NOT threaten determinism. `tuxghost.boot.boot_from_save`'s own
-docstring records the measurement that settles it -- record and replay
-may use different display contexts, and a 300-step per-step digest
-sequence (`tuxghost.digest.digest_of`, not just the final digest) was
-identical at every index between the two. A window changes what is
-DRAWN, not what HAPPENS.
+It does NOT threaten determinism. `tuxghost.boot.build_client`'s own
+docstring records the measurement that settles it (`boot_from_save`
+merely cross-references the same result) -- record and replay may use
+different display contexts, and a 300-step per-step digest sequence
+(`tuxghost.digest.digest_of`, not just the final digest) was identical
+at every index between the two. A window changes what is DRAWN, not
+what HAPPENS.
 
 Kept deliberately thin: `make check` runs headless, so nothing here is
 gated. Every decision lives in `tuxghost.ghost`, which is fully tested.
 
-Ordering note: the ghost track is built BEFORE the real session boots,
-not after. `tuxghost.boot.boot_from_save` restores state onto
-`tuxemon.session.local_session`, a process-wide singleton, and resets it
-on every call -- building the track first (its own throwaway headless
-boot) and only then booting the real, windowed session ensures the
-reset that matters last is the human's own, not the ghost's replay.
-Building it the other way around would silently reset the live player's
-session out from under them.
+Two ordering constraints, in tension, both required:
+
+1. The ghost track is built BEFORE the real session boots. `boot_from_save`
+   restores state onto `tuxemon.session.local_session`, a process-wide
+   singleton, resetting it on every call -- built the other way around,
+   the ghost's own throwaway boot would silently reset the live player's
+   session out from under them.
+2. `tuxemon.map.view`/`tuxemon.graphics` are imported right after
+   `pygame_init()`, before that same ghost-track build, to force their
+   one-time `DISPLAY_CONTEXT` binding (a plain module global; a later
+   reassignment cannot reach a name another module already bound at its
+   own first import -- same guarantee `tuxghost.observe.scaled_context`
+   relies on) to lock in while the real, windowed context is current.
+   Without this, the ghost's build -- always headless, scale 1 -- would
+   be the first thing in the process to import these two modules, and
+   the real window would silently render at the ghost's scale instead
+   of its own. Measured, not guessed: see this task's fix-round-1 report
+   for a before/after probe.
 """
 
 from __future__ import annotations
@@ -62,6 +73,12 @@ def play(
     from tuxghost.observe import FrameRenderer
 
     context = pygame_init()
+
+    # Lock in this real, windowed scale on these two modules' own bound
+    # names BEFORE anything headless (the ghost track build, next) gets a
+    # chance to import them first at scale 1. See "Ordering note 2" above.
+    import tuxemon.graphics
+    import tuxemon.map.view  # noqa: F401
 
     track = build_track(read(ghost_trace)) if ghost_trace is not None else None
 
