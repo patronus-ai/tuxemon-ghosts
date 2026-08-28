@@ -124,6 +124,14 @@ _TRACKED_FILES = (
     "tests/test_ghost_track.py::",
     "tests/test_ghost_entity.py::",
     "tests/test_ghost_pump.py::",
+    # Task 9 (the `play` CLI subcommand and its refusal boundary): reads
+    # only `tests/fixtures/paper_town.save` (no `.tuxghost` trace fixture
+    # at all -- the ghost path under test is a fresh, deliberately
+    # missing/malformed file built in `tmp_path`), so it must warn ZERO
+    # times about `patch_series_id`. Same reasoning as the rest of this
+    # tuple: a future seventh patch must fail loudly here rather than let
+    # a stale read join the ambient noise unnoticed.
+    "tests/test_play_cli.py::",
 )
 _EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS: dict[str, int] = {
     "tests/test_golden.py::test_golden_trace_still_reaches_its_recorded_digest": 1,

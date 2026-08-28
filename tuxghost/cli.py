@@ -1,5 +1,5 @@
 """`tuxghost` command line: `execute`, `verify`, `compare`, `record`, `info`,
-`agent`, `optimize`.
+`agent`, `optimize`, `play`.
 
 Two proven defects from an earlier, deleted CLI (`tuxghost/execute.py`'s
 `_main`, removed in task-12 fix round 1 -- see that module's docstring)
@@ -188,13 +188,19 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
     "record": ("out", "from_save"),
     "agent": ("actions", "from_save", "out", "run_dir"),
     "optimize": ("trace", "edits", "out", "run_dir"),
+    # "ghost" is OPTIONAL (plain windowed play without a ghost passes
+    # `--ghost` as None) -- `_resolve_paths` already skips any argument
+    # whose value is `None`, so listing it here is safe either way.
+    "play": ("ghost", "from_save", "out", "run_dir"),
 }
 
 #: Subcommands that need the vendored `tuxemon/` package importable and
 #: cwd-relative asset loading working -- i.e. anything that actually boots
 #: a session. `info` and `compare` are pure trace-file inspection and need
 #: neither.
-_NEEDS_BOOTSTRAP = frozenset({"execute", "verify", "record", "agent", "optimize"})
+_NEEDS_BOOTSTRAP = frozenset(
+    {"execute", "verify", "record", "agent", "optimize", "play"}
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -325,6 +331,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_opt.add_argument("--checkpoint", type=int, default=64)
     p_opt.add_argument("--out", type=Path, required=True)
     p_opt.add_argument("--run-dir", type=Path, required=True, dest="run_dir")
+
+    p_play = sub.add_parser(
+        "play", help="Play in a window with a ghost, recording the session."
+    )
+    # Optional, unlike every other trace-path argument in this parser:
+    # plain windowed play with no ghost at all is a legitimate mode
+    # (`tuxghost.play.play` treats `None` as "no ghost installed").
+    p_play.add_argument("--ghost", type=Path, default=None)
+    p_play.add_argument(
+        "--from-save", type=Path, required=True, dest="from_save"
+    )
+    p_play.add_argument("--seed", type=int, required=True)
+    p_play.add_argument(
+        "--clock-epoch", type=int, required=True, dest="clock_epoch"
+    )
+    p_play.add_argument("--out", type=Path, required=True)
+    p_play.add_argument("--run-dir", type=Path, required=True, dest="run_dir")
 
     return parser
 
@@ -1342,6 +1365,33 @@ def _optimize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _play(args: argparse.Namespace) -> int:
+    """Wire the one windowed entry point (`tuxghost.play.play`) behind this
+    module's usual refusal boundary. `--ghost` is optional -- `None` means
+    plain windowed play with no ghost installed -- but when it IS given, it
+    must be read through `_read_trace_or_refuse` here, in `_play`, BEFORE
+    `tuxghost.play.play` is ever called: a missing or malformed ghost trace
+    is a REFUSED precondition (exit 2), not the uncaught traceback (exit 1)
+    that would result if `tuxghost.play.play`'s own internal `read()` call
+    were left to hit it first, deep inside a function that has already
+    called `pygame_init()`. See the module docstring's refuse/exit-1
+    distinction, and `tuxghost.play`'s own docstring for why this is the
+    sole subcommand exempt from the dummy-SDL rule."""
+    if args.ghost is not None and _read_trace_or_refuse(args.ghost, False) is None:
+        return 2
+
+    from tuxghost.play import play
+
+    return play(
+        ghost_trace=args.ghost,
+        save=args.from_save,
+        seed=args.seed,
+        clock_epoch=args.clock_epoch,
+        out=args.out,
+        run_dir=args.run_dir,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1378,6 +1428,8 @@ def main(argv: list[str] | None = None) -> int:
         return _agent(args)
     if command == "optimize":
         return _optimize(args)
+    if command == "play":
+        return _play(args)
     if command == "verify":
         return _verify(args.trace, args.allow_mismatch)
     if command == "execute":

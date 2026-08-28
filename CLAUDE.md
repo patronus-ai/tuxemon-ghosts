@@ -56,6 +56,16 @@ Without both, a headless run can block on window/audio device creation
 or behave differently machine to machine, which is exactly the class of
 nondeterminism this whole project exists to eliminate.
 
+**The one exception: `tuxghost play`.** A human at a real window is the
+only consumer in this project that needs one, and it is the only entry
+point permitted to run without the dummy drivers. This does not weaken
+the determinism guarantee: `tuxghost/boot.py`'s `build_client` docstring
+records the measurement — record and replay may use *different* display
+contexts, and a 300-step per-step digest sequence was identical at every
+index between them. A window changes what is drawn, not what happens.
+Every other invocation, including every test, still requires both dummy
+drivers.
+
 ## Never edit `tuxemon/` directly
 
 Every engine change is a patch file under `patches/`, applied with
