@@ -790,9 +790,30 @@ def test_the_player_walks_through_the_ghost() -> None:
 
 - [ ] *Step 5: Demonstrate it can fail*
 
-In =install_ghost=, register the ghost with the collision manager:
-=session.client.map_manager.collision_manager.add_collision(npc, tuple(npc.tile_pos))=
-(confirm the real accessor path first). Run the test, capture the
+*CORRECTED AFTER EXECUTION — the line this plan originally gave here was
+wrong twice over, and both errors were caught by Task 5's implementer and
+independently confirmed by its reviewer.*
+
+The original text suggested
+=session.client.map_manager.collision_manager.add_collision(npc, tuple(npc.tile_pos))=.
+Two defects:
+
+1. =MapManager= has no =collision_manager= attribute at all. The real
+   path is =client.collision_manager=.
+2. Even spelled correctly, a single static =add_collision= at the
+   ghost's spawn tile is a *NO-OP demonstration*: =Entity.set_position=
+   never calls =on_tile_changed=/=add_collision=, so the registration
+   stays on a tile the ghost immediately leaves. Measured: with that
+   mutation applied the test still PASSES and the player reaches
+   (16, 14) unblocked.
+
+*This is the dangerous kind of wrong.* A reader who trusted it would see
+"player not blocked", conclude the ghost is safely non-solid, and have
+proved nothing — the demonstration was broken, not the property.
+
+What actually works: wrap =set_position= so collision is RE-REGISTERED on
+every tile change. Measured with that: the player is genuinely deflected
+and ends (15, 12) instead of (16, 14). Run the test, capture the
 blocked-player failure, restore, re-run, capture the pass.
 
 *If the player is NOT blocked, stop and investigate* — either the
