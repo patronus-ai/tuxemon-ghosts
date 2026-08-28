@@ -21,6 +21,7 @@ runs under the dummy drivers like every other test in the gate.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SAVE = Path(__file__).parent / "fixtures" / "paper_town.save"
+GHOST = Path(__file__).parent / "golden" / "scripted_town_1234.tuxghost"
 
 
 def _run_cli(
@@ -96,6 +98,86 @@ def test_play_refuses_a_malformed_ghost_trace(tmp_path: Path) -> None:
     proc = _run_cli(
         "play",
         "--ghost", str(bad),
+        "--from-save", str(SAVE),
+        "--seed", "1234",
+        "--clock-epoch", "1787659200",
+        "--out", str(out),
+        "--run-dir", str(run_dir),
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert "refused" in proc.stderr
+    assert not out.exists()
+    assert not run_dir.exists()
+
+
+def test_play_refuses_a_missing_from_save(tmp_path: Path) -> None:
+    """I2, whole-branch review: `_play` never validated `--from-save`
+    before this fix -- `--from-save nope.save` reached
+    `tuxghost.play.play`'s own `save.read_text()` AFTER `pygame_init()`
+    had already opened a window, and raised an uncaught
+    `FileNotFoundError` there (exit 1, a real traceback), indistinguishable
+    from "diverged". Every other subcommand in this project treats a
+    missing `--from-save` as a refused precondition (exit 2); `play` must
+    too, and before the window opens -- proven the same way
+    `test_play_refuses_a_missing_ghost_trace` above proves it for
+    `--ghost`: `out`/`run_dir` never come into existence."""
+    out = tmp_path / "o.tuxghost"
+    run_dir = tmp_path / "run"
+    proc = _run_cli(
+        "play",
+        "--from-save", str(tmp_path / "nope.save"),
+        "--seed", "1234",
+        "--clock-epoch", "1787659200",
+        "--out", str(out),
+        "--run-dir", str(run_dir),
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert "refused" in proc.stderr
+    assert not out.exists()
+    assert not run_dir.exists()
+
+
+def _write_ghost_trace_with_unresolvable_map(tmp_path: Path) -> Path:
+    """A structurally valid, digest-consistent ghost trace whose
+    `initial_state.npc_state.current_map` cannot resolve to any map
+    asset -- `tuxghost.trace.read`'s own refuse/warn matrix never checks
+    this (it only recomputes `initial_state_digest`, which this function
+    keeps consistent so the mutated file still reads cleanly), so the
+    only thing that can catch it is a map-resolution check downstream,
+    same as `tuxghost.execute.execute`'s own preamble."""
+    from tuxghost.trace import digest_of_initial_state
+
+    raw = json.loads(GHOST.read_text())
+    raw["initial_state"]["npc_state"]["current_map"] = "no_such_map_xyz"
+    raw["header"]["initial_state_digest"] = digest_of_initial_state(
+        raw["initial_state"]
+    )
+    path = tmp_path / "unresolvable_map.tuxghost"
+    path.write_text(json.dumps(raw))
+    return path
+
+
+def test_play_refuses_a_ghost_trace_whose_map_cannot_be_resolved(
+    tmp_path: Path,
+) -> None:
+    """I3, whole-branch review: an earlier ruling (R1) held that
+    `tuxghost.ghost.track.build_track` may skip `execute`'s
+    map-resolution refusal "because its caller reads the trace through
+    `_read_trace_or_refuse` first" -- false, since that helper never
+    calls `resolve_map_asset`. Before this fix, a ghost trace shaped like
+    this one reached `boot_from_save` (via `build_track`, inside
+    `tuxghost.play.play`, AFTER `pygame_init()`) and raised a bare
+    `ValueError` there -- exit 1, a real traceback -- for what
+    `tuxghost.execute.execute` already treats as a refusable
+    precondition (exit 2) for a played-back trace."""
+    ghost = _write_ghost_trace_with_unresolvable_map(tmp_path)
+    out = tmp_path / "o.tuxghost"
+    run_dir = tmp_path / "run"
+    proc = _run_cli(
+        "play",
+        "--ghost", str(ghost),
         "--from-save", str(SAVE),
         "--seed", "1234",
         "--clock-epoch", "1787659200",
