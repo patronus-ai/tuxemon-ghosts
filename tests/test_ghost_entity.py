@@ -9,7 +9,7 @@ import pytest
 from tuxghost.boot import boot_from_save
 from tuxghost.determinism import pin_clock, seed_all
 from tuxghost.ghost.entity import GHOST_SLUG, install_ghost
-from tuxghost.ghost.track import build_track
+from tuxghost.ghost.track import GhostFrame, GhostTrack, build_track
 from tuxghost.trace import read
 
 SAVE = Path(__file__).parent / "fixtures" / "paper_town.save"
@@ -17,6 +17,56 @@ PARENT = Path(__file__).parent / "golden" / "scripted_town_1234.tuxghost"
 
 SEED = 1234
 CLOCK_EPOCH = 1787659200
+
+
+def _adversarial_tracks(
+    session: Any, client: Any, step_count: int, metadata: GhostTrack
+) -> tuple[GhostTrack, GhostTrack]:
+    """Two tracks for the two safety tests below (I4, whole-branch
+    review): `decoy` is what `install_ghost` places the ghost at, and
+    `adversarial` is what drives `advance_ghost` every tick thereafter,
+    parked on the tile directly below the player's spawn for the WHOLE
+    run -- the parent trace's first four actions are DOWN, so this is
+    squarely in its path, for as long as the run lasts, not just its
+    first step.
+
+    Two tracks, not one, because of a MEASURED timing fact: instrumenting
+    `Pathfinder.is_tile_traversable` shows the collision check for the
+    player's very first move (spawn -> one tile down) fires during
+    `client.update` for step 0 -- i.e. the ghost must already occupy that
+    tile BEFORE `run_steps`' hook(0) call returns. `install_ghost` itself
+    places the ghost via plain `set_position` (a different line, outside
+    `advance_ghost`, unaffected by the mutation this fixture exists to
+    catch), so parking the ghost on the adversarial tile from the start
+    via `install_ghost` alone would never reach `advance_ghost`'s own
+    per-step line at all. `decoy` (a single frame, far from the action)
+    is what `install_ghost` uses instead, so the FIRST real
+    `advance_ghost` call -- at hook(0), before step 0's `client.update` --
+    is a genuine tile change (decoy tile -> adversarial tile), reaching
+    the mutated line before the critical check rather than a same-tile
+    no-op `_stand()` that never touches it.
+    """
+    adversarial_tile = (
+        int(session.player.tile_pos[0]),
+        int(session.player.tile_pos[1]) + 1,
+    )
+    map_name = client.get_map_name()
+    decoy_track = GhostTrack(
+        frames=(GhostFrame(map_name=map_name, tile=(0, 0), facing="Direction.DOWN"),),
+        source_digest=metadata.source_digest,
+        recorder=metadata.recorder,
+        model=metadata.model,
+    )
+    adversarial_frame = GhostFrame(
+        map_name=map_name, tile=adversarial_tile, facing="Direction.DOWN"
+    )
+    adversarial_track = GhostTrack(
+        frames=(adversarial_frame,) * (step_count + 1),
+        source_digest=metadata.source_digest,
+        recorder=metadata.recorder,
+        model=metadata.model,
+    )
+    return decoy_track, adversarial_track
 
 
 def _session() -> Any:
@@ -285,26 +335,57 @@ def test_a_ghost_does_not_change_the_per_step_digest_sequence() -> None:
     `local_session`, and `digests()` is called twice (once per branch),
     so each branch must get its OWN fresh boot rather than share one
     stale `client`/`session` pair with the other branch.
+
+    Whole-branch review, I4: an earlier version of this test only ever
+    called `install_ghost` -- a static, one-time placement -- and never
+    `advance_ghost`, the ONLY per-step ghost API `tuxghost.play` actually
+    uses. Proven hole: mutating `advance_ghost` (`tuxghost/ghost/
+    entity.py:162`) from `set_position` to `complete_tile_entry`, which
+    registers the ghost in `CollisionManager._entity_map`, left this test
+    (and the collision test below) passing regardless -- because neither
+    one ever called `advance_ghost` at all, that line was simply never
+    reached.
+
+    `_adversarial_tracks` (see its docstring) places the ghost on the
+    tile directly below spawn -- squarely in the parent trace's path --
+    for the WHOLE run, and `advance_ghost` is driven from this test's own
+    `hook`, every step, the same per-step call `tuxghost.play` makes.
+    Co-locating the ghost with the player's own CURRENT tile (tried
+    first, mirroring the player's trajectory) turned out NOT to
+    discriminate the mutation below at all, for any lead time tried (1
+    through 10 steps): collision is decided once, at the very first
+    `client.update`, well before a moving ghost following the player's
+    OWN path could ever get there first. A fixed adversarial tile, held
+    for the whole run, is what actually catches it.
     """
     from tuxghost.digest import digest_of
     from tuxghost.execute import _schedule_of
+    from tuxghost.ghost.entity import advance_ghost
     from tuxghost.loop import install_schedule, run_steps
 
     trace = read(PARENT)
-    track = build_track(trace)
+    metadata = build_track(trace)
 
     def digests(with_ghost: bool) -> list[str]:
         session = _session()
         client = session.client
         install_schedule(client, _schedule_of(trace))
+        npc = None
+        adversarial_track = None
         if with_ghost:
-            install_ghost(session, track)
+            decoy_track, adversarial_track = _adversarial_tracks(
+                session, client, trace.header.step_count, metadata
+            )
+            npc = install_ghost(session, decoy_track)
         seen: list[str] = []
-        run_steps(
-            client,
-            trace.header.step_count,
-            hook=lambda i: seen.append(digest_of(session)),
-        )
+
+        def hook(i: int) -> None:
+            if npc is not None:
+                assert adversarial_track is not None
+                advance_ghost(client, npc, adversarial_track, i, client.get_map_name())
+            seen.append(digest_of(session))
+
+        run_steps(client, trace.header.step_count, hook=hook)
         seen.append(digest_of(session))
         return seen
 
@@ -323,28 +404,54 @@ def test_the_player_walks_through_the_ghost() -> None:
     two boots are needed here (with-ghost, without-ghost), and each must
     read its own session, not a stale reference left over from the other
     or from `build_track`'s internal boot.
+
+    Whole-branch review, I4: an earlier version of this test placed the
+    ghost adversarially exactly ONCE, via a static `set_position` call
+    right after `install_ghost`, and never called `advance_ghost` again
+    for the rest of the run -- so only the very first step was ever
+    actually adversarial, and the ONLY per-step ghost API `tuxghost.play`
+    uses (`advance_ghost`) went completely unexercised. Proven hole: see
+    `test_a_ghost_does_not_change_the_per_step_digest_sequence`'s
+    docstring -- the same `complete_tile_entry` mutation left this test
+    passing too.
+
+    `_adversarial_tracks` (see its docstring on the digest test above)
+    places the ghost one tile below spawn -- squarely in the parent
+    trace's path, since its first four actions are DOWN -- for the WHOLE
+    run, and `advance_ghost` is driven from this test's own `hook`,
+    every step, matching the ONLY per-step call `tuxghost.play` makes.
+    The golden track (a DIFFERENT recording) never crosses this player's
+    path, and even the player's OWN trajectory, mirrored with a lead of
+    1 through 10 steps, failed to discriminate the mutation this test
+    exists to catch (collision is decided once, at the very first
+    `client.update`) -- a fixed adversarial tile held for the whole run
+    is what actually works.
     """
     from tuxghost.execute import _schedule_of
+    from tuxghost.ghost.entity import advance_ghost
     from tuxghost.loop import install_schedule, run_steps
 
     trace = read(PARENT)
-    track = build_track(trace)
+    metadata = build_track(trace)
 
     def end_tile(with_ghost: bool) -> tuple[int, int]:
         session = _session()
         client = session.client
         install_schedule(client, _schedule_of(trace))
+        npc = None
+        adversarial_track = None
         if with_ghost:
-            npc = install_ghost(session, track)
-            # One tile DOWN of spawn: the parent's first four actions are
-            # DOWN, so this is squarely in its path.
-            npc.set_position(
-                [
-                    float(session.player.tile_pos[0]),
-                    float(session.player.tile_pos[1]) + 1.0,
-                ]
+            decoy_track, adversarial_track = _adversarial_tracks(
+                session, client, trace.header.step_count, metadata
             )
-        run_steps(client, trace.header.step_count)
+            npc = install_ghost(session, decoy_track)
+
+        def hook(i: int) -> None:
+            if npc is not None:
+                assert adversarial_track is not None
+                advance_ghost(client, npc, adversarial_track, i, client.get_map_name())
+
+        run_steps(client, trace.header.step_count, hook=hook)
         return (int(session.player.tile_pos[0]), int(session.player.tile_pos[1]))
 
     assert end_tile(with_ghost=True) == end_tile(with_ghost=False) == (16, 14)
