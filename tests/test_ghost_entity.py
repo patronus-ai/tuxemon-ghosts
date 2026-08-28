@@ -234,3 +234,82 @@ def test_the_ghost_stands_still_when_it_does_not_move() -> None:
         "the ghost's character-sprite Surface identity changed while "
         "standing still -- a walk animation left running in place"
     )
+
+
+def test_a_ghost_does_not_change_the_per_step_digest_sequence() -> None:
+    """The claim that makes a real engine entity acceptable.
+
+    Asserted on the PER-STEP digest sequence, never on the final digest
+    alone. A final-digest comparison would be vacuous here: this project
+    measured candidates 146 steps apart reaching the identical digest,
+    because a settled end state cannot detect a perturbation. See
+    docs/STATUS.org, "Settled end states cannot detect a perturbation".
+
+    `_session()` is called AFTER `build_track`, inside `digests()`, each
+    time it runs -- `build_track` itself boots (and so resets)
+    `local_session`, and `digests()` is called twice (once per branch),
+    so each branch must get its OWN fresh boot rather than share one
+    stale `client`/`session` pair with the other branch.
+    """
+    from tuxghost.digest import digest_of
+    from tuxghost.execute import _schedule_of
+    from tuxghost.loop import install_schedule, run_steps
+
+    trace = read(PARENT)
+    track = build_track(trace)
+
+    def digests(with_ghost: bool) -> list[str]:
+        session = _session()
+        client = session.client
+        install_schedule(client, _schedule_of(trace))
+        if with_ghost:
+            install_ghost(session, track)
+        seen: list[str] = []
+        run_steps(
+            client,
+            trace.header.step_count,
+            hook=lambda i: seen.append(digest_of(session)),
+        )
+        seen.append(digest_of(session))
+        return seen
+
+    assert digests(with_ghost=True) == digests(with_ghost=False)
+
+
+def test_the_player_walks_through_the_ghost() -> None:
+    """The claim that would silently corrupt every recorded trace. A
+    solid ghost blocks the player, changing where they end up -- so the
+    ghost is placed DIRECTLY in the player's path and the run is compared
+    against the same run with no ghost at all.
+
+    `_session()` is called AFTER `build_track`, inside `end_tile()`, each
+    time it runs -- see the matching comment on
+    `test_a_ghost_does_not_change_the_per_step_digest_sequence` for why:
+    two boots are needed here (with-ghost, without-ghost), and each must
+    read its own session, not a stale reference left over from the other
+    or from `build_track`'s internal boot.
+    """
+    from tuxghost.execute import _schedule_of
+    from tuxghost.loop import install_schedule, run_steps
+
+    trace = read(PARENT)
+    track = build_track(trace)
+
+    def end_tile(with_ghost: bool) -> tuple[int, int]:
+        session = _session()
+        client = session.client
+        install_schedule(client, _schedule_of(trace))
+        if with_ghost:
+            npc = install_ghost(session, track)
+            # One tile DOWN of spawn: the parent's first four actions are
+            # DOWN, so this is squarely in its path.
+            npc.set_position(
+                [
+                    float(session.player.tile_pos[0]),
+                    float(session.player.tile_pos[1]) + 1.0,
+                ]
+            )
+        run_steps(client, trace.header.step_count)
+        return (int(session.player.tile_pos[0]), int(session.player.tile_pos[1]))
+
+    assert end_tile(with_ghost=True) == end_tile(with_ghost=False) == (16, 14)
