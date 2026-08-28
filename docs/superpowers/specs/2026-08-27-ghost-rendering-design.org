@@ -1,0 +1,279 @@
+#+TITLE: S4 — ghost rendering for Tuxemon
+#+DATE: 2026-08-27
+#+STATUS: designed, not implemented
+
+* What this is
+
+S4 lets a human *play Tuxemon in a real window with a ghost running
+alongside them* — a second character replaying a recorded =.tuxghost=
+trace, drawn by the engine with correct occlusion, that the player can
+see but cannot touch. The session records itself as a normal trace, so
+today's run becomes tomorrow's ghost.
+
+Where S1 replays traces, S2 drives a live agent and S3 edits traces
+offline, S4 is the first subsystem in this project whose consumer is a
+*person at a screen*.
+
+Two sources feed it, and both matter:
+
+- *Ghosts come from any existing trace* — the committed goldens, an S2
+  agent run, an S3 optimizer winner, or a previously recorded human run.
+- *Live play produces traces*, via the existing =Recorder=, so the output
+  is accepted unchanged by =verify=, =compare=, the optimizer and by S4
+  itself.
+
+* Non-goals
+
+- *Not a visual regression differ.* Rendering two traces into a filmstrip
+  falls out of the same track data for free and may be built later; it is
+  not what this spec delivers.
+- *Not multiplayer, not networked, not a race against a live opponent.*
+- *No new trace format, no format-version bump, no new header field.* A
+  ghost is derived from a trace that already exists.
+- *No change to what =state_of= digests.*
+
+* What already exists, verified on this tree
+
+These were re-checked while writing this spec, not inherited from an
+earlier document.
+
+| fact | where |
+|------+-------|
+| =pygame_init()=, the real windowed init, beside =headless_init()= | =tuxemon/prepare.py= |
+| =build_client(seed, clock_epoch, context=...)= accepts an injected context "INSTEAD of calling =headless_context()=" | =tuxghost/boot.py= |
+| *Record and replay may use different contexts: MEASURED digest-neutral*, a 300-step per-step digest sequence identical at every index | =tuxghost/boot.py= |
+| =run_steps(client, n, hook)= is =hook(i)= then =client.update(FIXED_DT)=, nothing else | =tuxghost/loop.py= |
+| =install_schedule= replaces =process_events= outright — the established way to intercept input here | =tuxghost/loop.py= |
+| =MapRenderer._get_npc_surfaces= iterates =npc_manager.npcs.values()= and feeds the layered draw | =tuxemon/map/view.py= |
+| =NPCManager.add_npc= is public and synchronous, taking effect before the caller returns | =tuxemon/npc_manager.py=, =tuxghost/boot.py= |
+| =get_persistent_npc_states= filters on =npc.persistence=, which defaults =False= | =tuxemon/npc_manager.py= |
+| =CollisionManager= keeps a separate =_entity_map= populated only by explicit =add_collision(entity, pos)= calls | =tuxemon/map/collision_manager.py= |
+| =FrameRenderer.surface()= returns the composited frame; rendering is digest-neutral, pinned twice | =tuxghost/observe.py=, =tests/test_observe.py= |
+
+*The consequence, and it is the reason this subsystem is small*: a ghost
+NPC added through =add_npc= is *drawn with correct occlusion* because the
+renderer already iterates the NPC manager; it is *not solid* because
+collision is opt-in and we never opt in; and it is *invisible to the
+digest* because =persistence= defaults to =False=. Drawing, non-collision
+and digest-invisibility all fall out of existing public API.
+
+*Therefore S4 is expected to need NO seventh patch.* If the translucency
+probe below forces one, that is argued in the open, not slipped in.
+
+* Architecture
+
+The governing constraint is that =make check= runs headless, so anything
+requiring a window cannot be gated. The split follows from it: *put every
+decision in the headless-testable half and leave the window a shell.*
+
+** =tuxghost/ghost.py= — all behaviour, fully gated
+
+- =GhostTrack= — =step -> (map, tile_pos, facing)=, plus the source
+  trace's =final_digest= and =provenance= so a ghost can say what it is
+  and be checked against the trace it claims to come from.
+- =build_track(trace) -> GhostTrack=.
+- =install_ghost(client, track) -> NPC=.
+- =advance_ghost(npc, track, step)=.
+- =steps_owed(accumulator, elapsed, cap) -> (n, remainder)= — the
+  accumulator maths, pure, so the catch-up cap is tested rather than
+  trusted.
+
+** =tuxghost/play.py= — the window, and as little else as possible
+
+Boots via =pygame_init()= through =build_client(..., context=)=; runs the
+pump; blits =FrameRenderer.surface()= to the display and flips; wires a
+=Recorder=. *Target: under ~100 lines, containing no decision worth
+testing.* Anything with a judgement in it belongs in =ghost.py=.
+
+** Untouched
+
+=loop.py=, =boot.py=, =execute.py=, =digest.py=, =record.py=,
+=observe.py=, =patches/=. S4 is additive.
+
+* The ghost track
+
+=build_track= boots the trace exactly as =execute= does (=boot_from_save=
++ =install_schedule=) but drives =run_steps= with its own hook recording
+only =client.get_map_name()=, =player.tile_pos= and =str(player.facing)=
+— three attribute reads.
+
+*It deliberately does NOT reuse =execute(checkpoint=1,
+capture_states=True)=.* That hook runs =digest_of= AND =state_of= on
+every step: a full hash plus a full save-serialization (party, items,
+monsters) per step, when three fields are needed. On a 900-step trace
+that is 900 of each, and the digest half is entirely wasted.
+
+** The tail trap
+
+=run_steps= calls =hook(i)= *before* =client.update(FIXED_DT)=, so the
+hook observes the state *entering* step =i= and never sees the state
+after the final update. A track built from the hook alone is one sample
+short.
+
+=build_track= must take an explicit final sample after =run_steps=
+returns, and the invariant is asserted *arithmetically* —
+=len(track) == step_count + 1= — never via a digest. This is the same
+defect class that produced a 432-step script for a 442-step trace
+(=lift=) and dropped the parent's last 10 steps (=seal='s identity
+control). In both cases *the digest could not see it*.
+
+* The ghost entity
+
+=install_ghost= constructs an NPC, calls =npc_manager.add_npc=, leaves
+=persistence= at its =False= default, and *never* calls =add_collision=.
+
+=advance_ghost= sets position and facing from =track[step]=. The ghost is
+*hidden* — not frozen, not teleported — when the track's map differs from
+the player's current map, or when =step= runs past the track. A ghost
+standing motionless on the wrong map reads as a bug.
+
+*Hidden means REMOVED from the NPC manager* (=remove_npc(slug)=), and
+re-added on return. Not "parked off-screen": an NPC left in
+=npc_manager.npcs= is still iterated by =_get_npc_surfaces= every frame,
+so parking it relies on the camera never reaching it — which a player can
+falsify by walking there. Transitions are rare (a map change, the end of
+the track), so the add/remove churn is negligible.
+
+*The ghost's slug* is a fixed, reserved value — =ghost= — chosen so it
+cannot collide with the player slug (=npc_red= in the committed save) or
+with any map NPC. The slug is load-bearing twice over:
+=get_persistent_npc_states= filters on =npc.slug != player_slug=, and
+=remove_npc= is keyed by slug. A slug collision with a real map NPC would
+mean =install_ghost= silently displacing that NPC, so the reserved slug
+must be asserted absent from =npc_manager.npcs= before the ghost is added,
+and =install_ghost= must refuse rather than overwrite.
+
+*The ghost's sprite* is the same one the player uses, so a ghost reads as
+"another you" rather than a stranger. Distinction comes from the
+translucency treatment (probe 1); if that probe fails, from a visually
+distinct sprite instead.
+
+* The live pump and recording
+
+Fixed-timestep accumulator. While =accumulator >= FIXED_DT=: =run_steps(
+client, 1)=, increment the step counter, =advance_ghost=, subtract. Then
+draw once and flip. Catch-up is *capped* (5 steps per frame) so a slow
+frame cannot spiral; past the cap, wall-clock time is dropped.
+
+*Why dropping time is safe, and it is the nicest property in this
+design*: everything is step-indexed. Dropping wall-clock time makes the
+game feel slow; it cannot make the recording wrong and it cannot desync
+the ghost, because player and ghost are both indexed by step, never by
+time. *Frame drops degrade smoothness, never correctness.*
+
+** Input, and recording it
+
+=install_schedule= is NOT called; upstream's real =process_events= runs
+and reads the keyboard. Recording wraps =process_events= with a
+decorator appending =(step, button, value)= per yielded =PlayerInput= —
+the same interception technique =install_schedule= already uses, so this
+is the established pattern here rather than a new one.
+
+Two things must hold:
+
+1. The recorded step is the step the event was *delivered* at, read from
+   the pump's own counter, so replay delivers it at the same index.
+2. *=PlayerInput.timestamp= never enters the trace.* =CLAUDE.md= is
+   explicit that upstream's =time.time()= default is excluded by design,
+   and live play is the one path where a real timestamp is sitting there
+   to be captured by accident.
+
+* CLI
+
+: tuxghost play --ghost TRACE --from-save SAVE --seed N --clock-epoch N \
+:     --out RECORDED.tuxghost --run-dir DIR
+
+Mirrors =agent='s argument shape. =--ghost= is optional: with none, this
+is plain windowed play that still records.
+
+* The dummy-SDL carve-out
+
+=CLAUDE.md= requires =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy= on
+every invocation touching the client. =play= is *the single deliberate
+exception in this project* and must say so loudly: a module docstring
+explaining why (a human at a real window is the one consumer that needs
+one; the display context is measured digest-neutral, so determinism is
+unaffected), plus a =CLAUDE.md= amendment naming =play= as the sole
+carve-out.
+
+Amend the rule explicitly rather than leave a future session to find a
+window being opened and assume the rule was forgotten.
+
+* Validation
+
+Every test below must be *demonstrated to fail* against the defect it
+pins, with real before/after output in the report.
+
+** The two safety claims
+
+1. *The ghost is digest-invisible.* Run a scripted trace with and without
+   a ghost installed; assert the *per-step digest sequence* is identical,
+   not merely the final digest. Final-digest-only would be vacuous: this
+   project measured candidates 146 steps apart reaching the identical
+   digest. Demonstrate with =persistence=True=.
+2. *The ghost is non-colliding.* Install it on the tile the player is
+   about to enter; assert the player ends where it would have without
+   the ghost. Demonstrate by calling =add_collision= for it. This is the
+   claim that would silently corrupt every recorded trace, so it gets the
+   most adversarial fixture available.
+
+** The track
+
+3. =len(track) == step_count + 1=, asserted arithmetically. Demonstrate
+   by dropping the final sample.
+4. The cheap hook agrees with =state_of=: the track's fields at sampled
+   steps equal what =execute(..., capture_states=True)= reports for a
+   committed trace. Guards the shortcut — a fast path that disagrees with
+   the canonical one means the ghost is drawing a lie.
+
+** The recording loop
+
+5. *A recorded "live" session replays faithfully.* Drive the recording
+   wrapper headlessly with synthetic events, write the trace, assert
+   =verify() == 0=. No window needed — this is what the module split
+   exists to make possible.
+6. *No =timestamp= in the written artifact*, asserted on the file.
+
+** Boundaries
+
+7. Ghost hidden on map mismatch and past track end, and *hidden means
+   absent from =npc_manager.npcs=*, asserted on the manager rather than
+   on what happens to be on screen.
+8. =install_ghost= *refuses* when the reserved slug is already present,
+   rather than displacing an existing NPC. Demonstrate by pre-adding an
+   NPC under that slug.
+
+** Pump
+
+9. =steps_owed= — catch-up under load, the cap, and that time is dropped
+   rather than steps skipped.
+
+** What cannot be tested, stated honestly
+
+The window opening, real keyboard input, and whether the ghost *looks*
+right. Those need a human at a screen. That is the argument for keeping
+=play.py= thin and decision-free.
+
+* Two probes before implementation
+
+Either could change this design, so both come first.
+
+1. *Translucency.* A real engine entity buys correct occlusion but NOT
+   transparency — the engine draws NPC sprites opaque. Expected to be
+   solvable by =set_alpha= on the ghost NPC's own loaded sprite surfaces
+   at install time, since the renderer blits whatever surface the sprite
+   hands it. If that fails, the fallback is a visually distinct sprite,
+   and translucency becomes a separate argued question about a patch.
+2. *Animation.* Setting position per step may produce a *sliding statue*
+   rather than a walking character; the walk cycle is normally driven by
+   the engine's movement system, not by position assignment. The track
+   carries =facing=, which should at least select the right directional
+   frame. A sliding ghost would undercut the reason a real entity was
+   chosen over a drawn marker.
+
+* Invariants at close-out
+
+- No seventh patch (unless probe 1 forces one, argued in the open).
+- =EXEMPTIONS == {}=.
+- No format change, no format-version bump.
+- =make check= green, run alone, on a host whose =uptime= was checked.
