@@ -1,5 +1,5 @@
 """`tuxghost` command line: `execute`, `verify`, `compare`, `record`, `info`,
-`agent`, `optimize`.
+`agent`, `optimize`, `play`.
 
 Two proven defects from an earlier, deleted CLI (`tuxghost/execute.py`'s
 `_main`, removed in task-12 fix round 1 -- see that module's docstring)
@@ -188,13 +188,19 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
     "record": ("out", "from_save"),
     "agent": ("actions", "from_save", "out", "run_dir"),
     "optimize": ("trace", "edits", "out", "run_dir"),
+    # "ghost" is OPTIONAL (plain windowed play without a ghost passes
+    # `--ghost` as None) -- `_resolve_paths` already skips any argument
+    # whose value is `None`, so listing it here is safe either way.
+    "play": ("ghost", "from_save", "out", "run_dir"),
 }
 
 #: Subcommands that need the vendored `tuxemon/` package importable and
 #: cwd-relative asset loading working -- i.e. anything that actually boots
 #: a session. `info` and `compare` are pure trace-file inspection and need
 #: neither.
-_NEEDS_BOOTSTRAP = frozenset({"execute", "verify", "record", "agent", "optimize"})
+_NEEDS_BOOTSTRAP = frozenset(
+    {"execute", "verify", "record", "agent", "optimize", "play"}
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -325,6 +331,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_opt.add_argument("--checkpoint", type=int, default=64)
     p_opt.add_argument("--out", type=Path, required=True)
     p_opt.add_argument("--run-dir", type=Path, required=True, dest="run_dir")
+
+    p_play = sub.add_parser(
+        "play", help="Play in a window with a ghost, recording the session."
+    )
+    # Optional, unlike every other trace-path argument in this parser:
+    # plain windowed play with no ghost at all is a legitimate mode
+    # (`tuxghost.play.play` treats `None` as "no ghost installed").
+    p_play.add_argument("--ghost", type=Path, default=None)
+    p_play.add_argument(
+        "--from-save", type=Path, required=True, dest="from_save"
+    )
+    p_play.add_argument("--seed", type=int, required=True)
+    p_play.add_argument(
+        "--clock-epoch", type=int, required=True, dest="clock_epoch"
+    )
+    p_play.add_argument("--out", type=Path, required=True)
+    p_play.add_argument("--run-dir", type=Path, required=True, dest="run_dir")
 
     return parser
 
@@ -1342,6 +1365,110 @@ def _optimize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ghost_trace_map_or_refuse(trace: Trace) -> bool:
+    """`True` if `trace.initial_state` is a bootable `SaveData` whose
+    `npc_state.current_map` resolves to a real map asset; otherwise prints
+    a `refused: ...` line and returns `False`.
+
+    Whole-branch review, I3: `tuxghost.ghost.track.build_track`'s own
+    docstring claims it may skip this check "because its caller reads the
+    trace through `_read_trace_or_refuse` first" -- that claim was false
+    until this function existed. `_read_trace_or_refuse` only maps
+    `Refused`/`OSError`/JSON/`ValidationError` on the trace FILE itself; it
+    never calls `resolve_map_asset` on `trace.initial_state`, so a ghost
+    trace whose `npc_state.current_map` cannot be resolved reached
+    `tuxghost.boot.boot_from_save` (via `build_track`, inside
+    `tuxghost.play.play`, AFTER `pygame_init()` had already opened a
+    window) and raised a bare `ValueError` there -- an exit-1 traceback for
+    what is a refusable precondition, not a divergence. Mirrors
+    `tuxghost.execute.execute`'s own preamble checks (same order, same
+    messages) so a ghost trace and a played-back trace are refused
+    identically."""
+    from tuxemon.save_system.save_state import SaveData
+
+    from tuxghost.boot import resolve_map_asset
+
+    try:
+        save_data = SaveData.model_validate(trace.initial_state)
+    except ValidationError as exc:
+        print(
+            f"refused: --ghost trace's initial_state does not validate as "
+            f"a SaveData: {exc}",
+            file=sys.stderr,
+        )
+        return False
+
+    if save_data.npc_state is None or save_data.npc_state.current_map is None:
+        print(
+            "refused: --ghost trace's initial_state.npc_state.current_map "
+            "is required to build a ghost track (see tuxghost.boot"
+            ".boot_from_save)",
+            file=sys.stderr,
+        )
+        return False
+
+    if resolve_map_asset(save_data.npc_state.current_map) is None:
+        print(
+            "refused: --ghost trace's initial_state.npc_state.current_map="
+            f"{save_data.npc_state.current_map!r} resolves to no map asset "
+            "(tried it as given and with a .tmx extension)",
+            file=sys.stderr,
+        )
+        return False
+
+    return True
+
+
+def _play(args: argparse.Namespace) -> int:
+    """Wire the one windowed entry point (`tuxghost.play.play`) behind this
+    module's usual refusal boundary.
+
+    Two preconditions are checked here, both BEFORE `tuxghost.play.play`
+    (and so `pygame_init()`) is ever called:
+
+    * `--from-save`, through `_agent_save_or_refuse` -- the same read,
+      parse, validate and map-resolve sequence `agent` already uses.
+      Whole-branch review, I2: an earlier version of this function never
+      validated `--from-save` at all, so `--from-save nope.save` opened a
+      window via `pygame_init()` and then raised an uncaught
+      `FileNotFoundError` (exit 1) out of `tuxghost.play.play`'s own
+      `save.read_text()` -- indistinguishable from "diverged", for what is
+      a refusable precondition like every other subcommand's.
+    * `--ghost`, when given, is optional -- `None` means plain windowed
+      play with no ghost installed -- but when it IS given, it must be
+      read through `_read_trace_or_refuse` here, THEN map-checked through
+      `_ghost_trace_map_or_refuse` (I3, see that function's docstring): a
+      missing, malformed, or map-unresolvable ghost trace is a REFUSED
+      precondition (exit 2), not the uncaught traceback (exit 1) that
+      would result if `tuxghost.play.play`'s own internal `read()`/
+      `build_track()` calls were left to hit it first, deep inside a
+      function that has already called `pygame_init()`.
+
+    See the module docstring's refuse/exit-1 distinction, and
+    `tuxghost.play`'s own docstring for why this is the sole subcommand
+    exempt from the dummy-SDL rule."""
+    if _agent_save_or_refuse(args) is None:
+        return 2
+
+    if args.ghost is not None:
+        ghost_trace = _read_trace_or_refuse(args.ghost, False)
+        if ghost_trace is None:
+            return 2
+        if not _ghost_trace_map_or_refuse(ghost_trace):
+            return 2
+
+    from tuxghost.play import play
+
+    return play(
+        ghost_trace=args.ghost,
+        save=args.from_save,
+        seed=args.seed,
+        clock_epoch=args.clock_epoch,
+        out=args.out,
+        run_dir=args.run_dir,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1378,6 +1505,8 @@ def main(argv: list[str] | None = None) -> int:
         return _agent(args)
     if command == "optimize":
         return _optimize(args)
+    if command == "play":
+        return _play(args)
     if command == "verify":
         return _verify(args.trace, args.allow_mismatch)
     if command == "execute":
