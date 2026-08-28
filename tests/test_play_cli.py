@@ -107,3 +107,39 @@ def test_play_refuses_a_malformed_ghost_trace(tmp_path: Path) -> None:
     assert "refused" in proc.stderr
     assert not out.exists()
     assert not run_dir.exists()
+
+
+def test_a_relative_ghost_path_resolves_against_the_callers_cwd(
+    tmp_path: Path,
+) -> None:
+    """`_resolve_paths` must resolve `--ghost` against the CALLER's cwd
+    BEFORE `_bootstrap_vendored_tuxemon` chdirs into the vendored
+    `tuxemon/` tree -- the exact defect an earlier, deleted CLI shipped
+    with (see `tuxghost/cli.py`'s module docstring).
+
+    The two refusal tests above use only ABSOLUTE `--ghost` paths, so
+    they would keep passing even if `_PATH_ARGS["play"]` lost its
+    `"ghost"` entry entirely: an unresolved relative path still fails to
+    read (from inside `tuxemon/`, where the process has by then chdir'd)
+    and still exits 2 either way. What differs is WHICH path the refusal
+    names -- resolved against `tmp_path` when the fix is in place, a bare
+    unresolved "nope.tuxghost" (silently read against the wrong
+    directory) when it is not. This test pins that, not just the exit
+    code, exactly the way `tests/test_optimize_cli.py::
+    test_a_relative_trace_path_works` pins the same property for
+    `optimize --trace`.
+    """
+    proc = _run_cli(
+        "play",
+        "--ghost", "nope.tuxghost",
+        "--from-save", str(SAVE),
+        "--seed", "1234",
+        "--clock-epoch", "1787659200",
+        "--out", str(tmp_path / "o.tuxghost"),
+        "--run-dir", str(tmp_path / "run"),
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "Traceback" not in proc.stderr
+    resolved = tmp_path / "nope.tuxghost"
+    assert str(resolved) in proc.stderr, proc.stderr
