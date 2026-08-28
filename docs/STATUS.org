@@ -852,6 +852,17 @@ parent fixture that does not end mid-dialogue — not a code change.
 operational conclusion is the same, but the reason is "it never improved",
 not "it never moved".)
 
+*CLOSED, 2026-08-27, by Stream A.* The gap this section names — "the
+distance term's role in acceptance is untested" — is closed, and exactly
+the way this section predicted: with a new parent fixture, not a code
+change. =tests/golden/scripted_town_1234.tuxghost= (176 steps, ends
+=[16, 14]= on a bare =WorldState=) is the optimizer's parent now;
+=claude_town_1234= keeps its live-model provenance role in
+=tests/test_live_capture.py= and is retained as a parametrized
+adversarial case in =tests/test_optimize_runner.py=. Everything above
+remains true *of that trace*; it is no longer true of the suite. See
+"Stream A — finishing S3" below.
+
 ** Tuning: measured, and the budget is still the binding constraint
 
 Full raw table in =docs/2026-08-27-optimizer-tuning.org=. Nine CLI runs,
@@ -1220,6 +1231,128 @@ EXIT=0
   =238.62 s= reference at load ~5, treat this as "still well under the
   600-second cap" and nothing more. A clean re-measurement needs a
   quiescent host.
+
+* Stream A — finishing S3
+
+Four items the S3 close-out left open (=docs/2026-08-27-next-session-
+handoff.org=). Three are done and measured; the fourth is half done.
+
+** A1 — the parent fixture, replaced
+
+=tests/golden/scripted_town_1234.tuxghost= is the optimizer's parent
+now. 176 steps, =lead_in 0=, 16 inputs, 8 actions, ends
+=spyder_paper_town.tmx= tile =[16, 14]= facing RIGHT with
+=state_stack == ['WorldState']=, =verify() == 0=, digest
+=9eed41f8f05a2ac5f4ddab969eb3aba46c6768f541d22e01c6f16a45bd9270d6=. Its
+=patch_series_id= matches this build, so it warns *zero* times — the
+same asymmetry =claude_town_1234= has, and it is tracked in
+=tests/conftest.py= on that basis. Recorded by =--policy scripted=, so
+=provenance.recorder= is ="human"=, like =walk_1234=.
+
+The actions file and =run.json= that produced it are committed beside
+it under =tests/fixtures/=; the run directory's =frames/= (580 KB of
+PNGs) deliberately are not.
+
+*Measured, and this is the reason it exists* — with target =(19, 14)=:
+
+| edit | score |
+|------+-------|
+| parent | (0.0, -3.0, -176.0) |
+| append RIGHT ×1 | (0.0, -2.0, -198.0) |
+| append RIGHT ×2 | (0.0, -1.0, -220.0) |
+| append RIGHT ×3 | (0.0, -0.0, -242.0) — arrived |
+| append LEFT ×1 | (0.0, -4.0, -198.0) |
+| delete last ×1 | (0.0, -4.0, -154.0) |
+
+Appended input reaches the player: UP, LEFT and RIGHT all move the end
+tile; DOWN is blocked by a wall. =tests/test_scripted_parent.py= pins
+this, and was demonstrated failing against the retired parent
+(="appending RIGHT did not get closer to the target; this parent's
+input is being swallowed and the distance term is dead"=).
+
+=claude_town_1234= is NOT deleted. It keeps its live-model provenance
+role in =tests/test_live_capture.py= and is retained as a parametrized
+adversarial case in =tests/test_optimize_runner.py=.
+
+*The edit pair inverts, and that is the trap.* Against the retired
+parent a DELETE improved and an APPEND worsened; against this one an
+APPEND toward the target improves and a DELETE *worsens*, because it
+buys steps at the cost of distance and distance outranks steps.
+Demonstrated by giving the new parent the old one's edit kinds:
+=score sequence went backwards: [(0.0, -3.0, -176.0), (0.0, -4.0,
+-154.0), (0.0, -4.0, -154.0)]=. Four further tests turned out to depend
+on the old parent's shape in non-mechanical ways — a hardcoded
+=Insert(18, ...)= that became an out-of-range rejection rather than a
+=max_cost= one, a =_BrokenThenGoodEditor= whose "good" edit stopped
+being good, a =--max-cost 400= that flipped from below the parent's
+cost to above it, and checkpoint expectations that could not
+distinguish =<= from =<== at the boundary.
+
+That last one is now *stronger* than before: 176 is an exact multiple
+of 16, so =checkpoint=16= discriminates whether =step_count= itself is
+sampled. It is not. At 442/64 the next multiple lay past the end
+regardless, so a =<== implementation would have passed untouched.
+
+** A2 — =ReachTile.TERMS[0]= relabelled
+
+=("-off_target_map", "-distance_to_target", "-steps")=. Term 0 is =0.0=
+on the target map and =-1.0= off it, so the old =on_target_map= told a
+model the good value was false. All three terms now read uniformly as
+negated cost, 0 best. Pinned by an invariant over the values, not a
+string comparison: a term that goes negative for the worse of two
+candidates is a cost and must be named as one.
+
+** A3 — =optimize='s =run.json= records =goal=
+
+The effective string handed to the editor, and =null= for the three
+editors that read none — a true statement rather than a dropped field.
+Confirmed in the real baseline runs below: ="goal": null= for
+=--editor mutation=.
+
+*Adjacent gap, NOT closed*: nothing refuses =--goal= on a non-claude
+editor, so a typed =--goal= is silently ignored there. This is the same
+misattribution class that =--seed= on a non-mutation editor already
+refuses (=tuxghost/cli.py=). =run.json= is honest either way; the CLI
+is not.
+
+** A4 — half measured
+
+The =MutationEditor= baseline is run and real; see
+=docs/2026-08-27-editor-comparison.org= for the table. Headline: at 32
+rounds, seeds 1/2/3 reach =(0, -0, -186)=, =(0, -2, -125)= and
+=(0, -0, -185)= from a =(0, -3, -176)= parent — *two of three arrive at
+the target tile*, which never happened once in the whole nine-run sweep
+against the retired parent.
+
+*The =ClaudeEditor= side was not run.* No Anthropic credential was
+readable by that session, so there is still *no live-model evidence for
+=ClaudeEditor= anywhere in this project* and every one of its tests
+remains stubbed. That is unchanged from S3's close-out and must not be
+read as anything else.
+
+** Test state after Stream A
+
+=make check= =EXIT=0= on =impl/finish-offline-optimizer=:
+
+#+begin_src text
+fast: 368 passed, 4 skipped, 11 warnings   in 221.78s (3m41s)
+slow:   4 passed, 368 deselected, 1 warning in  61.88s
+ruff + lint-patched + mypy --strict: green
+#+end_src
+
+Up from S3's close-out =356 / 4 / 11= — twelve net new tests. The pinned
+=patch_series_id= warning table did *not* drift; still exactly 11. No
+seventh patch, =patches/= still 6 files, =EXEMPTIONS= still =={}=, no
+format change.
+
+*On the timing.* The gate began at load average 3.52 and ended at 8.41,
+so 221.78 s is broadly comparable to the 218.00 s S3 measured at load
+4.6 — twelve more tests for under four seconds. It was NOT taken on an
+idle host and should not be treated as a clean benchmark. Every other
+figure produced during Stream A (the fast-suite run at 568 s, all the
+per-file runs, and the three baseline optimize runs) was taken at load
+11-24 and is *not quotable at all* — the same caution the S3 handoff
+raised about its own numbers.
 
 * Next subsystem
 

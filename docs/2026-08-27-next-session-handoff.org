@@ -1,5 +1,55 @@
 #+TITLE: Handoff — two parallel streams from S3's merge
 #+DATE: 2026-08-27
+#+STATUS: Stream A is DONE except A4's live half. Stream B is untouched.
+
+* UPDATE, later on 2026-08-27 — read this before the rest of the file
+
+Stream A was executed on branch =impl/finish-offline-optimizer=.
+*A1, A2 and A3 are done and measured*; =docs/STATUS.org='s "Stream A —
+finishing S3" section is the authority on what landed, and this file's
+Stream A section below is now history, not instructions.
+
+Two things below are *wrong* as written and were corrected by execution:
+
+1. A3 is described as "=optimize='s =run.json= carries no goal ... one
+   line". The =--goal= FLAG already existed on =optimize= and
+   =ClaudeEditor= already read it (=tuxghost/cli.py=); what was missing
+   was only the =run.json= write. Narrower than the text implies.
+2. A1 is described as "commit it ... give it a =verify() == 0= test".
+   That undersells it. Replacing the parent is not a fixture swap:
+   =tests/test_optimize_runner.py= was *architected around the retired
+   parent's immovability*, and the improving/worsening edit pair
+   INVERTS against the new one. Four further tests depended on the old
+   parent's shape in ways that were not mechanical renumbering. See
+   =STATUS.org=.
+
+*What remains of Stream A: A4's live half only.* The =MutationEditor=
+baseline is run (=docs/2026-08-27-editor-comparison.org=); the
+=ClaudeEditor= runs are not, for want of a readable credential. The
+three commands needed, once =ANTHROPIC_API_KEY= is exported:
+
+#+begin_src bash
+for R in 1 2 3; do
+  SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  ./.venv/bin/python -m tuxghost.cli optimize \
+    --trace tests/golden/scripted_town_1234.tuxghost \
+    --editor claude \
+    --objective reach-tile --target spyder_paper_town.tmx:19,14 \
+    --rounds 32 --patience 32 --max-rejections 32 --max-cost 4000 \
+    --out /tmp/cla_r${R}.tuxghost --run-dir /tmp/cla_r${R}
+done
+#+end_src
+
+Same parent, target and four bounds as the baseline, which is what makes
+the comparison the spec's permitted one. Then commit the three
+transcripts as =ReplayEditor= fixtures with their =run.json=s, add a
+=tests/test_optimize_live_capture.py= in the shape of
+=tests/test_live_capture.py=, and fill in the Claude half of the
+comparison note.
+
+*Stream B (S4, ghost rendering) is completely untouched* and its section
+below stands as written.
+
 
 Read =CLAUDE.md= and =docs/STATUS.org= first, as always. This file says
 only what a *next* session needs that those two do not: what is done, what
