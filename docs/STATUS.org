@@ -1309,11 +1309,13 @@ editors that read none — a true statement rather than a dropped field.
 Confirmed in the real baseline runs below: ="goal": null= for
 =--editor mutation=.
 
-*Adjacent gap, NOT closed*: nothing refuses =--goal= on a non-claude
-editor, so a typed =--goal= is silently ignored there. This is the same
-misattribution class that =--seed= on a non-mutation editor already
-refuses (=tuxghost/cli.py=). =run.json= is honest either way; the CLI
-is not.
+*The adjacent gap is now closed too*: =--goal= on a non-claude editor is
+*refused* (exit 2), the =--seed= refusal's missing twin. =run.json= was
+already honest — it records =null=, because no goal reached any editor —
+but a truthful record of a dropped flag is not the same as telling the
+user it was dropped, which is the argument =tuxghost/cli.py= already
+makes for =--seed=. A converse test pins that =--editor claude --goal=
+still works, so the refusal cannot be over-broad.
 
 ** A4 — measured, both sides
 
@@ -1365,6 +1367,42 @@ Committed: =tests/fixtures/claude_optimize_town.{edits.jsonl,run.json}=
 and =tests/test_optimize_live_capture.py=, whose replay control re-runs
 the transcript through =ReplayEditor= and requires the live score
 sequence back.
+
+** The two parked residuals, closed
+
+Items 3 and 4 of S3's four parked residuals (the other two were A2 and
+A3 and are above).
+
+*Residual 3 — a vacuous assertion, confirmed vacuous.*
+=test_the_target_reaches_the_claude_editors_prompt= asserted
+=assert "spyder_paper_town.tmx" in prompt=, which passed against the
+exact defect it was written for: =build_prompt= emits an "Ended on map
+'spyder_paper_town.tmx'" line unconditionally from the candidate's own
+final state, so the map name is present whether or not a goal ever
+reached the prompt. *Measured*: with the goal forced back to =""=, the
+map name still appears *three times* in that prompt. Now asserted
+against the isolated =Goal:= line, which fails with zero goal lines
+found. (The tile half was always real — =(19, 14)= appears only in the
+derived goal.)
+
+*Residual 4 — the pin the fix wave concluded did not exist.* S3's final
+review recorded that nothing could pin Also-fix 2, the replacement of
+hardcoded button numbers in =ClaudeEditor='s =SYSTEM= prompt with values
+read from =tuxemon.platform.const.buttons=. Something can:
+=mock.patch.object= UP and LEFT to each other's values — both still
+valid buttons, so the legend stays well-formed — then =importlib.reload=
+the module, since =_BUTTON_LEGEND= is built at import time.
+
+| implementation | legend | verdict |
+|----------------+--------+---------|
+| reads the constants | =UP=4, ..., LEFT=1= | passes |
+| hardcoded literals | =UP=1, ..., LEFT=4= | fails |
+
+Demonstrated both ways against the reverted literals: the new pin fails
+(=AssertionError: UP=1, DOWN=2, LEFT=4, RIGHT=8, A=64, B=128=) while the
+pre-existing =assert "UP=1" in system and "LEFT=4" in system= *passes*
+against that same reverted code — which is precisely why it was never
+coverage.
 
 ** Test state after Stream A
 

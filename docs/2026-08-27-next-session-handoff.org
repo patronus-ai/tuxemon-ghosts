@@ -246,7 +246,14 @@ host, so this costs little.
   the tuple; never replace it.* It currently holds entries from S1, S2 and
   four S3 tasks, plus pinned per-nodeid warning counts.
 
-* Four residuals parked at S3's close-out
+* Four residuals parked at S3's close-out — ALL FOUR NOW CLOSED
+
+Items 1 and 2 were A3 and A2. Items 3 and 4 were closed afterwards; see
+=docs/STATUS.org=, "The two parked residuals, closed". Item 4's claim
+below — that a pin exists — was correct, and the fix wave's contrary
+conclusion was wrong. The section is left as written for the record.
+
+
 
 Raised by the final whole-branch review, adjudicated rather than fixed
 (the process allows one fix wave, and it had run). None blocks anything;

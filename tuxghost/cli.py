@@ -1036,6 +1036,22 @@ def _optimize(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # The same rule for `--goal`, and for the same stated reason: only
+    # `--editor claude` reads one, so `--editor mutation --goal "..."`
+    # used to run to completion having silently discarded the single flag
+    # that says what the user wanted. `run.json` records `null` there,
+    # which is TRUE -- no goal reached any editor -- but a true record of
+    # a dropped flag is not the same as telling the user it was dropped.
+    # "Silently ignoring a flag the user deliberately typed teaches them
+    # it did something", as the comment above puts it.
+    if args.editor != "claude" and args.goal:
+        print(
+            f"refused: --editor {args.editor} has no use for --goal "
+            f"(got {args.goal!r}); only --editor claude reads one, and "
+            "running as if it had been applied would silently discard it",
+            file=sys.stderr,
+        )
+        return 2
 
     # Task 11 review of the plan's own code: the plan read the parent with
     # a bare `read(args.trace)` under `except (OSError, Refused)`, which

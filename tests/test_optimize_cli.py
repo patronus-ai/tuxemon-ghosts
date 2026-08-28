@@ -606,6 +606,47 @@ def test_an_edits_file_drives_both_editors_that_read_one(
     assert info["model"] == (extra[1] if extra else None)
 
 
+def test_a_goal_on_an_editor_that_reads_none_is_refused(tmp_path: Path) -> None:
+    """The `--seed` refusal's missing twin. Only `--editor claude` reads
+    a goal, so `--editor mutation --goal "..."` ran to completion having
+    silently discarded the one flag that says what the user wanted.
+
+    `run.json` was already honest about it -- it records `null`, because
+    no goal reached any editor -- but a truthful record of a dropped flag
+    is not the same as telling the user it was dropped, which is exactly
+    the argument `tuxghost/cli.py` already makes for refusing `--seed` on
+    a non-mutation editor.
+
+    Exit 2, not 1: this is an anticipated precondition, the code this
+    module pins for every other refusal.
+    """
+    proc = _run(
+        "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
+        "--goal", "wander northeast",
+        "--objective", "reach-tile",
+        "--target", "spyder_paper_town.tmx:19,14",
+        "--rounds", "1", "--patience", "1", "--max-rejections", "1",
+        "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
+        "--run-dir", str(tmp_path / "run"),
+    )
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "--goal" in proc.stderr, proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    # Refused BEFORE the engine boots, so nothing was written.
+    assert not (tmp_path / "o.tuxghost").exists()
+
+
+def test_a_goal_is_accepted_by_the_editor_that_does_read_one(
+    tmp_path: Path,
+) -> None:
+    """The converse, so the refusal above cannot be over-broad: the same
+    flag on `--editor claude` must still work. Without this, a refusal
+    that rejected `--goal` unconditionally would pass the test above."""
+    proc, calls = _claude_prompt(tmp_path, "--goal", "wander northeast")
+    assert "main() RETURNED 0" in proc.stdout, (proc.stdout, proc.stderr)
+    assert "wander northeast" in str(calls[0]["messages"])
+
+
 def test_replay_without_a_model_is_refused(tmp_path: Path) -> None:
     """A transcript carries no model of its own, so recording a default
     would misattribute provenance -- the same reasoning `--policy replay`
@@ -1032,10 +1073,24 @@ def test_the_target_reaches_the_claude_editors_prompt(tmp_path: Path) -> None:
     assert len(calls) == 1, calls
 
     prompt = str(calls[0]["messages"])
-    # The derived goal names the objective's own target: map AND tile.
-    assert "Goal:" in prompt, prompt
-    assert "(19, 14)" in prompt, prompt
-    assert "spyder_paper_town.tmx" in prompt, prompt
+    # FINAL RESIDUALS, ITEM 3. `assert "spyder_paper_town.tmx" in prompt`
+    # was VACUOUS: `build_prompt` emits an "Ended on map
+    # 'spyder_paper_town.tmx'" line unconditionally, from the candidate's
+    # own final state, so the map name is in the prompt whether or not a
+    # goal ever reached it -- the assertion passed against the exact
+    # defect it was written to catch. (The tile half was real: "(19, 14)"
+    # appears only in the derived goal.)
+    #
+    # Fixed by asserting against the GOAL LINE, isolated, rather than
+    # against the whole prompt.
+    goal_lines = [
+        line for line in prompt.replace("\\n", "\n").splitlines()
+        if line.lstrip().startswith("Goal:")
+    ]
+    assert len(goal_lines) == 1, (goal_lines, prompt)
+    goal = goal_lines[0]
+    assert "spyder_paper_town.tmx" in goal, goal
+    assert "(19, 14)" in goal, goal
     # The legend for the score tuple, read from `ReachTile.TERMS` itself
     # rather than written out as literals: this assertion's job is that
     # the CLI PASSES the legend, not that the legend says any particular
