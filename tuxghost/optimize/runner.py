@@ -47,6 +47,7 @@ from tuxghost.optimize.edits import Edit, apply_edits
 from tuxghost.optimize.objective import Objective
 from tuxghost.optimize.schedule import ActionScript, lift
 from tuxghost.optimize.seal import CandidateResult, OverBudget, seal
+from tuxghost.rules import GameRules
 from tuxghost.trace import Trace
 
 
@@ -126,6 +127,7 @@ def _prepare(
     checkpoint: int,
     model: str | None,
     max_cost: int,
+    rules: GameRules | None,
 ) -> tuple[ActionScript, CandidateResult] | _Rejection:
     """Apply one proposal and run it, or say why the EDITOR is at fault.
 
@@ -161,6 +163,7 @@ def _prepare(
             checkpoint=checkpoint,
             model=model,
             max_cost=max_cost,
+            rules=rules,
         )
     except OverBudget as exc:
         return _Rejection(str(exc))
@@ -179,6 +182,7 @@ def optimize(
     max_cost: int,
     checkpoint: int = 0,
     model: str | None = None,
+    rules: GameRules | None = None,
 ) -> OptimizeResult:
     """Edit, seal, score, keep if better.
 
@@ -213,7 +217,9 @@ def optimize(
     # Round 0 seals the parent WITHOUT `max_cost`: the parent is the
     # baseline, not a proposal, and refusing it would leave the run with
     # nothing to compare against.
-    best = seal(base_script, parent, checkpoint=checkpoint, model=model)
+    best = seal(
+        base_script, parent, checkpoint=checkpoint, model=model, rules=rules
+    )
     best_score = tuple(objective.score(best))
     score_length = len(best_score)
     best_script = base_script
@@ -260,6 +266,7 @@ def optimize(
                 checkpoint=checkpoint,
                 model=model,
                 max_cost=max_cost,
+                rules=rules,
             )
 
         if isinstance(outcome, _Rejection):

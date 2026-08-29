@@ -6,8 +6,11 @@ from typing import Any
 
 import pytest
 
+from tuxghost.optimize.editors.scripted import ScriptedEditor
+from tuxghost.optimize.objective import RulesObjective
+from tuxghost.optimize.runner import optimize
 from tuxghost.optimize.schedule import lift
-from tuxghost.optimize.seal import seal
+from tuxghost.optimize.seal import CandidateResult, seal
 from tuxghost.rules import Observation, TuxemonFirstBattleRules
 from tuxghost.trace import read
 
@@ -118,3 +121,83 @@ def test_goal_step_latches_the_first_at_goal_step_not_the_last() -> None:
     script = lift(parent.inputs, parent.header.step_count)
     result = seal(script, parent, rules=_AlwaysAtGoal())
     assert result.goal_step == 0
+
+
+# --- Task 4: RulesObjective, and threading `rules` through `optimize` ---
+
+
+def _candidate(
+    steps: int,
+    max_progress: int,
+    goal_step: int | None = None,
+    died: bool = False,
+) -> CandidateResult:
+    trace: Any = None  # never read by an objective
+    return CandidateResult(
+        trace=trace, steps=steps, final_state={},
+        max_progress=max_progress, goal_step=goal_step, died=died,
+    )
+
+
+def test_reaching_the_goal_beats_any_amount_of_progress() -> None:
+    obj = RulesObjective()
+    reached = obj.score(_candidate(999, 1, goal_step=10))
+    unreached = obj.score(_candidate(10, 10**12))
+    assert reached > unreached
+
+
+def test_among_goal_reaching_candidates_fewer_steps_wins() -> None:
+    obj = RulesObjective()
+    assert obj.score(_candidate(100, 5, goal_step=1)) > obj.score(
+        _candidate(200, 5, goal_step=1))
+
+
+def test_among_non_goal_candidates_higher_progress_wins() -> None:
+    """Ours must give a gradient BEFORE the goal is reachable. Their loop
+    rejects every non-goal candidate outright, which it can afford
+    because it seeds from a gold that already clears the level; our
+    parent does not, so progress is the only signal the search has."""
+    obj = RulesObjective()
+    assert obj.score(_candidate(100, 50)) > obj.score(_candidate(100, 10))
+
+
+def test_a_dead_candidate_scores_below_everything() -> None:
+    obj = RulesObjective()
+    dead = obj.score(_candidate(1, 10**12, goal_step=1, died=True))
+    assert dead < obj.score(_candidate(10**6, 0))
+
+
+def test_the_score_length_is_constant() -> None:
+    """`runner` refuses a varying tuple length -- a real check at
+    runner.py:286."""
+    obj = RulesObjective()
+    a = obj.score(_candidate(1, 1))
+    b = obj.score(_candidate(2, 2, goal_step=1, died=True))
+    assert len(a) == len(b) == 3
+
+
+def test_round_zero_carries_rules_max_progress_through_optimize() -> None:
+    """`optimize`'s round 0 seals the PARENT baseline, at runner.py:216 --
+    a call site distinct from every candidate's seal at runner.py:158.
+    If `rules` reaches only the second, the parent scores
+    `max_progress=0` against candidates with real progress and round 0's
+    score is not comparable to anything the search produces. This
+    exercises the real path end to end (not a stubbed `seal`), so it
+    would also fail if `rules` were dropped in `CandidateResult`
+    plumbing rather than just in the call site.
+    """
+    parent = read(PARENT)
+    result = optimize(
+        parent,
+        ScriptedEditor([]),  # STOP at round 1: only round 0 boots.
+        RulesObjective(),
+        rounds=1,
+        patience=1,
+        max_rejections=1,
+        max_cost=10_000,
+        rules=TuxemonFirstBattleRules(),
+    )
+    assert result.rounds[0].index == 0
+    assert result.rounds[0].accepted is True
+    assert result.best_round == 0
+    assert result.best.max_progress > 0

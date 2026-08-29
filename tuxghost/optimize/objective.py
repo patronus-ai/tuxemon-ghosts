@@ -96,3 +96,34 @@ class ReachTile:
             -float(distance),
             -float(candidate.steps),
         )
+
+
+class RulesObjective:
+    """Adapts a `GameRules` run to this project's lexicographic scoring.
+
+    (goal_state, max_progress, -steps), higher better:
+      * a goal-reaching candidate beats any non-goal candidate;
+      * among non-goal candidates, more progress wins -- this is what
+        gives the search a gradient before the goal is reachable at all;
+      * among goal-reaching candidates, fewer steps wins.
+
+    A dead candidate scores (-1.0, ...), below every live one.
+
+    TERMS names the tuple for `ClaudeEditor`'s prompt, the same way
+    `ReachTile.TERMS` does. Unlike `ReachTile.TERMS`, term 0 here is NOT
+    a negated cost -- `goal_state` is -1/0/1 (dead/not yet/reached), not
+    a cost that is 0 when best, so naming it with a leading `-` would
+    misdescribe it. `max_progress` and `-steps` follow the same
+    negated-cost convention `ReachTile` uses.
+    """
+
+    TERMS = ("goal_state", "max_progress", "-steps")
+
+    def score(self, candidate: CandidateResult) -> tuple[float, ...]:
+        if candidate.died:
+            first = -1.0
+        elif candidate.goal_step is None:
+            first = 0.0
+        else:
+            first = 1.0
+        return (first, float(candidate.max_progress), -float(candidate.steps))
