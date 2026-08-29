@@ -1857,6 +1857,109 @@ battle to a clean =CombatState= exit at step 4945.
   their actual repo, a legal ROM, and PyBoy, none of which this project
   has or executes (see the spec's non-goals).
 
+* Post-S5 — the keyboard button gap in the exporter, closed
+
+Found while answering "what is left before we can collect traces". This
+is a *defect fixed after S5's close-out*, not part of S5 as delivered.
+
+*The bug, measured:* =tuxghost/vgbench.py='s =_button_names()= mapped six
+buttons — =UP DOWN LEFT RIGHT A B=. Tuxemon defines fifteen. The
+keyboard map =tuxemon/tuxemon/platform/platform_pygame/events.py= (its
+=default_input_map=, line ~307) binds =pg.K_ESCAPE= to =buttons.BACK=
+(16384) and binds *no key at all* to =START= or =SELECT=, which are
+gamepad-only. =Recorder.observe= filters nothing and
+=install_recording_events= records every input the session delivers, so
+a human who opens the world menu once during =tuxghost play= puts =BACK=
+into the trace — and =segments_of= then raised:
+
+: KeyError: 16384
+
+That trace was *permanently unexportable*. Every human-collected trace
+was at risk, which is why this was fixed before any collection began.
+
+*The fix, and why the alias is derived rather than chosen.* Upstream's
+own =tuxemon/tuxemon/platform/tools.py= =keymap= gives =buttons.BACK=
+and =buttons.START= the *identical* intention, =intentions.WORLD_MENU=.
+So =BACK= exports under =START='s name — preserving what the input
+*meant* rather than inventing a name their enum lacks — and the alias is
+computed from that =keymap= at import, never hardcoded. If upstream ever
+gives =BACK= a different intention, the aliasing stops on its own. This
+is the same discipline =_button_names()= already followed for the six
+direct names (read from =buttons=, never literals).
+
+=START= (32) and =SELECT= (16) are now mapped directly; both are in
+their schema's enum and both are gamepad-reachable.
+
+*Unmappable buttons are REFUSED, never dropped.* =MOUSELEFT= (32768),
+=X=, =Y=, =L1/L2/R1/R2=, =HOME=, and the text events =UNICODE= (20001)
+and =BACKSPACE= (20002) have no videogamebench name. =segments_of= now
+raises a =ValueError= naming the value and the step. Silently dropping
+them was the tempting alternative and is wrong: a segment list missing
+an input the trace contains would not reproduce the run it claims to
+describe.
+
+*Consequence, deliberate:* the mapping is now MANY-TO-ONE, so the
+held-set comprehension must deduplicate or a segment holding =BACK= and
+=START= together emits =["START", "START"]= and violates their schema's
+=uniqueItems=. =_NAME_TO_BUTTON= is therefore built from the DIRECT
+names only; the export is a *projection*, not a round trip. =.tuxghost=
+remains the lossless artifact and import stays out of scope.
+
+*All four regression tests were demonstrated to fail against the defect
+they pin*, per this project's non-negotiable rule:
+
+| test | mutation | observed failure |
+|---+---+---|
+| =test_escape_is_exportable_as_start= | =_button_names= restricted to the original six | =ValueError: button 16384 ... no videogamebench name= |
+| =test_back_and_start_together_stay_unique= | =sorted({...})= → =sorted(...)= | =assert 2 == 1=, =={'frame': 1, 'buttons': ['START', 'START']}== |
+| =test_unmappable_button_refuses_rather_than_dropping= | guard deleted | =KeyError: 32768= at =vgbench.py:147= |
+| =test_the_alias_is_derived_from_upstreams_keymap= | alias hardcoded to ={BACK: "START"}= | =assert 16384 not in {16384: 'START', ...}= |
+
+=vgbench.py= was confirmed byte-identical to its pre-mutation copy after
+each restore (=cmp -s= → YES), and =git status= showed only the two
+intended files modified.
+
+*No regression on existing traces:* exporting
+=tests/golden/scripted_town_1234.tuxghost= before and after the change
+produced byte-identical JSON (=cmp -s= → YES). The goldens use only
+button 64 (=A=) and the four directions, so none of them touch the new
+paths — which is exactly why the synthetic tests above exist.
+
+*Gate:* =make check= =EXIT=0=, 450 passed / 4 skipped / 11 warnings in
+286.31s; slow 4 passed; ruff + =lint-patched= + mypy (80 files) clean.
+Load 3.02 → 4.24 across the run. 446 → 450 (+4).
+
+** Their Pokemon traces do not exist yet — measured, not assumed
+
+Worth recording because it reframes "how far are we from their Pokemon
+traces". All 21 files in =~/Workspace/videogamebench/results/speedrun/=
+are =sml_1-1= (Super Mario Land). There is *no* Pokemon trajectory.
+=sandbox/POKEMON_SETUP.md= states the blocker plainly: "*ROM (hard
+blocker):* drop a legal dump at =roms/pokemon_red.gb=. Nothing can be
+tested without it." =roms/= is absent. Their =PokemonRedBrockRules=,
+=pokemon_calibrate.py= and docker profile are written and unexecuted.
+
+*Their JSON schema is stale — do not validate against it.*
+=sandbox/trajectory_schema.json= sets ="additionalProperties": false=
+and allows only ={segments, total_frames, fps}=, which forbids =type=,
+=game= and =goal_frame= — keys present in *every one* of their own 21
+outputs. Key frequency across those files, measured:
+
+| key | in their files | ours |
+|---+---+---|
+| =type=, =game=, =fps=, =total_frames=, =segments= | 21/21 | emitted |
+| =goal_frame= | 16/21 | optional |
+| =rom=, =started_at=, =boot_frames=, =rationale= | 1/21 each | deliberately omitted |
+
+So our export already matches their *de facto* format key-for-key. Their
+files are the specification; the schema file is a fossil.
+
+Their progress function is =n_badges*1e6 + furthest_critical_path_map*1e3
++ party_count*10=; ours is the same shape with =n_gyms_won*1e9=. Their
+=dead= is an open TODO ("currently always False"); ours detects a party
+wipe. Both sides carry the same unresolved =CRITICAL_PATH= ordering,
+marked =VERIFY= in both repos.
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.

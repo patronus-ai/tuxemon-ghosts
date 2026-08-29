@@ -383,3 +383,88 @@ def test_out_into_a_nonexistent_directory_exits_1_not_2(tmp_path: Path) -> None:
     )
     assert proc.returncode == 1, proc.stderr
     assert "FileNotFoundError" in proc.stderr, proc.stderr
+
+
+# --- The keyboard-reachable button gap (post-S5 fix) ---------------------
+#
+# `platform_pygame/events.py`'s `default_input_map` binds `pg.K_ESCAPE`
+# to `buttons.BACK`, and `Recorder.observe` filters nothing, so a human
+# who opens the world menu once during `tuxghost play` puts BACK into
+# the trace. The exporter used to map six buttons only, so that trace
+# raised `KeyError: 16384` and could never be exported at all.
+
+
+def test_escape_is_exportable_as_start() -> None:
+    """The bug: a BACK edge (Escape) made a trace unexportable.
+
+    Pinned against `_button_names`. Restricting it to the original six
+    names makes this refuse button 16384 instead -- and, before the
+    unmappable-button guard landed alongside it, that same revert raised
+    the original opaque `KeyError: 16384`.
+    """
+    from tuxemon.platform.const import buttons
+
+    from tuxghost.loop import PRESSED, RELEASED
+
+    segs = segments_of(
+        [(0, buttons.BACK, PRESSED), (5, buttons.BACK, RELEASED)]
+    )
+    assert segs == [
+        {"frame": 0, "buttons": ["START"]},
+        {"frame": 5, "buttons": []},
+    ]
+
+
+def test_back_and_start_together_stay_unique() -> None:
+    """Their schema sets `uniqueItems: true` on `buttons`.
+
+    `_button_names` is many-to-one, so the held-set comprehension in
+    `segments_of` must deduplicate. Pinned against that `set()`:
+    dropping it emits `["START", "START"]`.
+    """
+    from tuxemon.platform.const import buttons
+
+    from tuxghost.loop import PRESSED
+
+    segs = segments_of(
+        [(0, buttons.BACK, PRESSED), (1, buttons.START, PRESSED)]
+    )
+    for seg in segs:
+        assert len(seg["buttons"]) == len(set(seg["buttons"])), seg
+
+
+def test_unmappable_button_refuses_rather_than_dropping() -> None:
+    """A mouse click has no name in their enum. Refusing is the whole
+    point: a segment list quietly missing an input the trace contains
+    would not reproduce the run it claims to describe.
+
+    Pinned against the `button not in names` guard, whose removal turns
+    this into the opaque `KeyError` the guard replaced.
+    """
+    import pytest
+    from tuxemon.platform.const import buttons
+
+    from tuxghost.loop import PRESSED
+
+    with pytest.raises(ValueError, match="no videogamebench name"):
+        segments_of([(3, buttons.MOUSELEFT, PRESSED)])
+
+
+def test_the_alias_is_derived_from_upstreams_keymap() -> None:
+    """BACK exports as START only because upstream's own `keymap` gives
+    the two the SAME intention. Move BACK's intention and the alias must
+    disappear on its own -- a hardcoded `{BACK: "START"}` would keep
+    exporting START here and pass.
+    """
+    from unittest import mock
+
+    from tuxemon.platform.const import buttons, intentions
+    from tuxemon.platform.tools import keymap
+
+    from tuxghost.vgbench import _button_names
+
+    assert _button_names()[buttons.BACK] == "START"
+
+    moved = {**keymap, buttons.BACK: intentions.NOCLIP}
+    with mock.patch("tuxemon.platform.tools.keymap", moved):
+        assert buttons.BACK not in _button_names()

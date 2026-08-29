@@ -3,7 +3,11 @@
 Their format is RUN-LENGTH HELD STATE -- `{"frame": N, "buttons": [...]}`
 means "the held set becomes this at frame N, and stays until the next
 segment". Ours is an EDGE list, `(step, button, value)` with
-PRESSED/RELEASED. The two convert losslessly.
+PRESSED/RELEASED. The two convert losslessly for every button their
+enum can name; `buttons.BACK` is the one exception, exported under
+START's name because upstream gives the two the same intention (see
+`_button_names`). A button their enum cannot name at all is REFUSED,
+never silently dropped.
 
 Export only. Import is out of scope: 51% of their segments hold two or
 three buttons at once, and `tuxghost.optimize.schedule.lift` refuses
@@ -26,9 +30,24 @@ from typing import Any
 from tuxghost.loop import PRESSED
 from tuxghost.trace import Trace
 
+#: Their schema's button enum (`sandbox/trajectory_schema.json`) -- the
+#: ONLY vocabulary a videogamebench trajectory may use. Tuxemon defines
+#: fifteen buttons; these eight are the ones that have a name over there.
+VGB_BUTTONS: tuple[str, ...] = (
+    "A",
+    "B",
+    "UP",
+    "DOWN",
+    "LEFT",
+    "RIGHT",
+    "START",
+    "SELECT",
+)
 
-def _button_names() -> dict[int, str]:
-    """Int -> their button name.
+
+def _direct_button_names() -> dict[int, str]:
+    """Tuxemon button value -> their name, for the buttons both projects
+    call by the same name.
 
     Read from `tuxemon.platform.const.buttons`, never written as
     literals: an upstream remap would otherwise leave us confidently
@@ -39,11 +58,64 @@ def _button_names() -> dict[int, str]:
 
     return {
         getattr(buttons, name): name
-        for name in ("UP", "DOWN", "LEFT", "RIGHT", "A", "B")
+        for name in VGB_BUTTONS
+        if hasattr(buttons, name)
     }
 
 
-_NAME_TO_BUTTON = {v: k for k, v in _button_names().items()}
+def _button_names() -> dict[int, str]:
+    """Tuxemon button value -> the videogamebench button name.
+
+    A name-for-name match alone covers only the buttons both projects
+    happen to call the same thing, and that is NOT the set a human can
+    actually press. `platform_pygame/events.py`'s `default_input_map`
+    binds the keyboard to UP/DOWN/LEFT/RIGHT, A (Return), B (Shift) and
+    **BACK (Escape)** -- and binds no key at all to START or SELECT,
+    which are reachable only from a gamepad. So the one extra button a
+    keyboard player is certain to hit is the one their enum cannot name,
+    and before this aliasing existed `segments_of` raised
+    `KeyError: 16384` on it: the trace of any session where somebody
+    opened the world menu was permanently unexportable.
+
+    The alias is DERIVED, never chosen here. Upstream's own
+    `tuxemon.platform.tools.keymap` gives `buttons.BACK` and
+    `buttons.START` the identical intention (`intentions.WORLD_MENU`),
+    so exporting BACK as START preserves what the input MEANT rather
+    than inventing a name their enum lacks. Any other button upstream
+    later gives an already-named button's intention picks this up
+    automatically, and if upstream ever splits BACK from START the
+    aliasing stops without an edit here -- which
+    `test_the_alias_is_derived_from_upstreams_keymap` pins by moving
+    BACK's intention and watching the alias disappear.
+
+    Consequence, deliberate: the mapping is MANY-TO-ONE, so `sorted()`
+    over a held set must deduplicate (see `segments_of`) or a segment
+    holding BACK and START together emits `["START", "START"]` and
+    violates their schema's `uniqueItems`.
+    """
+    from tuxemon.platform.tools import keymap
+
+    direct = _direct_button_names()
+    by_intention = {
+        intent: direct[value]
+        for value, intent in keymap.items()
+        if value in direct
+    }
+    aliases = {
+        value: by_intention[intent]
+        for value, intent in keymap.items()
+        if value not in direct and intent in by_intention
+    }
+    return {**aliases, **direct}
+
+
+#: Reverse map, for tests that rebuild edges from segments. Built from
+#: the DIRECT names only: `_button_names` is deliberately many-to-one, so
+#: a full reverse would be ambiguous (both BACK and START export as
+#: "START"). The export is a PROJECTION, not a round trip -- `.tuxghost`
+#: stays the lossless artifact and import is out of scope (module
+#: docstring).
+_NAME_TO_BUTTON = {v: k for k, v in _direct_button_names().items()}
 
 
 def segments_of(inputs: Any) -> list[dict[str, Any]]:
@@ -63,11 +135,26 @@ def segments_of(inputs: Any) -> list[dict[str, Any]]:
     segments: list[dict[str, Any]] = []
     last: list[str] | None = None
     for step, button, value in sorted(tuple(i) for i in inputs):
+        if button not in names:
+            raise ValueError(
+                f"button {button} at step {step} has no videogamebench "
+                f"name (their enum is {list(VGB_BUTTONS)}). Tuxemon "
+                "values with no equivalent include MOUSELEFT (32768), "
+                "X, Y, L1/L2/R1/R2, HOME, and the text events UNICODE "
+                "(20001) and BACKSPACE (20002). Refusing rather than "
+                "dropping it: a segment list missing an input the trace "
+                "contains would not reproduce the run it claims to "
+                "describe."
+            )
         if value == PRESSED:
             held.add(button)
         else:
             held.discard(button)
-        current = sorted(names[b] for b in held)
+        # set(), not a plain generator: `_button_names` is
+        # many-to-one (BACK exports as START), so holding both
+        # would emit ["START", "START"] and break their
+        # schema's `uniqueItems`.
+        current = sorted({names[b] for b in held})
         if current == last:
             continue
         if segments and segments[-1]["frame"] == step:
