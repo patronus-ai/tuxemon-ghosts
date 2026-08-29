@@ -36,16 +36,24 @@ class GameRules(Protocol):
     def observe(self, session: Any, step: int) -> Observation: ...
 
 
-#: Map ordinals used to SHAPE progress. Marked VERIFY exactly as their
-#: Pokemon CRITICAL_PATH is: the shipped order below is inferred from
-#: where the (dead) `badge` gate is checked -- `route1.tmx` and
-#: `taba_town.tmx` -- and has NOT been confirmed against a real route.
-#: Dump the map sequence over a reference run and fix this list before
-#: trusting the shaping. The GOAL does not depend on it; only the shape.
+#: Map ordinals used to SHAPE progress. The NAMES are VERIFIED --
+#: `spyder_route1.tmx` cross-references all three of `spyder_paper_town
+#: .tmx`, `spyder_cotton_town.tmx` and `spyder_brideswood.tmx` by direct
+#: grep of the shipped `.tmx` map data (whole-branch review, M1), unlike
+#: an earlier version of this list (`route1.tmx`, `taba_town.tmx`) which
+#: named a different, unreachable map family -- those two maps exist in
+#: `mods/tuxemon/maps/` but nothing connects them to `spyder_paper_town
+#: .tmx`, so the map term was permanently 0 and `progress` reduced to
+#: `party_count * 10` with no gradient at all. The ORDER below is still
+#: VERIFY, exactly as their Pokemon CRITICAL_PATH is: real adjacency
+#: (route1 is a hub touching all three towns) does not by itself say
+#: which town comes "further" along a critical path. Dump the map
+#: sequence over a reference run and fix the ORDER before trusting the
+#: shaping. The GOAL does not depend on it; only the shape.
 CRITICAL_PATH: tuple[str, ...] = (
-    "spyder_paper_town.tmx",   # VERIFY
-    "route1.tmx",              # VERIFY
-    "taba_town.tmx",           # VERIFY
+    "spyder_paper_town.tmx",     # VERIFIED name, ORDER still VERIFY
+    "spyder_route1.tmx",         # VERIFIED name, ORDER still VERIFY
+    "spyder_cotton_town.tmx",    # VERIFIED name, ORDER still VERIFY
 )
 
 #: All 13 leaders are named `classic_gym_leader_<name>`; nothing in the
@@ -65,6 +73,40 @@ class TuxemonRules:
     """
 
     def __init__(self) -> None:
+        self._furthest_map = 0
+
+    def reset(self) -> None:
+        """Clear per-run state. `seal` calls this (when present -- see
+        below) before stepping a candidate.
+
+        `_furthest_map` must persist WITHIN one run: `seal`'s hook calls
+        `observe` once per step, and progress must not decrease as a
+        candidate walks forward and back across maps it has already
+        visited (see `test_map_index_does_not_decrease_when_a_run_
+        backtracks`). But it must NOT persist ACROSS runs --
+        `tuxghost.optimize.runner.optimize` threads exactly ONE `rules`
+        instance into round 0 (runner.py:220-222) and into every
+        candidate's `seal` call via `_prepare` (runner.py:158-167), so
+        without this reset candidate N inherits candidate N-1's
+        furthest-map floor: a fresh candidate that never left the start
+        map would still report the previous candidate's high water mark
+        (whole-branch review, I1 -- demonstrated: candidate B, freshly
+        at `CRITICAL_PATH[0]`, reported `furthest == 2` because candidate
+        A had genuinely reached `CRITICAL_PATH[2]` on the SAME shared
+        instance). Once `CRITICAL_PATH` is calibrated this makes
+        accept/reject depend on candidate ORDER rather than candidate
+        quality -- a silent correctness bug, not a cosmetic one.
+
+        Deliberately NOT part of the `GameRules` Protocol: a minimal
+        test double with no persistent state (e.g. this module's own
+        `_AlwaysAtGoal`-style stand-ins used in tests) has nothing to
+        reset and should not be forced to grow a no-op method just to
+        satisfy an interface. `seal` calls this only when it exists
+        (`hasattr`), which keeps `rules.py` honest about which
+        implementers actually carry per-run state -- rather than forcing
+        every future `GameRules` implementation, stateful or not, to
+        answer a question that does not apply to it.
+        """
         self._furthest_map = 0
 
     def _n_gyms_won(self, session: Any) -> int:

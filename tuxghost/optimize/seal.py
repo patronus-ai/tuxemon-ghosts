@@ -136,6 +136,20 @@ def seal(
         for button, value in schedule[step]:
             recorder.observe(step, button, value)
 
+    # I1 (whole-branch review): `rules` may be the SAME instance across
+    # every candidate in one `optimize()` run (round 0 at runner.py:220
+    # and every candidate via `_prepare` at runner.py:158), so a `rules`
+    # implementation that carries per-run state (e.g. `TuxemonRules
+    # ._furthest_map`) must have that state cleared before THIS run
+    # steps, or candidate N inherits candidate N-1's high-water mark.
+    # `reset` is deliberately not part of the `GameRules` Protocol (see
+    # `TuxemonRules.reset`'s docstring), so this is `hasattr`-gated
+    # rather than an unconditional call every implementer must support.
+    if rules is not None:
+        reset = getattr(rules, "reset", None)
+        if reset is not None:
+            reset()
+
     checkpoints: list[tuple[int, str]] = []
     states: dict[int, dict[str, Any]] = {}
     ran = 0

@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from tuxghost.optimize.edits import Edit, apply_edits
-from tuxghost.optimize.objective import Objective
+from tuxghost.optimize.objective import Objective, RulesObjective
 from tuxghost.optimize.schedule import ActionScript, lift
 from tuxghost.optimize.seal import CandidateResult, OverBudget, seal
 from tuxghost.rules import GameRules
@@ -190,6 +190,22 @@ def optimize(
     been measured yet (see docs/2026-08-27-optimizer-tuning.org), and a
     default invented here would be mistaken for one that had.
     """
+    # I2 (whole-branch review): `RulesObjective` scores
+    # `(goal_state, max_progress, -steps)` entirely from `CandidateResult
+    # .max_progress`/`.goal_step`/`.died`, which are populated ONLY when
+    # `seal` is given `rules=...` (both call sites below). Combine
+    # `RulesObjective` with no `rules` and every candidate silently scores
+    # `(0.0, 0.0, -steps)` -- goal never reached, no progress ever seen --
+    # which degenerates the whole search into "shortest wins" with no
+    # error and no warning. Refusing the combination here, at the one
+    # place both are given together, makes it structurally impossible to
+    # reach that vacuity by accident.
+    if isinstance(objective, RulesObjective) and rules is None:
+        raise ValueError(
+            "RulesObjective requires seal(rules=...); without it every "
+            "candidate scores (0.0, 0.0, -steps), silently degenerating "
+            "to 'shortest wins' (whole-branch review, I2)"
+        )
     if rounds < 1:
         raise ValueError(f"rounds must be >= 1, got {rounds!r}")
     for name, value in (
