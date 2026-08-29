@@ -1689,6 +1689,141 @@ Until a human runs this and reports back, "the ghost renders correctly
 in a real window" is unverified — the entire feature's actual,
 user-facing behaviour rests on this one check.
 
+* S5 — progress rules and vgbench export, delivered
+
+A =GameRules= interface — =observe(session, step) -> {progress, at_goal,
+dead}= — matching akkikiki/videogamebench's =scripts/game_rules.py=
+shape term for term, plus a =.tuxghost= -> their trajectory-JSON
+exporter, so this project's runs are describable in their vocabulary.
+Spec: =docs/superpowers/specs/2026-08-29-progress-rules-and-vgbench-export-design.org=.
+Branch: =impl/progress-rules= (still unmerged — merging is the human's
+call, not this close-out's).
+
+=tuxghost/rules.py= (=GameRules=, =TuxemonRules=, =TuxemonGymRules=,
+=TuxemonFirstBattleRules=), =tuxghost/vgbench.py= (=segments_of=,
+=trajectory_of=), =tuxghost/optimize/objective.py='s =RulesObjective=,
+a per-step observer threaded into =tuxghost/optimize/seal.py='s
+=seal()=, and the =export= CLI subcommand. No trace-format change:
+=format_version= is still *1*, the exporter is purely additive.
+
+** No seventh patch, re-measured at this close-out
+
+#+begin_src bash
+$ ls patches/ | wc -l
+       6
+$ git -C tuxemon diff --stat | tail -1
+ 18 files changed, 265 insertions(+), 63 deletions(-)
+$ grep -n "^EXEMPTIONS" tuxghost/digest.py
+65:EXEMPTIONS: dict[str, str] = {}
+$ grep -n "^FORMAT_VERSION" tuxghost/trace.py
+54:FORMAT_VERSION = 1
+#+end_src
+
+Same six patches, same 18/265/63, =EXEMPTIONS= still =={}=, trace format
+unchanged and =format_version= unchanged. S5 needed none of the three —
+matching this project's standing rule that every engine touch is a
+patch and every trace-format touch is a version bump, and S5 makes
+neither.
+
+** The full gate, run alone, per this project's standing rule
+
+#+begin_src bash
+$ uptime   # before starting
+12:39  up 19 days,  2:09, 2 users, load averages: 4.03 4.38 4.70
+$ make check
+./.venv/bin/python -m ruff check tuxghost tests
+All checks passed!                                  # lint
+All checks passed!                                  # lint-patched
+./.venv/bin/python -m mypy tuxghost tests
+Success: no issues found in 80 source files
+PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q
+435 passed, 4 skipped, 11 warnings in 249.18s (0:04:09)
+PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 ./.venv/bin/python -m pytest -q -m slow
+4 passed, 435 deselected, 1 warning in 51.92s
+EXIT=0
+$ uptime   # after finishing
+12:45  up 19 days,  2:15, 2 users, load averages: 3.64 4.20 4.53
+#+end_src
+
+Re-run a second time end to end, back to back, to confirm the exit code
+explicitly and check for nondeterminism between runs: identical counts
+(435 passed / 4 skipped fast, 4 passed slow), =EXIT=0= both times.
+
+- *Fast tier: 435 passed, 4 skipped, 11 warnings.* Up from S4's 404 — 31
+  net new tests, the three new S5 files (=test_rules.py= 9,
+  =test_rules_seal.py= 10, =test_vgbench_export.py= 12), all three
+  pre-registered in =tests/conftest.py='s =_TRACKED_FILES= tripwire
+  ahead of the tests themselves (SDD ruling R1, so parallel task agents
+  did not collide appending to one tuple) with zero pinned warnings
+  (read fixtures against the current patch series, so all must warn
+  zero times — and did). The pinned-warning count is unchanged at 11.
+- *Slow tier: 4 passed, unchanged from S4.*
+- =mypy --strict= now covers *80* source files (was 75 at S4 close).
+- =EXIT=0=. Nothing failed.
+
+*On the timing.* Load stayed under 5 throughout both runs (started
+4.03/4.38/4.70, ended 3.64/4.20/4.53 on the timed run) — below this
+project's quotability threshold — so *249.18 s at 439 tests* (435 fast +
+4 slow) sits fairly beside S4's *269.70 s at 408 tests* and Stream A's
+*215.32 s at 375 tests*, both also taken under load 5.
+
+** The two goals, and which one is actually exercised by a trace
+
+*Research result.* Tuxemon's Boulder-Badge equivalent is "defeat a gym
+leader," found by ruling out three candidates that look right and are
+inert:
+
+- the =badge= game variable — =is variable_set badge:yes= appears *9
+  times* across shipped maps; =set_variable badge= appears *0* times. It
+  can never become true in shipped content.
+- badge *items* — five exist with =category: badge=; *zero* are
+  referenced by any map event. Never granted.
+- missions — *one* mission file ships (=spyder.yaml=); the fixture save
+  (=tests/fixtures/paper_town.save=) has =missions: []=.
+
+The live path is *13* reachable =classic_gym_*.tmx= maps, each gated on
+=not battle_outcome player,won,classic_gym_leader_<name>= — win once and
+the gate closes permanently, the same latch semantics as a badge bit.
+=TuxemonGymRules.at_goal = n_gyms_won >= 1= reads this directly off
+=BattlesHandler=, which this project's digest already captures.
+
+Because that goal is not reachable by any trace this project can
+currently record (see "What is NOT covered" below), S5 also ships
+=TuxemonFirstBattleRules= (=at_goal = any battle won=) as the goal that
+IS reachable and tested: =tests/test_combat_determinism.py= drives a
+battle to a clean =CombatState= exit at step 4945.
+
+** What is NOT covered — stated plainly, not buried
+
+- =TuxemonGymRules= is *UNREACHABLE* by any trace this project can
+  record. Our longest recorded run is a wild encounter reaching a clean
+  =CombatState= exit at step 4945 from a cold boot; a gym win needs
+  overworld navigation, a building interior, and then the fight. It is
+  exercised only by hand-constructing session state in
+  =test_rules.py=, the same way =tests/test_digest.py= exercises
+  =persistent_npc_state= — never by a trace produced by this project's
+  own recorder or optimizer.
+- =dead= ships *INERT* for the same reason: nothing this project can
+  record ever drives a party to a full wipe, so the =dead= branch of
+  =RulesObjective.score= is real code, tested against hand-constructed
+  state, but never exercised end to end by a real run.
+- =CRITICAL_PATH= is *UNCALIBRATED* and marked =VERIFY= in
+  =tuxghost/rules.py=: the shipped map order
+  (=spyder_paper_town.tmx=, =route1.tmx=, =taba_town.tmx=) is inferred
+  from where the dead =badge= gate happens to be checked, not measured
+  against a real route dump. This means the progress *SHAPING* — the
+  =+1000= term per critical-path map index — is not trustworthy yet.
+  The GOAL signal (=at_goal=, =n_gyms_won=) does *not* depend on
+  =CRITICAL_PATH=; only the gradient between goal states does.
+- The exporter's own reach is bounded the same way S4's =play.py=
+  wiring was: this project can verify the export's *SHAPE* (field
+  mapping, run-length coalescing, no-consecutive-duplicate segments) and
+  that their own consumer expression (=scripts/speedrun.py='s
+  =_score_rules_plain= shape) reads a dict with the fields we emit — but
+  *NOT* that their scorer accepts our trajectory end to end. That needs
+  their actual repo, a legal ROM, and PyBoy, none of which this project
+  has or executes (see the spec's non-goals).
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.
@@ -1700,6 +1835,22 @@ offline optimizer) each have their own, both now =#+STATUS: implemented=.
 S5 is where =ReachTile= gets replaced rather than extended: it supplies
 its own =Objective= and nothing in S3's loop, seal or edit vocabulary
 changes.
+
+*This paragraph is now PARTLY FALSE and is corrected here rather than
+left standing, per this project's own rule against silently outdated
+claims.* S5 shipped (see "S5 — progress rules and vgbench export,
+delivered" above) and it is not true that nothing in S3's loop or seal
+changed: =tuxghost/optimize/seal.py='s =seal()= gained a per-step
+=rules= observer parameter, and =CandidateResult= gained three fields
+(=max_progress=, =goal_step=, =died=) that the observer populates. What
+survives from the original claim is the *edit-vocabulary* half only —
+=lift=, =edits= and the editors (=MutationEditor=, =ClaudeEditor=) are
+untouched by S5. The *runner's comparison logic* is also genuinely
+unchanged: =tuxghost/optimize/runner.py='s scoring comparison at
+:217/:297 does not know or care that =RulesObjective= exists, because
+=RulesObjective= satisfies the same =Objective= protocol =ReachTile=
+does — =rules= is threaded through as an optional parameter that
+=seal()= and =optimize()= pass along, not a new comparison path.
 
 *The argument for S5 changed during Stream A, and the old wording here
 was left standing too long.* This section used to say that a positional
