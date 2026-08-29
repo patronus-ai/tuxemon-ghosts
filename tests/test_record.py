@@ -153,3 +153,107 @@ def test_recorder_output_is_stable_for_same_seed_and_clock_epoch() -> None:
     assert first.header == second.header
     assert first.initial_state == second.initial_state
     assert first.inputs == second.inputs
+
+
+# --- Non-button platform events (the crash that destroyed a real session) --
+#
+# `tuxemon.platform.const.events` shares `PlayerInput.button` with real
+# buttons: QUIT (20000), UNICODE (20001), BACKSPACE (20002). A UNICODE
+# event carries the typed CHARACTER as its value. Before `observe`
+# filtered them, a human who pressed SPACE during `tuxghost play` put
+# `(step, 20001, ' ')` into the trace and `finish()` died in pydantic --
+# at WRITE time, on quit, after the session had already been played.
+
+
+def test_unicode_event_does_not_destroy_the_trace_at_write_time() -> None:
+    """The bug, verbatim: `float_parsing` on `input_value=' '`.
+
+    Pinned against `observe`'s filter. Removing it restores
+    `ValidationError: ... inputs.N.2 Input should be a valid number,
+    unable to parse string as a number [input_value=' ', input_type=str]`
+    raised from `finish()` -- i.e. the whole recorded session lost.
+    """
+    from tuxemon.platform.const import buttons, events
+
+    from tuxghost.boot import build_client
+
+    _client, session = build_client(seed=1234, clock_epoch=1787694000)
+    recorder = Recorder(
+        session, seed=1234, clock_epoch=1787694000, recorder="human"
+    )
+    recorder.observe(0, buttons.DOWN, 1.0)
+    recorder.observe(1, events.UNICODE, " ")  # the space bar
+    recorder.observe(2, events.BACKSPACE, 0.0)
+    recorder.observe(3, buttons.DOWN, 0.0)
+
+    trace = recorder.finish(step_count=4)
+
+    assert [tuple(i) for i in trace.inputs] == [
+        (0, buttons.DOWN, 1.0),
+        (3, buttons.DOWN, 0.0),
+    ]
+
+
+def test_dropping_a_non_button_event_taints_the_trace() -> None:
+    """Dropping keeps the session writable; the taint keeps it honest.
+
+    A run whose text entry was discarded will not replay faithfully, and
+    nobody downstream should have to guess that. Pinned against the
+    `_taints.append`: without it the trace comes back clean and silently
+    claims to be a faithful record.
+    """
+    from tuxemon.platform.const import events
+
+    from tuxghost.boot import build_client
+    from tuxghost.record import DROPPED_NON_BUTTON
+
+    _client, session = build_client(seed=1234, clock_epoch=1787694000)
+    recorder = Recorder(
+        session, seed=1234, clock_epoch=1787694000, recorder="human"
+    )
+    recorder.observe(0, events.UNICODE, "a")
+    recorder.observe(1, events.UNICODE, "b")
+
+    trace = recorder.finish(step_count=2)
+    # Recorded ONCE, not once per dropped event.
+    assert trace.provenance.taints == [DROPPED_NON_BUTTON]
+
+
+def test_a_clean_recording_is_not_tainted() -> None:
+    """The control for the test above: the taint must mean something.
+
+    An assertion that a taint APPEARS proves nothing on its own if the
+    recorder taints unconditionally -- this project has shipped exactly
+    that class of vacuous test before.
+    """
+    from tuxemon.platform.const import buttons
+
+    from tuxghost.boot import build_client
+
+    _client, session = build_client(seed=1234, clock_epoch=1787694000)
+    recorder = Recorder(
+        session, seed=1234, clock_epoch=1787694000, recorder="human"
+    )
+    recorder.observe(0, buttons.DOWN, 1.0)
+
+    assert recorder.finish(step_count=1).provenance.taints == []
+
+
+def test_a_real_button_with_a_non_numeric_value_is_also_refused() -> None:
+    """The value guard is separate from the button guard on purpose: a
+    real button arriving with a non-numeric value is a different defect
+    and must not reach `Trace` either. `bool` counts as non-numeric --
+    it is an `int` subclass, and `float(True)` would silently record 1.0.
+    """
+    from tuxemon.platform.const import buttons
+
+    from tuxghost.boot import build_client
+
+    _client, session = build_client(seed=1234, clock_epoch=1787694000)
+    recorder = Recorder(
+        session, seed=1234, clock_epoch=1787694000, recorder="human"
+    )
+    recorder.observe(0, buttons.DOWN, "1.0")
+    recorder.observe(1, buttons.DOWN, True)
+
+    assert list(recorder.finish(step_count=2).inputs) == []

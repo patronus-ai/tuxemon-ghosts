@@ -145,11 +145,29 @@ def advance_ghost(
     client: Any, npc: Any, track: GhostTrack, step: int, player_map: str
 ) -> None:
     """Place the ghost for `step`, or hide it when it cannot be placed
-    honestly -- past the end of its track, or on a different map.
+    honestly -- on a different map.
 
-    Hidden, never frozen at a stale position and never teleported: a
-    ghost standing motionless on the wrong map reads as a bug, and one
-    left at a stale tile is drawing a position the trace never had.
+    PAST THE END OF ITS TRACK the ghost STANDS at its final recorded
+    tile, and this reverses S4's original decision. That decision hid it,
+    reasoning that "a ghost standing motionless at its final tile forever
+    reads as a bug". S4's manual acceptance had never been performed when
+    that was written; when it finally was, the outcome was far worse than
+    the one being avoided. The walking fixture
+    (`tests/golden/scripted_town_1234.tuxghost`) is 176 steps -- 2.9
+    seconds at 60fps -- so the ghost completed its route and vanished
+    while the window was still opening. The human running it reported,
+    simply, "I don't see the ghosts", and every automated test still
+    passed.
+
+    Standing at the FINAL tile is not the stale-position problem the
+    original reasoning worried about: that tile is a real recorded
+    position, the one the trace actually ended on, and a ghost waiting at
+    its finish line is what a ghost race looks like. A stale MID-track
+    tile would still be dishonest, and nothing here draws one -- every
+    step before the end still comes from `track.at(step)`.
+
+    Still hidden, never teleported, on a DIFFERENT MAP: a ghost standing
+    motionless on the wrong map is drawing a position the trace never had.
 
     Also drives ANIMATION STATE, not just position -- this is the part
     the brief's original sketch got wrong, per Task 1's probe 2
@@ -169,6 +187,12 @@ def advance_ghost(
     the NPC object already carries exactly that state between calls.
     """
     frame = track.at(step)
+    if frame is None and track.frames:
+        # Past the end: linger at the finish line rather than vanish.
+        # An EMPTY track still falls through to `hide_ghost` below --
+        # there is no final tile to stand on, and inventing one would be
+        # exactly the stale position this function refuses to draw.
+        frame = track.frames[-1]
     if frame is None or frame.map_name != player_map:
         hide_ghost(client, npc)
         return

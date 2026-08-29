@@ -146,10 +146,21 @@ def test_hiding_removes_the_ghost_from_the_drawn_set() -> None:
     assert GHOST_SLUG in client.npc_manager.npcs
 
 
-def test_the_ghost_is_hidden_past_the_end_of_its_track() -> None:
-    """Hidden, not frozen and not teleported: a ghost standing motionless
-    at its final tile forever reads as a bug, and one left at a stale
-    position is worse -- it is drawing a position the trace never had.
+def test_the_ghost_stands_at_its_final_tile_past_the_end_of_its_track() -> None:
+    """REVERSES S4's original decision, and the reversal is the point.
+
+    S4 hid the ghost past the end of its track, reasoning that "a ghost
+    standing motionless at its final tile forever reads as a bug". S4's
+    manual acceptance had never been run when that was written. When a
+    human finally ran it, PARENT's 176 steps -- 2.9 seconds at 60fps --
+    meant the ghost finished its route and vanished while the window was
+    still opening, and the report was "I don't see the ghosts". Every
+    automated test passed throughout, this one included: it asserted the
+    disappearance was correct.
+
+    The final tile is a REAL recorded position, not the stale mid-track
+    one the original reasoning worried about. A ghost waiting at its
+    finish line is what a ghost race looks like.
 
     `track` is built BEFORE `_session()` -- see the matching comment on
     `test_install_refuses_when_the_reserved_slug_is_taken`.
@@ -160,8 +171,34 @@ def test_the_ghost_is_hidden_past_the_end_of_its_track() -> None:
     session = _session()
     client = session.client
     npc = install_ghost(session, track)
+    final = track.frames[-1]
 
-    advance_ghost(client, npc, track, len(track.frames), "spyder_paper_town.tmx")
+    for step in (len(track.frames), len(track.frames) + 500):
+        advance_ghost(client, npc, track, step, "spyder_paper_town.tmx")
+        assert GHOST_SLUG in client.npc_manager.npcs, step
+        assert (int(npc.tile_pos[0]), int(npc.tile_pos[1])) == final.tile, step
+
+
+def test_an_empty_track_still_hides_the_ghost() -> None:
+    """The linger above reads `track.frames[-1]`, so an EMPTY track has
+    no final tile to stand on. It must fall through to hiding rather
+    than raise `IndexError` or invent a position.
+    """
+    from tuxghost.ghost.entity import advance_ghost
+    from tuxghost.ghost.track import GhostTrack
+
+    track = build_track(read(PARENT))
+    session = _session()
+    client = session.client
+    npc = install_ghost(session, track)
+
+    empty = GhostTrack(
+        frames=(),
+        source_digest=track.source_digest,
+        recorder=track.recorder,
+        model=track.model,
+    )
+    advance_ghost(client, npc, empty, 0, "spyder_paper_town.tmx")
     assert GHOST_SLUG not in client.npc_manager.npcs
 
 

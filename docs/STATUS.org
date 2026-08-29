@@ -1960,6 +1960,105 @@ Their progress function is =n_badges*1e6 + furthest_critical_path_map*1e3
 wipe. Both sides carry the same unresolved =CRITICAL_PATH= ordering,
 marked =VERIFY= in both repos.
 
+* S4's MANUAL ACCEPTANCE, finally performed — and it failed
+
+The item outstanding since S4 closed. A human ran =tuxghost play= at a
+real window on 2026-08-29 and reported: *"I don't see the ghosts"*.
+Every automated test passed throughout. Two defects, both invisible to
+the suite, and one of them destroyed the session.
+
+** Defect 1 — the ghost was visible for 2.9 seconds, then hidden forever
+
+*Not an implementation bug.* =advance_ghost= did exactly what S4
+designed and what =test_the_ghost_is_hidden_past_the_end_of_its_track=
+asserted: past the end of its track, hide. The reasoning recorded there
+was "a ghost standing motionless at its final tile forever reads as a
+bug". That was written by someone who had never watched it run.
+
+The walking fixture =tests/golden/scripted_town_1234.tuxghost= is *176
+steps* — 2.9 seconds at 60fps. The ghost completed its whole route while
+the window was still opening, and =track.at(177)= returned =None=, so it
+was hidden for the entire rest of the session.
+
+Measured before any change, at the real =advance_ghost= call site:
+
+| step | on map? | ghost tile |
+|---+---+---|
+| 1 | True | (12, 12) |
+| 50 | True | (12, 14) |
+| 175 | True | (16, 14) |
+| 176 | True | (16, 14) |
+| 177 | *False* | — |
+| 399 | *False* | — |
+
+Two controls ruled out the obvious suspects first: the ghost *is* drawn
+(installing it changes the rendered frame — compared as raw RGB bytes,
+=before != after=), and it *does* walk the route correctly (tiles match
+=track.at(step)= at every sampled step). Rendering was never broken.
+
+*Reversed, on the human's decision:* past the end of its track the ghost
+now STANDS at its final recorded tile. That tile is a real recorded
+position — the one the trace actually ended on — not the stale mid-track
+position the original reasoning worried about. A ghost waiting at its
+finish line is what a ghost race looks like. After the change, measured
+the same way: visible at step 1200 (20 seconds), still at (16, 14).
+
+An empty track still hides the ghost: the linger reads
+=track.frames[-1]=, and there is no final tile to stand on.
+
+** Defect 2 — a space bar destroyed the whole recorded session
+
+=tuxemon.platform.const.events= shares the =PlayerInput.button= channel
+with real buttons — =QUIT= (20000), =UNICODE= (20001), =BACKSPACE=
+(20002) — and a =UNICODE= event carries the typed CHARACTER as its
+=value=, not a float. =Recorder.observe= filtered nothing, so pressing
+SPACE put =(step, 20001, ' ')= into =_inputs=, and =finish()= died:
+
+: pydantic_core.ValidationError: 27 validation errors for Trace
+: inputs.245.2  Input should be a valid number, unable to parse string
+:               as a number [input_value=' ', input_type=str]
+
+*At write time, on quit* — after the session had been played. The whole
+recording was lost. This is the same class of defect as the exporter
+button gap fixed earlier the same day, one layer deeper: both came from
+assuming the six overworld buttons were the only thing a human produces.
+
+*Fixed by dropping non-button events and TAINTING the trace*
+(=DROPPED_NON_BUTTON = "dropped_non_button_input"=). Dropping keeps the
+session writable; the taint keeps it honest, because a run whose text
+entry was discarded will not replay faithfully. =tuxghost.cli='s
+=compare= already surfaces taints as findings, so this costs no new
+reader. The value guard is separate from the button guard on purpose,
+and =bool= is excluded explicitly — it is an =int= subclass, and
+=float(True)= would silently record 1.0.
+
+** All four regression tests were demonstrated to fail
+
+| test | mutation | observed failure |
+|---+---+---|
+| =..._does_not_destroy_the_trace_at_write_time= | =observe='s filter removed | =pydantic_core.ValidationError: 1 validation error for Trace= |
+| =..._taints_the_trace= | =_taints.append= removed | =assert [] == ['dropped_non_button_input']= |
+| =..._stands_at_its_final_tile_past_the_end...= | linger disabled (S4's behaviour) | =assert 'ghost' in {'npc_red': ...}= |
+| =test_an_empty_track_still_hides_the_ghost= | empty-track guard removed | =IndexError: tuple index out of range= |
+
+=record.py= and =ghost/entity.py= both confirmed byte-identical to their
+pre-mutation copies afterwards. =test_a_clean_recording_is_not_tainted=
+is the deliberate CONTROL for the taint test: an assertion that a taint
+appears proves nothing if the recorder taints unconditionally, and this
+project has shipped exactly that class of vacuous test before.
+
+*Gate:* =make check= =EXIT=0=, 455 passed / 4 skipped / 11 warnings in
+245.55s; slow 4 passed; ruff + =lint-patched= + mypy (80 files) clean.
+Load 3.56 → 2.93. 450 → 455 (+5, one being the new control).
+
+** The lesson, stated plainly
+
+S4 shipped with three ghost properties "DEMONSTRATED, not asserted", a
+full green suite, and a documented claim that the feature worked. It did
+not. The single outstanding manual step was the only thing that could
+have caught either defect, and it sat undone across two subsequent
+subsystems. *A test suite cannot see a three-second window.*
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.

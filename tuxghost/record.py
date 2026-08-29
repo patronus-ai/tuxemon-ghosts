@@ -41,6 +41,12 @@ from tuxghost.trace import (
     patch_series_id,
 )
 
+#: Appended to `Provenance.taints` when `Recorder.observe` drops an input
+#: that is not a real button edge -- see `observe` for the failure this
+#: prevents. A trace carrying this taint had inputs discarded and will
+#: not replay faithfully.
+DROPPED_NON_BUTTON = "dropped_non_button_input"
+
 
 class Recorder:
     """Turns a live session into a `Trace`.
@@ -91,9 +97,49 @@ class Recorder:
             snapshot_save(session).model_dump_json()
         )
 
-    def observe(self, step: int, button: int, value: float) -> None:
-        """Record an input scheduled for `step`."""
-        self._inputs.append((step, button, value))
+    def observe(self, step: int, button: int, value: object) -> None:
+        """Record an input scheduled for `step`.
+
+        NON-BUTTON PLATFORM EVENTS ARE DROPPED, and dropping any taints
+        the trace. `tuxemon.platform.const.events` shares this same
+        `PlayerInput.button` channel with real buttons -- `QUIT` (20000),
+        `UNICODE` (20001) and `BACKSPACE` (20002) -- and a `UNICODE`
+        event carries the typed CHARACTER as its `value`, not a float.
+        `install_recording_events` records every input the session
+        delivers, so before this filter a human who pressed SPACE during
+        `tuxghost play` put `(step, 20001, ' ')` into `_inputs`, and
+        `finish()` then died inside pydantic:
+
+            ValidationError: 27 validation errors for Trace
+            inputs.245.2  Input should be a valid number, unable to parse
+            string as a number [input_value=' ', input_type=str]
+
+        That happened at WRITE time, on quit, so the entire session was
+        destroyed after it had been played -- the worst possible moment
+        to fail. Dropping keeps the trace writable; the taint keeps it
+        honest, because a run whose text entry was discarded will NOT
+        replay faithfully and nobody downstream should have to guess
+        that. `tuxghost.cli`'s `compare` already surfaces taints as
+        findings, so this costs no new reader.
+
+        The `value` guard is deliberately separate from the button
+        guard rather than folded into it: a real button arriving with a
+        non-numeric value would be a different defect, and it must not
+        reach `Trace` either. `bool` is excluded explicitly -- it is an
+        `int` subclass, and `float(True)` would silently record 1.0.
+        """
+        from tuxghost.agent.types import VALID_BUTTONS
+
+        numeric = (
+            float(value)
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else None
+        )
+        if button not in VALID_BUTTONS or numeric is None:
+            if DROPPED_NON_BUTTON not in self._taints:
+                self._taints.append(DROPPED_NON_BUTTON)
+            return
+        self._inputs.append((step, button, numeric))
 
     def finish(
         self, step_count: int, claimed_outcome: str | None = None
