@@ -48,8 +48,33 @@ def _sample(session: Any) -> GhostFrame:
     )
 
 
-def build_track(trace: Trace) -> GhostTrack:
+def build_track(trace: Trace, context: Any = None) -> GhostTrack:
     """Replay `trace` once, keeping only what a ghost needs to be drawn.
+
+    `context` MUST be passed when a real window already exists, and
+    `tuxghost.play` does. Left `None`, `build_client` falls through to
+    `tuxghost.boot.headless_context()`, which calls
+    `pg.display.set_mode()` a SECOND time -- and a second `set_mode`
+    invalidates every surface already converted against the first
+    display. In a windowed session that silently destroys the sprites
+    and tiles the real client had already loaded: they draw as blank
+    rectangles, while opaque ground tiles (which need no alpha
+    conversion) survive. The result is a map full of white holes with
+    the player and every NPC missing.
+
+    Found by S4's manual acceptance, which is also the only thing that
+    could have found it -- `make check` runs entirely headless, where
+    there is no first display to invalidate and both paths render
+    identically. Measured, windowed, 120 steps, same seed and epoch:
+    without a context the composited frame was 18772 bytes and visibly
+    holed; with one it was 17302 bytes, BYTE-IDENTICAL to the same frame
+    rendered under dummy SDL. Reproduced twice each way.
+
+    This is the second, independent half of the hazard `tuxghost.play`'s
+    "Ordering note 2" describes. That note forces `tuxemon.graphics` and
+    `tuxemon.map.view` to bind the windowed scale before this function
+    runs, which fixes the SCALE. It does nothing about the display being
+    re-created underneath them, which is this.
 
     Deliberately NOT `execute(checkpoint=1, capture_states=True)`: that
     hook runs `digest_of` AND `state_of` on every step -- a full hash
@@ -71,7 +96,10 @@ def build_track(trace: Trace) -> GhostTrack:
     save_data = SaveData.model_validate(trace.initial_state)
 
     _client, session = boot_from_save(
-        save_data, seed=trace.header.seed, clock_epoch=trace.header.clock_epoch
+        save_data,
+        seed=trace.header.seed,
+        clock_epoch=trace.header.clock_epoch,
+        context=context,
     )
     client = session.client
     install_schedule(client, _schedule_of(trace))

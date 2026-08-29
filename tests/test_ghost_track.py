@@ -43,3 +43,45 @@ def test_the_cheap_hook_agrees_with_state_of() -> None:
         assert frame.map_name == state["map"], step
         assert list(frame.tile) == state["tile_pos"], step
         assert frame.facing == state["facing"], step
+
+
+def test_build_track_reuses_a_given_context_instead_of_reinitialising() -> None:
+    """The windowed-render defect S4's manual acceptance found.
+
+    Given a context, `build_track` must NOT reach
+    `tuxghost.boot.headless_context()`, because that calls
+    `pg.display.set_mode()` a second time and a second `set_mode`
+    invalidates every surface already converted against the first
+    display. Windowed, that turns the map into blank rectangles with the
+    player and every NPC missing.
+
+    This asserts the CALL, not the pixels, deliberately: the suite runs
+    entirely headless, where there is no first display to invalidate and
+    both paths render identically. A pixel assertion here would pass
+    whether or not the bug were present -- exactly the vacuous-test trap
+    this project keeps falling into. The pixel evidence is in the commit
+    message and STATUS.org, measured windowed.
+    """
+    from tuxghost import boot
+
+    calls: list[int] = []
+    real = boot.headless_context
+
+    def counting() -> object:
+        calls.append(1)
+        return real()
+
+    trace = read(PARENT)
+    boot.headless_context = counting
+    try:
+        # Without a context: the headless path is taken, as it must be
+        # for every non-windowed caller in this project.
+        build_track(trace)
+        assert len(calls) == 1, calls
+
+        # With one: reused, never re-initialised.
+        ctx = real()
+        build_track(trace, context=ctx)
+        assert len(calls) == 1, calls
+    finally:
+        boot.headless_context = real

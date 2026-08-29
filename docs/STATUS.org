@@ -2059,6 +2059,91 @@ not. The single outstanding manual step was the only thing that could
 have caught either defect, and it sat undone across two subsequent
 subsystems. *A test suite cannot see a three-second window.*
 
+* Defect 3 — the windowed render was full of holes, and why
+
+Found immediately after the two defects above, in the SAME manual
+acceptance session: the human reported "there is a black tiling thing".
+
+*Symptom:* windowed, the map draws with large blank rectangles where
+sprites and many tiles should be. The player and every NPC are missing.
+Opaque ground tiles survive; everything needing alpha does not.
+
+*Root cause:* =build_track= called =boot_from_save= with no =context=, so
+=build_client= fell through to =tuxghost.boot.headless_context()=
+(=boot.py:202=), which calls =pg.display.set_mode()= a SECOND time. A
+second =set_mode= invalidates every surface already converted against
+the first display — so the real client's already-loaded sprites and
+alpha tiles became garbage and drew as blank.
+
+=boot_from_save= has accepted a =context= parameter all along, and
+=tuxghost.play= passes it for the REAL session. =build_track= never
+accepted one. Fixed by giving it the parameter and having =play= forward
+the windowed context.
+
+*This is the second, independent half of the hazard =play.py='s
+"Ordering note 2" describes.* That note forces =tuxemon.graphics= and
+=tuxemon.map.view= to bind the windowed SCALE before the ghost build
+runs, and it works — measured this session, both modules bound at scale
+5 matching the real context. It says nothing about the display being
+re-created underneath them, which is this defect. Ordering note 2 was a
+correct fix to a different problem that shares a cause.
+
+*Measured, windowed, 120 steps, seed 1234, epoch 1787659200:*
+
+| build_track called with | frame bytes | matches headless? |
+|---+---+---|
+| no context (the defect) | 18772 | no — visibly holed |
+| a context (the fix) | 17302 | *byte-identical* |
+| not called at all (control) | 17302 | byte-identical |
+
+Each row reproduced TWICE. The track itself is unaffected either way:
+177 frames, last =GhostFrame(spyder_paper_town.tmx, (16,14),
+Direction.RIGHT)=.
+
+** A wrong diagnosis, corrected — recorded because the correction is the point
+
+The first hypothesis was that =tuxghost.observe='s =FrameRenderer= built
+its compositing surface as a plain =pg.Surface= with no =.convert()=, so
+display-format sprites blitted onto it wrongly. Adding =.convert()=
+appeared to fix it: the frame went to 17302 bytes, byte-identical to the
+headless control. That looked conclusive and was wrong.
+
+Two checks killed it. =convert()= changes NOTHING measurable here —
+=plain= and =convert= both report =bitsize 32=, masks
+=(16711680, 65280, 255, 0)=, =flags 0=, =alpha None=, =colorkey None=,
+=bytesize 4=, under both dummy and a real window. And re-running the
+UNFIXED configuration twice produced the clean 17302 image both times.
+The artifact had never been about =convert()=: the experimental script
+that "proved" the fix had silently dropped the =build_track= call.
+
+*A fix that works is not a diagnosis.* The confounder was invisible until
+the unfixed case was re-run, which is the only reason it was caught.
+=observe.py= was restored and is unchanged on disk.
+
+** Why no headless test can catch this
+
+=make check= runs entirely headless, where there is no first display to
+invalidate, so BOTH paths render identically — the pixel evidence above
+only exists windowed. A pixel assertion in the suite would pass whether
+or not the bug were present: precisely the vacuous-test trap this
+project keeps re-discovering.
+
+So =test_build_track_reuses_a_given_context_instead_of_reinitialising=
+asserts the CALL instead: given a context, =headless_context()= must not
+be reached. Demonstrated to fail against the defect — dropping the
+=context=context= forwarding gives =AssertionError: [1, 1]= (called
+twice, not once) — with =track.py= confirmed byte-identical after
+restore.
+
+*Gate:* =make check= =EXIT=0=, 456 passed / 4 skipped / 11 warnings in
+272.15s; slow 4 passed; ruff + =lint-patched= + mypy (80 files) clean.
+
+A first =make check= on this change FAILED (=EXIT=2=) on two unused
+=type: ignore= comments, because mypy had been run before the new test
+was added rather than after. That is the same lesson recorded in the S5
+section, repeated within the same day: *run the gate's own command after
+the last edit, not before it.*
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.

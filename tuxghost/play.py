@@ -80,7 +80,14 @@ def play(
     import tuxemon.graphics
     import tuxemon.map.view  # noqa: F401
 
-    track = build_track(read(ghost_trace)) if ghost_trace is not None else None
+    # `context=` is required, not decoration: without it the ghost's
+    # own boot calls `pg.display.set_mode()` again and invalidates every
+    # surface this window already converted. See `build_track`.
+    track = (
+        build_track(read(ghost_trace), context=context)
+        if ghost_trace is not None
+        else None
+    )
 
     seed_all(seed)
     pin_clock(clock_epoch)
