@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from tuxghost.boot import boot_from_save
 from tuxghost.optimize.editors.scripted import ScriptedEditor
 from tuxghost.optimize.objective import RulesObjective
 from tuxghost.optimize.runner import optimize
@@ -229,7 +230,7 @@ def test_a_shared_rules_instance_does_not_leak_furthest_map_across_seals(
     rules = TuxemonFirstBattleRules()
 
     current_map = [CRITICAL_PATH[0]]
-    real_boot = seal_mod.boot_from_save
+    real_boot = boot_from_save
 
     def wrapped_boot(*args: Any, **kwargs: Any) -> Any:
         client, session = real_boot(*args, **kwargs)
