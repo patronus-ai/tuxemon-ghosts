@@ -132,6 +132,13 @@ _TRACKED_FILES = (
     # tuple: a future seventh patch must fail loudly here rather than let
     # a stale read join the ambient noise unnoticed.
     "tests/test_play_cli.py::",
+    # S5 (progress rules + vgbench export), added ahead of the tests
+    # themselves so parallel implementers do not all append to this one
+    # tuple. All read fixtures recorded against the current `patches/`,
+    # so all must warn ZERO times and none gets a pinned count.
+    "tests/test_rules.py::",
+    "tests/test_rules_seal.py::",
+    "tests/test_vgbench_export.py::",
 )
 _EXPECTED_PATCH_SERIES_ID_WARNING_COUNTS: dict[str, int] = {
     "tests/test_golden.py::test_golden_trace_still_reaches_its_recorded_digest": 1,
