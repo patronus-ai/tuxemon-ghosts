@@ -1,0 +1,355 @@
+#+TITLE: S5 — progress rules and vgbench export
+#+DATE: 2026-08-29
+#+STATUS: designed, not implemented
+
+* What this is
+
+S5 replaces =ReachTile= with a *progress* objective, and teaches this
+project to describe its runs in the same terms as
+=~/Workspace/videogamebench= — a colleague's harness that independently
+built the same two subsystems this project did.
+
+Two deliverables, one design:
+
+1. =tuxghost/rules.py= — a =GameRules= protocol emitting
+   ={"progress", "at_goal", "dead"}= per step, plus =TuxemonRules=,
+   modelled on their =PokemonRedBrockRules=.
+2. A trace exporter writing their trajectory JSON
+   (={type, game, fps, total_frames, segments}=) alongside our
+   =.tuxghost=.
+
+=docs/STATUS.org= has named S5 "finish lines / rewards" since S3's
+close-out, on the argument that *position is a proxy for progress and
+this project has never measured progress*. That is still the reason;
+what changed is that a compatible interface already exists next door, so
+S5 matches it rather than inventing one.
+
+* Why now
+
+=akkikiki/videogamebench= is a fork of the public VideoGameBench (Alex
+Zhang, Ofir Press et al.) carrying *114 commits / 864 files / 110k
+lines* of a colleague's work. It contains both of the subsystems this
+project built, arrived at independently:
+
+| theirs | ours |
+|--------+------|
+| =scripts/online_speedrun.py= — "the LLM agent OBSERVES the live game state and iteratively decides the next few actions" | S2, =tuxghost agent= |
+| =scripts/speedrun_optimize.py= + 9 strategy variants | S3, =tuxghost optimize= |
+
+Their optimizer's contract is almost word for word ours: seed from a
+gold trajectory, ask a model for a faster one, replay each candidate
+deterministically, accept only if it still clears the goal AND does so
+in fewer frames.
+
+*Their Pokémon Red work is the direct analogue of our Tuxemon.* Their
+=sandbox/POKEMON_SETUP.md= calls it "the first expansion game beyond
+Super Mario Land", goal = the Boulder Badge, and flags the same horizon
+problem we have: "discovering a Brock-clearing trajectory is a much
+larger search than SML 1-1."
+
+* Non-goals
+
+- *Not fixing their repo.* Their data has defects (below); we neither
+  copy nor repair them.
+- *Not importing their trajectories.* Export only — see "Why hold-sets
+  are not needed".
+- *Not executing their games.* No PyBoy, no BizHawk, no ROMs.
+- *No change to the =.tuxghost= format.* The exporter is additive.
+
+* Research: what Tuxemon's Boulder Badge actually is
+
+Their goal is =wObtainedBadges (0xD356) & 0x01=. Finding ours required
+ruling out three candidates that look right and are inert.
+
+| candidate | verdict |
+|-----------+---------|
+| =badge= game variable | *DEAD.* =is variable_set badge:yes= appears 9 times (=route1.tmx=, =taba_town.tmx=); =set_variable badge= appears *0* times. It can never become true in shipped content. |
+| badge *items* | *DEAD.* Five exist with =category: badge= (=scoop_badge=, =greenwash_badge=, =nimrod_badge=, =omnichannel_badge=, =shaft_badge=); *zero* are referenced by any map event. Never granted. |
+| missions | *EFFECTIVELY DEAD.* One mission file ships (=spyder.yaml=); =tests/fixtures/paper_town.save= has =missions: []=. |
+| *gym leader battles* | *LIVE.* 13 =classic_gym_*.tmx= maps, each referenced from another map, each containing a leader battle. |
+
+The gym event is gated on:
+
+: cond1: not battle_outcome player,won,classic_gym_leader_granite
+: act17: start_battle player,classic_gym_leader_granite
+
+Win once and the gate closes permanently — the same latch semantics as a
+badge bit. The outcome is stored by =BattlesHandler=
+(=tuxemon/entity/battle.py=) as ={fighter, opponent, outcome}= in
+=npc_state.battles=, with a =has_fought_and_outcome(outcome, opponent)=
+accessor. *Our digest already captures that field.*
+
+*Conclusion: Tuxemon's Boulder Badge is "defeat a gym leader."* With 13
+gyms there is a natural =n_gyms_won= term paralleling their =n_badges=.
+
+** The horizon problem, stated honestly
+
+A gym win is the correct analogue and is *not reachable by any trace
+this project can currently record*. Our longest measured run is a wild
+encounter reaching a clean =CombatState= exit at step 4945 from a cold
+boot; a gym requires overworld navigation, a building interior, then the
+fight. Their =POKEMON_SETUP.md= reports the identical problem for Brock.
+
+Shipping only the gym goal would make it the *fifth* piece of correct,
+permanently inert plumbing here, after the badge variable, badge items,
+missions, and =persistent_npc_state=. So S5 ships two goals.
+
+* What already exists, verified on this tree
+
+| fact | where |
+|------+-------|
+| =observe(py, gw, frame) -> {"progress": int, "at_goal": bool, "dead": bool}= | their =scripts/game_rules.py= |
+| =progress= monotone-as-possible, scorer tracks its max; =at_goal= latches =goal_frame=; =dead= ends the run as failure | ibid., module docstring |
+| =PokemonRedBrockRules.progress = n_badges*1e9 + furthest_critical_path_map*1e3 + party_count*10= | ibid. |
+| scorer replays segments, calls =rules.observe= per frame, tracks =goal_frame= / =max_progress= / =died= / =prog_series= | their =scripts/speedrun.py::_score_rules_plain= |
+| trajectory JSON = ={type, game, fps, total_frames, segments:[{frame, buttons[]}]}=, run-length held-state | their =results/speedrun/*.json= |
+| =run_steps(client, n, hook)= calls =hook(i)= BEFORE =client.update(FIXED_DT)= | =tuxghost/loop.py= |
+| =state_of= serializes the whole save; =get_map_name()= / =tile_pos= / party are cheap attribute reads | =tuxghost/digest.py:148-151= |
+| a battle reaches a clean =CombatState= exit at step 4945, reproducibly | =tests/test_combat_determinism.py= |
+| button ints must be read from =tuxemon.platform.const.buttons=, never literals | pinned by =tests/test_optimize_claude.py= |
+
+** Their data defects: we match the FIELD, not the VALUE
+
+- =type= reads ="human"= in *all 21* result files, including
+  =agent-kimi=, =refined-100r_claude-opus-4-8= and =fused-glm-5.2=.
+  Derived artifacts inherit the gold's value and it is never updated.
+  Their generator code does set it properly elsewhere
+  (=decode_xkeyed.py= writes ="xkeyed"=), so this is an oversight in the
+  derivation path, not a design choice.
+- Four different key sets across 21 files; =rom=, =started_at= and
+  =boot_frames= appear in exactly one.
+- *20 of 21 filenames disagree with their own =total_frames=*, by +10 to
+  +209 frames.
+
+We emit their field names with our real values, and derive any filename
+frame count from the actual =total_frames=.
+
+* Architecture
+
+** =tuxghost/rules.py=
+
+A *single module*, deliberately mirroring their =scripts/game_rules.py=
+rather than inventing a package layout — matching is the point, and
+their one file already holds three rules classes side by side.
+
+- =GameRules= protocol — =observe(session, step) -> Observation=, where
+  =Observation= is ={"progress": int, "at_goal": bool, "dead": bool}=.
+  Same three signals, same meanings, our arguments in place of
+  =(py, gw, frame)=.
+- =TuxemonRules= — shared =progress=; subclasses supply the goal.
+- =CRITICAL_PATH= — map ordinal list, marked =VERIFY=, as theirs is.
+
+** What is superseded
+
+=Objective= / =ReachTile= are replaced, not extended — what
+=STATUS.org= already says S5 should do.
+
+*One deviation from that section, flagged rather than buried.* It also
+promises "nothing in S3's loop, seal or edit vocabulary changes". *That
+is no longer true, and the spec should move rather than the design.*
+Their =observe= runs every frame because =goal_frame= must be latched at
+the moment it is hit and =max_progress= must survive later regression.
+Scoring only the end state — all =Objective.score(candidate)= can see —
+produces neither. So:
+
+- =seal()= gains an optional per-step rules observer.
+- =CandidateResult= gains =max_progress=, =goal_step=, =died=.
+
+The *edit vocabulary* is untouched, which is the part of that promise
+that survives.
+
+** The cost trap
+
+Per-step observation reads only cheap fields —
+=session.player.battles=, =client.get_map_name()=, party length — and
+*never* calls =state_of()=, which serializes the entire save. This is
+the exact mistake the S4 plan made, where
+=execute(checkpoint=1, capture_states=True)= would have run a full
+digest plus save-serialization on every step to recover three fields.
+Pinned by a test, not a comment (validation item 6).
+
+** Acceptance stays lexicographic
+
+Score becomes =(at_goal, max_progress, -steps)=, so the runner's
+existing comparison survives untouched. Goal-reaching beats non-goal;
+among non-goal candidates higher progress wins; among goal-reaching,
+fewer steps wins.
+
+*Why this differs from theirs, deliberately.* Their loop rejects every
+non-goal candidate outright, which it can afford because it seeds from a
+gold run that ALREADY clears the level. Ours seeds from a parent that
+does not reach the goal, so =progress= is what gives the search a
+gradient at all — precisely the "continuous feedback" their own
+docstring describes for blind navigation.
+
+* =TuxemonRules=
+
+** progress
+
+Same three-term shape as theirs, so the numbers read the same way:
+
+#+begin_src python
+progress = (n_gyms_won                 * 1_000_000_000
+          + furthest_critical_path_map *         1_000
+          + party_count                *            10)
+#+end_src
+
+- =n_gyms_won= — =outcome == "won"= entries in =npc_state.battles= whose
+  opponent matches =classic_gym_leader_*=. The list only grows, so this
+  is monotone by construction.
+- =furthest_critical_path_map= — max-tracked index into =CRITICAL_PATH=.
+- =party_count= — the nudge term, giving blind navigation something to
+  climb.
+
+** The two goals
+
+- =TuxemonGymRules= — =at_goal = n_gyms_won >= 1=, i.e. *any* gym
+  leader defeated. The true Boulder Badge analogue. Real code reading a
+  real field, *not reachable by any currently recordable trace*, and
+  documented as such rather than presented as verified.
+
+  *Why "any" and not "the first".* An earlier draft said "the first gym
+  leader", which is not implementable: all 13 leaders are named
+  =classic_gym_leader_<name>= (astra, bravion, ferrum, granite, marin,
+  mila, orion, pyra, shade, sylva, voltessa, vyre, zephra) and *nothing
+  in the shipped data encodes an ordering between them*. "Your first
+  badge" does not require knowing which gym is first — only that one has
+  been won — so =n_gyms_won >= 1= is both the honest reading of the
+  analogue and the one term already computed for =progress=. Gym
+  ORDERING remains an open question and belongs to =CRITICAL_PATH='s
+  calibration debt, where it affects shaping only.
+- =TuxemonFirstBattleRules= — =at_goal = any battle won=. The shipped,
+  tested goal. Reachable: =test_combat_determinism= drives a battle to a
+  clean exit at step 4945.
+
+Both share =progress=; only the goal predicate differs.
+
+** dead
+
+Tuxemon supports what their Pokémon rules currently leave as
+=dead = False  # TODO: detect blackout=: the save carries
+=teleport_faint=, and a wipe is *party non-empty and every monster at
+=current_hp == 0=*. Cheap per-step read.
+
+*It ships inert*, because nothing we can record today wipes a party. The
+escape is the pattern =tests/test_digest.py= already uses — it
+hand-flips an NPC's =persistence= to force discrimination. =dead= gets
+the same treatment: a test that hand-zeroes party HP and asserts
+termination. Inert in production, genuinely exercised in test.
+
+** CRITICAL_PATH and its calibration debt
+
+Ships marked =VERIFY=, with the same debt theirs carries: their
+=POKEMON_SETUP.md= says to dump =wCurMap= over a reference run before
+trusting the shaping. Ours needs a map-sequence dump over a real route.
+
+Research points at =spyder_paper_town → route1 → taba_town → …=, since
+=route1= and =taba_town= are where the (dead) badge gate is checked —
+but *that is inference, not measurement*. The goal signal does not
+depend on it; only the shaping does.
+
+* Trace export
+
+** Field mapping
+
+| theirs | from ours |
+|--------+-----------|
+| =fps= | =header.step_rate= (60 — already identical) |
+| =total_frames= | =header.step_count= |
+| =segments= | =inputs=, edges → run-length held-state |
+| =game= | =header.mod_id= |
+| =type= | =provenance.recorder= — our real value |
+| =goal_frame= | the latched goal step from =GameRules= |
+
+Conversion walks sorted edges maintaining a held set, emitting
+={frame, buttons}= whenever the set changes. Button ints map to their
+names via =tuxemon.platform.const.buttons=, *never* literals.
+
+** Deliberately not emitted
+
+- =started_at= — wall-clock. =CLAUDE.md= is explicit that real
+  timestamps never enter this format; emitting one for schema parity
+  would breach the project's central rule for cosmetic gain.
+- =rom= — meaningless here. Omit rather than fake.
+
+Both appear in exactly one of their 21 files.
+
+** Why hold-sets are NOT needed
+
+51% of their segments (1,490 of 2,938) hold two or three buttons at
+once, and =tuxghost/optimize/schedule.py:93= refuses that outright —
+=ActionScript= "is sequential and cannot express two buttons held at
+once."
+
+*That only bites on import, which is out of scope.* Our traces are
+single-button by construction, a legal subset of their format, so every
+=.tuxghost= exports to a valid vgbench trajectory. Extending
+=ActionScript= to hold-sets — which would touch =lift=, =seal=,
+=edits=, every editor, and a refusal several tests pin — is *not part of
+S5*.
+
+** Surface
+
+A =tuxghost export= subcommand (trace in, their JSON out), and the same
+writer dropping a copy into =--run-dir= so every run is comparable
+without a second command.
+
+Filenames follow their =<role>_<model>_<game>_<stage>_<frames>f.json=
+convention, with the frame count derived from the actual =total_frames=.
+
+* Validation
+
+Every test must be *demonstrated to fail* against the defect it pins,
+with real before/after output in the report. This project has had
+*seven* tests pass vacuously; the burden is on the demonstration.
+
+** The rules
+
+1. =progress= is *monotone* across a full run — never decreases.
+2. =progress= *discriminates* — a run reaching further scores strictly
+   higher. The anti-vacuity test: this project's original digest was
+   "deterministic" across nine runs purely because it captured nothing
+   that changed.
+3. =at_goal= *latches at the right step*, not at the end.
+   =TuxemonFirstBattleRules= against the combat trace must latch at the
+   step the battle is won.
+4. =TuxemonGymRules= is *exercised despite being unreachable* — a
+   hand-constructed session whose =battles= holds a gym-leader win,
+   mirroring =test_digest.py='s hand-flipped =persistence=.
+5. =dead= *terminates the run* — hand-zeroed party HP.
+6. =observe= *never calls =state_of=* — monkeypatch =state_of= to raise
+   and confirm =observe= still works. Structural, not a flaky timing
+   assertion.
+
+** The export
+
+7. *Round-trip*: edges → segments → edges reproduces =inputs= exactly.
+8. *Run-length correctness*: ascending frames, no two consecutive
+   segments with the same held set.
+9. =total_frames == header.step_count=, and any generated filename
+   agrees with it — the drift present in 20 of their 21 files.
+10. *Button names read from the constants* — reuse S4's remap pin
+    (=mock.patch.object= swapping two valid values + =importlib.reload=)
+    and confirm the export follows rather than emitting stale literals.
+11. *No =timestamp= anywhere*, asserted on the written file.
+
+** The consistency check that proves the point
+
+12. Load our exported file with *their own consumer expression*,
+    verbatim — ={s["frame"]: set(s["buttons"]) for s in
+    data["segments"]}=, the exact line used in four of their scripts —
+    and assert our key set is a subset of their =gold_human= file's.
+
+** What cannot be tested, stated plainly
+
+That their scorer *actually accepts* our file. That needs their repo, a
+legal ROM and PyBoy. We verify shape and consumer-compatibility, not
+end-to-end acceptance.
+
+* Invariants at close-out
+
+- No seventh patch.
+- =EXEMPTIONS == {}=.
+- *No =.tuxghost= format change*, no format-version bump — the exporter
+  is additive.
+- =make check= green, run alone, on a host whose =uptime= was checked.
