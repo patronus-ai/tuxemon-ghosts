@@ -1737,9 +1737,9 @@ All checks passed!                                  # lint-patched
 ./.venv/bin/python -m mypy tuxghost tests
 Success: no issues found in 80 source files
 PYTHONHASHSEED=0 ./.venv/bin/python -m pytest -q
-435 passed, 4 skipped, 11 warnings in 249.18s (0:04:09)
+446 passed, 4 skipped, 11 warnings in 244.24s (0:04:04)
 PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 ./.venv/bin/python -m pytest -q -m slow
-4 passed, 435 deselected, 1 warning in 51.92s
+4 passed, 446 deselected, 1 warning in 51.43s
 EXIT=0
 $ uptime   # after finishing
 12:45  up 19 days,  2:15, 2 users, load averages: 3.64 4.20 4.53
@@ -1747,9 +1747,18 @@ $ uptime   # after finishing
 
 Re-run a second time end to end, back to back, to confirm the exit code
 explicitly and check for nondeterminism between runs: identical counts
-(435 passed / 4 skipped fast, 4 passed slow), =EXIT=0= both times.
+(446 passed / 4 skipped fast, 4 passed slow), =EXIT=0=.
 
-- *Fast tier: 435 passed, 4 skipped, 11 warnings.* Up from S4's 404 — 31
+- *The final gate caught a regression the per-task gates could not.*
+  Every task ran =mypy --strict tuxghost= (35 files); =make check= runs
+  =mypy tuxghost tests= (*80* files), and only the wider one saw
+  =tests/test_rules_seal.py= reading =boot_from_save= off
+  =tuxghost.optimize.seal=, which does not re-export it. Fixed by taking
+  the reference from =tuxghost.boot= while leaving the monkeypatch
+  target on the =seal= module, where it has to stay for =seal= to pick
+  the wrapper up. Worth recording: a green narrow type-check is not a
+  green gate.
+- *Fast tier: 446 passed, 4 skipped, 11 warnings.* Up from S4's 404 — 42
   net new tests, the three new S5 files (=test_rules.py= 9,
   =test_rules_seal.py= 10, =test_vgbench_export.py= 12), all three
   pre-registered in =tests/conftest.py='s =_TRACKED_FILES= tripwire
@@ -1763,7 +1772,7 @@ explicitly and check for nondeterminism between runs: identical counts
 
 *On the timing.* Load stayed under 5 throughout both runs (started
 4.03/4.38/4.70, ended 3.64/4.20/4.53 on the timed run) — below this
-project's quotability threshold — so *249.18 s at 439 tests* (435 fast +
+project's quotability threshold — so *244.24 s at 450 tests* (446 fast +
 4 slow) sits fairly beside S4's *269.70 s at 408 tests* and Stream A's
 *215.32 s at 375 tests*, both also taken under load 5.
 
