@@ -1,19 +1,56 @@
-"""Regression tests for `tuxghost.vgbench`, the videogamebench exporter.
+"""Regression tests for `tuxghost.vgbench`, the videogamebench exporter,
+and for `tuxghost.cli`'s `export` subcommand (S5 task 6).
 
 Their trajectory format is RUN-LENGTH HELD STATE -- `{"frame": N,
 "buttons": [...]}` means "the held set becomes this at frame N and stays
 until the next segment". Ours is an EDGE list, `(step, button, value)`
 with PRESSED/RELEASED. `segments_of`/`trajectory_of` convert losslessly.
+
+The CLI tests below are driven as a real SUBPROCESS, not through `main()`
+in-process -- `tests/test_optimize_cli.py`'s own docstring records why: an
+in-process run shares a process with earlier boots, and the exit-code
+contract is a property of the process, not of a function's return value.
 """
 
 import json
+import os
+import subprocess
+import sys
 from itertools import pairwise
 from pathlib import Path
 
 from tuxghost.trace import read
 from tuxghost.vgbench import segments_of, trajectory_of
 
+ROOT = Path(__file__).resolve().parent.parent
 PARENT = Path(__file__).parent / "golden" / "scripted_town_1234.tuxghost"
+
+
+def _run_cli(
+    *args: str,
+    extra_env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Model: `tests/test_optimize_cli.py`'s `_run`. `cwd` is a real
+    parameter, not decoration -- a run launched from somewhere other than
+    ROOT is the only way to prove a RELATIVE `--trace` path resolves
+    against the CALLER's cwd, not the vendored `tuxemon/` directory the
+    process later chdirs into."""
+    env = {
+        **os.environ,
+        "SDL_VIDEODRIVER": "dummy",
+        "SDL_AUDIODRIVER": "dummy",
+        "PYTHONHASHSEED": "0",
+        **(extra_env or {}),
+    }
+    return subprocess.run(
+        [sys.executable, "-m", "tuxghost.cli", "export", *args],
+        capture_output=True,
+        text=True,
+        cwd=str(cwd) if cwd is not None else ROOT,
+        env=env,
+        check=False,
+    )
 
 
 def test_segments_are_run_length_held_state() -> None:
@@ -185,3 +222,65 @@ def test_button_names_track_upstreams_constants() -> None:
             assert names[1] == "LEFT"
     finally:
         importlib.reload(vgb)
+
+
+def test_export_refuses_a_missing_trace(tmp_path: Path) -> None:
+    proc = _run_cli(
+        "--trace", str(tmp_path / "nope.tuxghost"),
+        "--out", str(tmp_path / "o.json"),
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert not (tmp_path / "o.json").exists()
+
+
+def test_a_relative_trace_path_resolves_against_the_callers_cwd(
+    tmp_path: Path,
+) -> None:
+    """The process chdirs into tuxemon/ before doing work, so a relative
+    path must be resolved first. Asserted on the RESOLVED path appearing
+    in the refusal, because both the fixed and broken versions exit 2 --
+    an exit-code-only assertion would not discriminate."""
+    resolved = tmp_path / "nope.tuxghost"
+    proc = _run_cli(
+        "--trace", "nope.tuxghost",
+        "--out", str(tmp_path / "o.json"),
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 2
+    assert str(resolved) in proc.stderr
+
+
+def test_the_export_loads_with_their_own_consumer_expression() -> None:
+    """THE CONSISTENCY CHECK. `{s["frame"]: set(s["buttons"]) for s in
+    data["segments"]}` is the exact line four of their scripts use to
+    read a trajectory. If our file survives it, their consumers can read
+    us."""
+    traj = trajectory_of(read(PARENT))
+    seg_at = {s["frame"]: set(s["buttons"]) for s in traj["segments"]}
+    assert seg_at
+    assert all(isinstance(k, int) for k in seg_at)
+    assert set(traj) <= {
+        "type", "game", "rom", "started_at", "boot_frames",
+        "fps", "total_frames", "segments", "goal_frame", "rationale",
+    }
+
+
+def test_export_writes_a_trajectory_the_cli_produces_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """The CLI's own output, not just `trajectory_of` called directly --
+    proves `_export` actually wires `--trace`/`--out` through
+    `tuxghost.vgbench.trajectory_of` and writes valid JSON their own
+    consumer expression can read."""
+    out = tmp_path / "traj.json"
+    proc = _run_cli("--trace", str(PARENT), "--out", str(out))
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(out.read_text())
+    seg_at = {s["frame"]: set(s["buttons"]) for s in data["segments"]}
+    assert seg_at
+    assert all(isinstance(k, int) for k in seg_at)
+    assert set(data) <= {
+        "type", "game", "rom", "started_at", "boot_frames",
+        "fps", "total_frames", "segments", "goal_frame", "rationale",
+    }

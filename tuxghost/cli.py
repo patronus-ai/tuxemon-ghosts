@@ -188,6 +188,7 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
     "record": ("out", "from_save"),
     "agent": ("actions", "from_save", "out", "run_dir"),
     "optimize": ("trace", "edits", "out", "run_dir"),
+    "export": ("trace", "out"),
     # "ghost" is OPTIONAL (plain windowed play without a ghost passes
     # `--ghost` as None) -- `_resolve_paths` already skips any argument
     # whose value is `None`, so listing it here is safe either way.
@@ -199,7 +200,7 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
 #: a session. `info` and `compare` are pure trace-file inspection and need
 #: neither.
 _NEEDS_BOOTSTRAP = frozenset(
-    {"execute", "verify", "record", "agent", "optimize", "play"}
+    {"execute", "verify", "record", "agent", "optimize", "play", "export"}
 )
 
 
@@ -331,6 +332,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_opt.add_argument("--checkpoint", type=int, default=64)
     p_opt.add_argument("--out", type=Path, required=True)
     p_opt.add_argument("--run-dir", type=Path, required=True, dest="run_dir")
+
+    p_exp = sub.add_parser(
+        "export", help="Write a trace as a videogamebench trajectory JSON."
+    )
+    p_exp.add_argument("--trace", type=Path, required=True)
+    p_exp.add_argument("--out", type=Path, required=True)
 
     p_play = sub.add_parser(
         "play", help="Play in a window with a ghost, recording the session."
@@ -1365,6 +1372,25 @@ def _optimize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _export(path: Path, out: Path) -> int:
+    """Write `path` (a `.tuxghost` trace) as a videogamebench trajectory
+    JSON at `out`. Reads through `_read_trace_or_refuse`, this module's one
+    trace-reading boundary, so a missing or malformed `--trace` is a
+    REFUSED precondition (exit 2), exactly like every other subcommand
+    here -- never the uncaught traceback (exit 1) that a bare
+    `tuxghost.trace.read` call would produce. `export` has nothing to
+    diverge FROM (it is a pure format conversion, not a replay), so like
+    `agent`/`optimize` it can only ever return 0 or 2."""
+    from tuxghost.vgbench import trajectory_of
+
+    trace = _read_trace_or_refuse(path, False)
+    if trace is None:
+        return 2
+    out.write_text(json.dumps(trajectory_of(trace), indent=2))
+    print(f"wrote {out}")
+    return 0
+
+
 def _ghost_trace_map_or_refuse(trace: Trace) -> bool:
     """`True` if `trace.initial_state` is a bootable `SaveData` whose
     `npc_state.current_map` resolves to a real map asset; otherwise prints
@@ -1507,6 +1533,8 @@ def main(argv: list[str] | None = None) -> int:
         return _optimize(args)
     if command == "play":
         return _play(args)
+    if command == "export":
+        return _export(args.trace, args.out)
     if command == "verify":
         return _verify(args.trace, args.allow_mismatch)
     if command == "execute":
