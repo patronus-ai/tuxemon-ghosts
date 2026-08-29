@@ -74,12 +74,65 @@ def segments_of(inputs: Any) -> list[dict[str, Any]]:
             segments[-1]["buttons"] = current  # coalesce same-frame edges
             if len(segments) >= 2 and segments[-1]["buttons"] == segments[-2]["buttons"]:
                 segments.pop()
+                # Recompute `last` from segments[-1] (NOT from `current`,
+                # which is now stale -- it described the popped, now-gone
+                # segment). Getting this wrong silently reintroduces the
+                # R4 consecutive-duplicate bug
+                # `test_same_frame_edges_coalesce_without_leaving_a_
+                # duplicate` pins: dropping this line makes `last` stay
+                # `current`, so the NEXT same-frame coalesce compares
+                # against the value that was just discarded rather than
+                # what remains, and a genuine duplicate can slip through.
                 last = segments[-1]["buttons"] if segments else None
                 continue
         else:
             segments.append({"frame": step, "buttons": current})
         last = current
     return segments
+
+
+def _stage_of(trace: Trace) -> str:
+    """The map a trace's `initial_state` booted on, `.tmx` stripped, or
+    `"unknown"` when absent. Pure dict access -- no `SaveData` validation,
+    no engine boot -- matching `_export`'s own claim in `tuxghost.cli` to
+    be "a pure format conversion, not a replay"."""
+    npc_state = trace.initial_state.get("npc_state") or {}
+    current_map = npc_state.get("current_map")
+    if not current_map:
+        return "unknown"
+    return str(current_map).removesuffix(".tmx")
+
+
+def trajectory_filename(trace: Trace, traj: dict[str, Any]) -> str:
+    """Their `<role>_<model>_<game>_<stage>_<frames>f.json` filename
+    convention (spec's "Surface" section), with the frame count DERIVED
+    from `traj["total_frames"]` -- never independently recomputed and
+    never taken from a caller-supplied count. 20 of their 21 committed
+    result files (`~/Workspace/videogamebench/results/speedrun/*.json`)
+    disagree with their own `total_frames` by +10 to +209 frames
+    (spec validation item 9); deriving the count from the same field the
+    file's OWN `total_frames` holds is what keeps this from reproducing
+    that drift.
+
+    `role` = `trace.provenance.recorder` (`cu-agent`/`offline-agent`/
+    `human`), `model` = `trace.provenance.model` or `"none"`, `game` =
+    `traj["game"]` (== `header.mod_id`), `stage` = the map the trace
+    booted on (see `_stage_of`). All four come from data the trace/
+    trajectory already carry, so no new required CLI flag is needed to
+    name the file.
+    """
+    role = trace.provenance.recorder
+    model = trace.provenance.model or "none"
+    game = traj["game"]
+    stage = _stage_of(trace)
+    frames = traj["total_frames"]
+    name = f"{role}_{model}_{game}_{stage}_{frames}f.json"
+    # None of the four fields above are free-form user input on any
+    # currently-shipped path (`recorder` is a `Literal`, `game` is
+    # `header.mod_id`, `stage` comes from a map filename) -- but a path
+    # separator slipping into any of them must not escape the containing
+    # directory.
+    return name.replace("/", "-").replace("\\", "-")
 
 
 def trajectory_of(trace: Trace, goal_frame: int | None = None) -> dict[str, Any]:

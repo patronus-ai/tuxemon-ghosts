@@ -188,7 +188,10 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
     "record": ("out", "from_save"),
     "agent": ("actions", "from_save", "out", "run_dir"),
     "optimize": ("trace", "edits", "out", "run_dir"),
-    "export": ("trace", "out"),
+    # "run_dir" is OPTIONAL (`None` when unset) -- `_resolve_paths`
+    # already skips any argument whose value is `None`, exactly the
+    # `play`/`--ghost` precedent noted just below.
+    "export": ("trace", "out", "run_dir"),
     # "ghost" is OPTIONAL (plain windowed play without a ghost passes
     # `--ghost` as None) -- `_resolve_paths` already skips any argument
     # whose value is `None`, so listing it here is safe either way.
@@ -300,8 +303,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p_opt.add_argument("--seed", type=int, default=None)
     p_opt.add_argument("--edits", type=Path, default=None)
     p_opt.add_argument("--model", default=None)
-    p_opt.add_argument("--objective", choices=("reach-tile",), required=True)
-    p_opt.add_argument("--target", required=True)
+    # "progress" added (whole-branch review, I2): `RulesObjective` /
+    # `TuxemonFirstBattleRules` -- the branch's headline claim, a rules
+    # interface replacing `ReachTile` -- was library-only before this;
+    # nothing on the CLI could reach it. `TuxemonFirstBattleRules`, not
+    # `TuxemonGymRules`: the gym goal is real code but NOT REACHABLE by
+    # any trace this project can currently record (see
+    # `tuxghost/rules.py`), so wiring it up here would add a second,
+    # permanently-inert CLI path.
+    p_opt.add_argument(
+        "--objective", choices=("reach-tile", "progress"), required=True
+    )
+    # NOT `required=True` any more: only `reach-tile` reads `--target`
+    # (`progress` scores via `TuxemonFirstBattleRules`, which needs no
+    # map/tile at all). `_optimize` enforces both directions explicitly
+    # -- `reach-tile` without `--target` and `progress` WITH one are both
+    # refused -- rather than silently ignoring an irrelevant flag, the
+    # same rule this module already applies to `--seed`/`--goal` above.
+    p_opt.add_argument("--target", default=None)
     # Mirrors `agent`'s `--goal`, and for the same reason: `--editor
     # claude` is the only editor that reads it, and without it the model
     # was sent the action list, the end tile and a bare score tuple with
@@ -338,6 +357,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_exp.add_argument("--trace", type=Path, required=True)
     p_exp.add_argument("--out", type=Path, required=True)
+    # Optional (whole-branch review, I3 -- the spec's "Surface" section):
+    # "the same writer dropping a copy into --run-dir so every run is
+    # comparable without a second command." `export` is also a standalone
+    # format-conversion command over ANY trace, not only ones just
+    # produced by `agent`/`optimize`, so unlike those subcommands'
+    # `--run-dir` this one is optional rather than required.
+    p_exp.add_argument("--run-dir", type=Path, default=None, dest="run_dir")
+    # Optional (whole-branch review, M4): `trajectory_of`'s `goal_frame`
+    # parameter had no caller anywhere in the tree. The latched goal step
+    # lives on a `GameRules`-driven `CandidateResult` (`optimize`'s
+    # `run.json` records `best_round`, not the step itself, so it is not
+    # reconstructible from `export`'s only input, the trace file) -- so a
+    # caller who already knows it (e.g. from a prior `optimize --objective
+    # progress` run) can stamp it in explicitly. `export` still performs
+    # no replay itself: it never computes this value.
+    p_exp.add_argument(
+        "--goal-frame", type=int, default=None, dest="goal_frame"
+    )
 
     p_play = sub.add_parser(
         "play", help="Play in a window with a ghost, recording the session."
@@ -953,18 +990,30 @@ def _parse_target(raw: str) -> tuple[str, tuple[int, int]] | None:
         return None
 
 
-def _derived_goal(objective: str, target: tuple[str, tuple[int, int]]) -> str:
+def _derived_goal(
+    objective: str, target: tuple[str, tuple[int, int]] | None
+) -> str:
     """The default `--goal` when the caller gives none.
 
     `--objective`/`--target` already say what the run is optimizing
     toward, so an unset `--goal` derives from them rather than leaving
-    `ClaudeEditor` blindfolded (whole-branch review, Important 1). Only
-    `reach-tile` exists; a new objective must extend this rather than
-    fall through to a stale sentence about tiles, so the `else` raises.
+    `ClaudeEditor` blindfolded (whole-branch review, Important 1). Every
+    objective must extend this rather than fall through to a stale
+    sentence about tiles, so the `else` raises.
+
+    `target` is `None` for `progress` (whole-branch review, I2): that
+    objective scores via `TuxemonFirstBattleRules`, which reads no
+    map/tile at all, so `_optimize` never parses one for it. `reach-tile`
+    always calls this with a real target -- `_optimize` refuses the
+    command before this is ever reached otherwise -- so the assert below
+    documents that invariant rather than silently trusting it.
     """
-    map_name, (x, y) = target
     if objective == "reach-tile":
+        assert target is not None, "reach-tile always has a parsed target here"
+        map_name, (x, y) = target
         return f"reach tile ({x}, {y}) on map {map_name}"
+    if objective == "progress":
+        return "win a battle -- TuxemonFirstBattleRules' at_goal"
     raise AssertionError(  # pragma: no cover -- argparse `choices` refuses this
         f"unhandled objective {objective!r}"
     )
@@ -998,9 +1047,10 @@ def _optimize(args: argparse.Namespace) -> int:
     from tuxghost.optimize.editors.mutation import MutationEditor
     from tuxghost.optimize.editors.replay import ReplayEditor, edits_from_json
     from tuxghost.optimize.editors.scripted import ScriptedEditor
-    from tuxghost.optimize.objective import ReachTile
+    from tuxghost.optimize.objective import Objective, ReachTile, RulesObjective
     from tuxghost.optimize.runner import Editor, optimize
     from tuxghost.optimize.seal import seal
+    from tuxghost.rules import GameRules, TuxemonFirstBattleRules
     from tuxghost.trace import write
 
     for name, value in (
@@ -1024,11 +1074,37 @@ def _optimize(args: argparse.Namespace) -> int:
         )
         return 2
 
-    target = _parse_target(args.target)
-    if target is None:
+    # `--target` is meaningful only for `reach-tile` (whole-branch
+    # review, I2): `progress` scores via `TuxemonFirstBattleRules`, which
+    # reads no map/tile at all. Both directions are refused explicitly,
+    # not silently accepted-and-ignored, the same rule this module
+    # already applies to `--seed`/`--goal` above.
+    # `--target` is meaningful only for `reach-tile` (whole-branch
+    # review, I2): `progress` scores via `TuxemonFirstBattleRules`, which
+    # reads no map/tile at all. Both directions are refused explicitly,
+    # not silently accepted-and-ignored, the same rule this module
+    # already applies to `--seed`/`--goal` above.
+    target: tuple[str, tuple[int, int]] | None = None
+    if args.objective == "reach-tile":
+        if args.target is None:
+            print(
+                "refused: --objective reach-tile requires --target",
+                file=sys.stderr,
+            )
+            return 2
+        target = _parse_target(args.target)
+        if target is None:
+            print(
+                f"refused: --target {args.target!r} does not parse; expected "
+                "MAP:X,Y (e.g. spyder_paper_town.tmx:11,16)",
+                file=sys.stderr,
+            )
+            return 2
+    elif args.target is not None:
         print(
-            f"refused: --target {args.target!r} does not parse; expected "
-            "MAP:X,Y (e.g. spyder_paper_town.tmx:11,16)",
+            f"refused: --objective {args.objective} has no use for --target "
+            f"(got {args.target!r}); only --objective reach-tile reads one, "
+            "and running as if it had been applied would silently discard it",
             file=sys.stderr,
         )
         return 2
@@ -1102,6 +1178,25 @@ def _optimize(args: argparse.Namespace) -> int:
     parent = _read_trace_or_refuse(args.trace, False)
     if parent is None:
         return 2
+
+    # The scoring objective (and, for `progress`, the rules driving it),
+    # from `--objective` alone -- `target` only matters for `reach-tile`
+    # (whole-branch review, I2). `TuxemonFirstBattleRules`, not
+    # `TuxemonGymRules`: the gym goal is real code but NOT reachable by
+    # any trace this project can currently record (`tuxghost/rules.py`).
+    objective: Objective
+    rules: GameRules | None
+    terms: tuple[str, ...]
+    if args.objective == "reach-tile":
+        assert target is not None  # enforced above
+        objective = ReachTile(target[0], target[1])
+        rules = None
+        terms = ReachTile.TERMS
+    else:
+        assert args.objective == "progress", args.objective  # argparse `choices`
+        objective = RulesObjective()
+        rules = TuxemonFirstBattleRules()
+        terms = RulesObjective.TERMS
 
     editor: Editor
     model: str | None = None
@@ -1192,9 +1287,10 @@ def _optimize(args: argparse.Namespace) -> int:
         # Important 1). Without the first the prompt named no target at
         # all; without the second the prompt's only quantitative feedback
         # was three unlabelled numbers (`[0.0, -2.0, -442.0]`) whose
-        # order and sign the model had to guess. `ReachTile.TERMS` is the
-        # objective's own statement of its terms, so the legend cannot
-        # drift out of step with `ReachTile.score`.
+        # order and sign the model had to guess. `terms` (`ReachTile
+        # .TERMS`/`RulesObjective.TERMS`, chosen above) is the objective's
+        # OWN statement of its terms, so the legend cannot drift out of
+        # step with whichever `.score` actually runs.
         # Computed once and reused for `run.json` below rather than
         # recomputed there: an explicit `--goal` is NOT reconstructible
         # from anything else the run directory records, and a derived one
@@ -1204,7 +1300,7 @@ def _optimize(args: argparse.Namespace) -> int:
         editor = ClaudeEditor(
             model=model,
             goal=goal,
-            score_legend=", ".join(ReachTile.TERMS),
+            score_legend=", ".join(terms),
         )
     else:  # pragma: no cover -- argparse `choices` already refuses this
         raise AssertionError(f"unhandled editor {args.editor!r}")
@@ -1213,13 +1309,14 @@ def _optimize(args: argparse.Namespace) -> int:
         result = optimize(
             parent,
             editor,
-            ReachTile(target[0], target[1]),
+            objective,
             rounds=args.rounds,
             patience=args.patience,
             max_rejections=args.max_rejections,
             max_cost=args.max_cost,
             checkpoint=args.checkpoint,
             model=model,
+            rules=rules,
         )
     except (ValueError, TypeError) as exc:
         # Deliberately narrow, like `_agent`'s boundary: these are the two
@@ -1372,22 +1469,50 @@ def _optimize(args: argparse.Namespace) -> int:
     return 0
 
 
-def _export(path: Path, out: Path) -> int:
+def _export(
+    path: Path,
+    out: Path,
+    run_dir: Path | None = None,
+    goal_frame: int | None = None,
+) -> int:
     """Write `path` (a `.tuxghost` trace) as a videogamebench trajectory
     JSON at `out`. Reads through `_read_trace_or_refuse`, this module's one
     trace-reading boundary, so a missing or malformed `--trace` is a
     REFUSED precondition (exit 2), exactly like every other subcommand
     here -- never the uncaught traceback (exit 1) that a bare
-    `tuxghost.trace.read` call would produce. `export` has nothing to
-    diverge FROM (it is a pure format conversion, not a replay), so like
-    `agent`/`optimize` it can only ever return 0 or 2."""
-    from tuxghost.vgbench import trajectory_of
+    `tuxghost.trace.read` call would produce.
+
+    `export` has nothing to diverge FROM (it is a pure format conversion,
+    not a replay) -- but unlike `agent`/`optimize`, it is NOT limited to
+    0 or 2 in practice: an earlier version of this docstring claimed
+    exactly that, which is false -- `--out /nonexistent-dir/o.json`
+    raises an uncaught `FileNotFoundError` from `Path.write_text` (exit
+    1), same as `agent`/`optimize`/`record` do for their own `--out`
+    (whole-branch review, M2). The CLAIM was wrong, not the convention;
+    corrected here rather than adding a fourth writable-directory check
+    this module does not perform anywhere else either.
+
+    `--run-dir` (whole-branch review, I3 -- the spec's "Surface" section)
+    is optional: when given, the SAME trajectory dict is also written
+    there, under a filename following their `<role>_<model>_<game>
+    _<stage>_<frames>f.json` convention (`tuxghost.vgbench
+    .trajectory_filename`), with the frame count derived from the
+    trajectory's own `total_frames` rather than reproducing the +10..+209
+    drift 20 of their 21 committed files carry against their own field.
+    """
+    from tuxghost.vgbench import trajectory_filename, trajectory_of
 
     trace = _read_trace_or_refuse(path, False)
     if trace is None:
         return 2
-    out.write_text(json.dumps(trajectory_of(trace), indent=2))
+    traj = trajectory_of(trace, goal_frame=goal_frame)
+    out.write_text(json.dumps(traj, indent=2))
     print(f"wrote {out}")
+    if run_dir is not None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        copy_path = run_dir / trajectory_filename(trace, traj)
+        copy_path.write_text(json.dumps(traj, indent=2))
+        print(f"wrote {copy_path}")
     return 0
 
 
@@ -1534,7 +1659,7 @@ def main(argv: list[str] | None = None) -> int:
     if command == "play":
         return _play(args)
     if command == "export":
-        return _export(args.trace, args.out)
+        return _export(args.trace, args.out, args.run_dir, args.goal_frame)
     if command == "verify":
         return _verify(args.trace, args.allow_mismatch)
     if command == "execute":
