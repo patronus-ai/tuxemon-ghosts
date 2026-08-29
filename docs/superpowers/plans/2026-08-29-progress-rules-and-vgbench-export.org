@@ -1,0 +1,1142 @@
+#+TITLE: S5 — progress rules and vgbench export, implementation plan
+#+DATE: 2026-08-29
+
+*For agentic workers*: REQUIRED SUB-SKILL — use
+=superpowers:subagent-driven-development= (recommended) or
+=superpowers:executing-plans=. Steps use =[ ]= checkboxes.
+
+*Goal*: replace =ReachTile= with a ={progress, at_goal, dead}= objective
+matching =akkikiki/videogamebench='s =GameRules= interface, and export
+our traces as their trajectory JSON.
+
+*Architecture*: a new =tuxghost/rules.py= mirrors their
+=scripts/game_rules.py=. =seal()= gains an optional per-step observer;
+=CandidateResult= gains three fields; a =RulesObjective= adapts them to
+the EXISTING =Objective= protocol so the runner's comparison logic is
+untouched. A separate exporter converts our edge-list inputs to their
+run-length segments.
+
+*Tech stack*: Python 3.12, pytest, the vendored =tuxemon= tree.
+
+*Spec*: =docs/superpowers/specs/2026-08-29-progress-rules-and-vgbench-export-design.org=.
+Read it alongside this plan.
+
+* Global constraints
+
+- =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy= on *every* invocation
+  touching the client. Run python via =uv run=.
+- Never edit =tuxemon/= directly. *No seventh patch.*
+- =EXEMPTIONS= stays =={}=. *No =.tuxghost= format change*, no
+  format-version bump — the exporter is additive.
+- Docs are =.org=, never =.md=.
+- Every regression test must be *demonstrated to fail* against the defect
+  it pins: mutate, run, capture real output, restore, re-run, capture the
+  pass. Real output in the report. This project has had SEVEN tests pass
+  vacuously.
+- Run only your own test file while other agents work; the close-out task
+  owns the single full =make check=.
+
+* Verified APIs — use these, they were checked against the tree
+
+Do not guess at these; each was run.
+
+#+begin_src text
+session.player.battle_handler.get_battles() -> list[Battle]
+Battle.get_state() -> {"fighter","opponent","outcome","timestamp","turns","instance_id"}
+   (timestamp is the PINNED clock epoch, e.g. 1787659200.0 -- not wall clock)
+BattlesHandler.has_fought_and_outcome(outcome: str, opponent: str) -> bool
+BattlesHandler.record_battle(opponent: str, outcome: OutputBattle,
+                             location: str = "", turns: int = 1) -> Battle
+from tuxemon.db import OutputBattle      # members are UPPERCASE: OutputBattle.WON
+                                          # .value is lowercase: "won"
+session.player.monsters -> list, each with .current_hp
+session.client.get_map_name() -> "spyder_paper_town.tmx"
+
+boot_from_save(save_data, seed, clock_epoch, context=None) -> (client, session)
+   takes a VALIDATED SaveData (SaveData.model_validate(raw_dict)), NOT a dict
+   NOTE: _bootstrap_vendored_tuxemon() CHDIRS into tuxemon/ -- resolve any
+   fixture path to an absolute path BEFORE calling it
+
+CandidateResult(trace, steps, final_state, checkpoints, checkpoint_states)
+seal(script, parent, *, checkpoint=0, taints=(), model=None, max_cost=None)
+   its hook lives at tuxghost/optimize/seal.py:125 and already counts steps
+Objective protocol: score(candidate) -> tuple[float, ...], higher better,
+   compared lexicographically; runner rejects a VARYING tuple length
+runner calls seal() at tuxghost/optimize/runner.py:158 and :216
+run_steps(client, n, hook) calls hook(i) BEFORE client.update(FIXED_DT)
+#+end_src
+
+*There are 13 gym leaders*, all named =classic_gym_leader_<name>=:
+astra, bravion, ferrum, granite, marin, mila, orion, pyra, shade, sylva,
+voltessa, vyre, zephra. *Nothing in the shipped data orders them*, which
+is why the goal is "any gym won", not "the first".
+
+* File structure
+
+| file | responsibility |
+|------+----------------|
+| =tuxghost/rules.py= (create) | =Observation=, =GameRules=, =TuxemonRules=, =TuxemonGymRules=, =TuxemonFirstBattleRules=, =CRITICAL_PATH=. Tasks 1-2. |
+| =tuxghost/optimize/seal.py= (modify) | =rules= param; three new =CandidateResult= fields. Task 3. |
+| =tuxghost/optimize/runner.py= (modify) | thread =rules= into both =seal()= calls. Task 4. |
+| =tuxghost/optimize/objective.py= (modify) | add =RulesObjective=. Task 4. |
+| =tuxghost/vgbench.py= (create) | edges → run-length segments; the trajectory dict. Task 5. |
+| =tuxghost/cli.py= (modify) | =export= subcommand. Task 6. |
+| =tests/test_rules.py= (create) | Tasks 1-2. |
+| =tests/test_rules_seal.py= (create) | Task 3-4. |
+| =tests/test_vgbench_export.py= (create) | Tasks 5-6. |
+| =tests/conftest.py= (modify) | =_TRACKED_FILES= — controller adds these up front, see below. |
+
+*Controller note*: as in the S4 plan, the controller pre-registers all
+three =_TRACKED_FILES= entries before dispatching, so parallel tasks do
+not collide on that tuple. Tasks below do NOT edit =tests/conftest.py=.
+
+* A shared test helper, defined once
+
+Tasks 1-4 all need a booted session. Put this at the top of
+=tests/test_rules.py= and import it from the other two test files.
+
+#+begin_src python
+import json
+from pathlib import Path
+from typing import Any
+
+SAVE = Path(__file__).parent / "fixtures" / "paper_town.save"
+#: Read BEFORE bootstrapping: `_bootstrap_vendored_tuxemon` chdirs into
+#: the vendored tuxemon/ directory, so a relative path resolves wrong
+#: afterwards. This is the same hazard `_PATH_ARGS` exists for in the CLI.
+_RAW = json.loads(SAVE.read_text())
+
+
+def booted() -> Any:
+    """A fresh session on the committed fixture. Returns the session.
+
+    `boot_from_save` returns a (client, session) TUPLE and takes a
+    validated `SaveData`, not a raw dict -- both verified against the
+    tree. It also RESETS the module-level `local_session` singleton, so
+    anything captured from a previous session goes stale: build what you
+    need from THIS return value, never from an earlier one. That aliasing
+    is a documented cause of vacuous tests in this project.
+    """
+    from tuxghost.execute import _bootstrap_vendored_tuxemon
+
+    _bootstrap_vendored_tuxemon()
+    from tuxemon.save_system.save_state import SaveData
+
+    from tuxghost.boot import boot_from_save
+
+    _client, session = boot_from_save(
+        SaveData.model_validate(_RAW), seed=1234, clock_epoch=1787659200
+    )
+    return session
+#+end_src
+
+---
+
+* Task 1: =Observation=, =GameRules=, and =TuxemonRules.progress=
+
+*Files*
+- Create: =tuxghost/rules.py=
+- Test: =tests/test_rules.py=
+
+*Interfaces*
+- Produces:
+  - =Observation= = =TypedDict("Observation", {"progress": int, "at_goal": bool, "dead": bool})=
+  - =GameRules= protocol with =observe(session, step) -> Observation=
+  - =TuxemonRules= with =observe=, and =CRITICAL_PATH: tuple[str, ...]=
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""tests/test_rules.py -- S5 progress rules."""
+# (the `booted()` helper from the plan's shared-helper section goes here)
+
+from tuxghost.rules import TuxemonRules
+
+
+def test_progress_never_decreases_across_a_run() -> None:
+    """`progress` is the search's gradient, so a decrease would tell the
+    optimizer a candidate got WORSE when it merely wandered. Their
+    docstring calls the equivalent 'monotone-as-possible'; we assert it
+    outright because every term we use is monotone by construction
+    (battles only append, the map index is max-tracked, party count only
+    grows in normal play)."""
+    from tuxghost.loop import run_steps
+
+    session = booted()
+    rules = TuxemonRules()
+    seen: list[int] = []
+    run_steps(
+        session.client, 120,
+        hook=lambda i: seen.append(rules.progress(session)),
+    )
+    assert seen, "no observations recorded"
+    assert seen == sorted(seen), f"progress went backwards: {seen}"
+
+
+def test_progress_discriminates_a_further_run() -> None:
+    """THE ANTI-VACUITY TEST. This project's original state digest was
+    'deterministic' across nine runs for the worst possible reason: it
+    captured nothing that changed. A progress function that returns a
+    constant would pass the monotonicity test above and be useless.
+
+    A party gaining a monster must raise progress, because `party_count`
+    is a real term.
+    """
+    session = booted()
+    rules = TuxemonRules()
+    before = rules.progress(session)
+
+    party = session.player.monsters
+    party.append(party[0])                     # crude but real: party_count += 1
+    after = rules.progress(session)
+
+    assert after > before, (before, after)
+#+end_src
+
+- [ ] *Step 2: Run, verify they fail*
+
+#+begin_src bash
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  uv run python -m pytest tests/test_rules.py -q
+#+end_src
+
+Expected: =ModuleNotFoundError: No module named 'tuxghost.rules'=.
+
+- [ ] *Step 3: Implement*
+
+#+begin_src python
+"""Per-game progress rules, mirroring videogamebench's game_rules.py.
+
+Each game supplies a `GameRules` turning live session state into the
+three signals a progress-based optimizer needs each step:
+
+    observe(session, step) -> {"progress": int, "at_goal": bool, "dead": bool}
+
+    progress : monotone scalar, higher = further. The caller tracks its max.
+    at_goal  : True once the goal is achieved (latches goal_step).
+    dead     : True to end the run as a failure.
+
+Deliberately one module with several rules classes, matching their
+`scripts/game_rules.py` rather than inventing a package layout --
+matching their shape is the point of S5.
+
+COST CONSTRAINT, load-bearing: `observe` runs EVERY STEP, so it may read
+only cheap fields. It must never call `tuxghost.digest.state_of`, which
+serializes the entire save (party, items, monsters). The S4 plan made
+exactly this mistake -- `execute(checkpoint=1, capture_states=True)`
+would have run a full digest plus save-serialization per step to recover
+three fields. Pinned by a test, not by this comment.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Protocol, TypedDict
+
+
+class Observation(TypedDict):
+    progress: int
+    at_goal: bool
+    dead: bool
+
+
+class GameRules(Protocol):
+    def observe(self, session: Any, step: int) -> Observation: ...
+
+
+#: Map ordinals used to SHAPE progress. Marked VERIFY exactly as their
+#: Pokemon CRITICAL_PATH is: the shipped order below is inferred from
+#: where the (dead) `badge` gate is checked -- `route1.tmx` and
+#: `taba_town.tmx` -- and has NOT been confirmed against a real route.
+#: Dump the map sequence over a reference run and fix this list before
+#: trusting the shaping. The GOAL does not depend on it; only the shape.
+CRITICAL_PATH: tuple[str, ...] = (
+    "spyder_paper_town.tmx",   # VERIFY
+    "route1.tmx",              # VERIFY
+    "taba_town.tmx",           # VERIFY
+)
+
+#: All 13 leaders are named `classic_gym_leader_<name>`; nothing in the
+#: shipped data orders them, which is why the goal is "any gym won".
+GYM_LEADER_PREFIX = "classic_gym_leader_"
+
+
+class TuxemonRules:
+    """Shared progress; subclasses supply the goal.
+
+    progress = n_gyms_won * 1e9 + furthest_critical_path_map * 1e3
+             + party_count * 10
+
+    Same three-term shape as their `PokemonRedBrockRules`
+    (n_badges * 1e9 + furthest_critical_path_map * 1e3 + party_count * 10)
+    so the numbers read the same way.
+    """
+
+    def __init__(self) -> None:
+        self._furthest_map = 0
+
+    def _n_gyms_won(self, session: Any) -> int:
+        battles = session.player.battle_handler.get_battles()
+        won = set()
+        for battle in battles:
+            state = battle.get_state()
+            if (state.get("outcome") == "won"
+                    and str(state.get("opponent", "")).startswith(
+                        GYM_LEADER_PREFIX)):
+                won.add(state["opponent"])
+        return len(won)
+
+    def _map_index(self, session: Any) -> int:
+        name = session.client.get_map_name()
+        if name in CRITICAL_PATH:
+            self._furthest_map = max(
+                self._furthest_map, CRITICAL_PATH.index(name)
+            )
+        return self._furthest_map
+
+    def progress(self, session: Any) -> int:
+        return (self._n_gyms_won(session) * 1_000_000_000
+                + self._map_index(session) * 1_000
+                + len(session.player.monsters) * 10)
+
+    def at_goal(self, session: Any) -> bool:
+        raise NotImplementedError
+
+    def dead(self, session: Any) -> bool:
+        return False
+
+    def observe(self, session: Any, step: int) -> Observation:
+        del step
+        return {
+            "progress": self.progress(session),
+            "at_goal": self.at_goal(session),
+            "dead": self.dead(session),
+        }
+#+end_src
+
+=TuxemonRules.at_goal= stays ABSTRACT (=raise NotImplementedError=)
+until Task 2 supplies the two concrete goals. That is why Task 1's tests
+call =rules.progress(session)= directly rather than =observe()= — do not
+add a temporary =at_goal= returning =False= to make =observe()= callable
+here. A permanently-False goal on the base class is precisely the kind
+of inert-but-passing code this project keeps getting burned by, and
+=observe()= gets its coverage in Task 2 where the goals are real.
+
+- [ ] *Step 4: Run, verify they pass*
+
+- [ ] *Step 5: Demonstrate the discrimination test fails against a
+  constant progress*
+
+Replace =progress='s body with =return 0=. Run
+=test_progress_discriminates_a_further_run=, capture the REAL failure,
+restore, re-run, capture the pass, confirm with =git diff=. *Both
+outputs in your report.*
+
+- [ ] *Step 6: ruff + mypy, then commit*
+
+#+begin_src bash
+uv run ruff check tuxghost tests && uv run mypy --strict tuxghost
+git add tuxghost/rules.py tests/test_rules.py
+git commit -m "feat: S5 GameRules protocol and TuxemonRules.progress"
+#+end_src
+
+---
+
+* Task 2: the two goals, and =dead=
+
+*Files*
+- Modify: =tuxghost/rules.py=
+- Test: =tests/test_rules.py=
+
+*Interfaces*
+- Consumes: =TuxemonRules= (Task 1).
+- Produces: =TuxemonGymRules=, =TuxemonFirstBattleRules=.
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+from tuxghost.rules import TuxemonFirstBattleRules, TuxemonGymRules
+
+
+def test_the_gym_goal_is_exercised_even_though_no_trace_reaches_one() -> None:
+    """The TRUE Boulder Badge analogue, and unreachable today: a gym needs
+    overworld navigation plus an interior plus the fight, and our longest
+    recorded run is a wild encounter at step 4945.
+
+    So it is exercised the way `tests/test_digest.py` exercises
+    `persistent_npc_state` -- by hand-constructing the state rather than
+    pretending a trace produces it. Without this the goal would be the
+    FIFTH piece of correct, permanently inert plumbing in this project.
+    """
+    from tuxemon.db import OutputBattle          # members UPPERCASE, values lowercase
+
+    session = booted()
+    rules = TuxemonGymRules()
+    assert rules.observe(session, 0)["at_goal"] is False
+
+    session.player.battle_handler.record_battle(
+        "classic_gym_leader_granite", OutputBattle.WON
+    )
+    obs = rules.observe(session, 1)
+    assert obs["at_goal"] is True
+    assert obs["progress"] >= 1_000_000_000, "a gym win must dominate progress"
+
+
+def test_a_non_gym_win_is_not_the_gym_goal() -> None:
+    """Discrimination: beating anything else must NOT latch the gym goal,
+    or `at_goal` would be 'won any battle' wearing a gym's name."""
+    from tuxemon.db import OutputBattle
+
+    session = booted()
+    rules = TuxemonGymRules()
+    session.player.battle_handler.record_battle("random_npc", OutputBattle.WON)
+    assert rules.observe(session, 1)["at_goal"] is False
+
+
+def test_the_first_battle_goal_latches_on_any_win() -> None:
+    from tuxemon.db import OutputBattle
+
+    session = booted()
+    rules = TuxemonFirstBattleRules()
+    assert rules.observe(session, 0)["at_goal"] is False
+    session.player.battle_handler.record_battle("random_npc", OutputBattle.WON)
+    assert rules.observe(session, 1)["at_goal"] is True
+
+
+def test_a_loss_is_not_a_goal() -> None:
+    from tuxemon.db import OutputBattle
+
+    session = booted()
+    rules = TuxemonFirstBattleRules()
+    session.player.battle_handler.record_battle("random_npc", OutputBattle.LOST)
+    assert rules.observe(session, 1)["at_goal"] is False
+
+
+def test_a_wiped_party_is_dead() -> None:
+    """`dead` ships INERT -- nothing we can currently record wipes a
+    party. Exercised by hand-zeroing HP, the same technique
+    test_digest.py uses for persistence. Their Pokemon rules leave the
+    equivalent as `dead = False  # TODO: detect blackout`; ours is real
+    code, just not yet reachable in production."""
+    session = booted()
+    rules = TuxemonFirstBattleRules()
+    assert rules.observe(session, 0)["dead"] is False
+
+    for monster in session.player.monsters:
+        monster.current_hp = 0
+    assert rules.observe(session, 1)["dead"] is True
+
+
+def test_an_empty_party_is_not_dead() -> None:
+    """Guard against `all([]) is True`: a party that has not been
+    assembled yet is not a wipe."""
+    session = booted()
+    rules = TuxemonFirstBattleRules()
+    session.player.monsters.clear()
+    assert rules.observe(session, 1)["dead"] is False
+#+end_src
+
+- [ ] *Step 2: Run, verify they fail* (=ImportError= on the two classes).
+
+- [ ] *Step 3: Implement*
+
+#+begin_src python
+class TuxemonGymRules(TuxemonRules):
+    """at_goal = ANY gym leader defeated -- the Boulder Badge analogue.
+
+    "Any", not "the first": all 13 leaders are named
+    `classic_gym_leader_<name>` and NOTHING in the shipped data orders
+    them, so "the first gym" is not implementable. "Your first badge"
+    only requires that one has been won.
+
+    NOT REACHABLE by any trace this project can currently record. See
+    the spec's "horizon problem".
+    """
+
+    def at_goal(self, session: Any) -> bool:
+        return self._n_gyms_won(session) >= 1
+
+
+class TuxemonFirstBattleRules(TuxemonRules):
+    """at_goal = any battle won. The SHIPPED, TESTED goal.
+
+    Reachable: `tests/test_combat_determinism.py` drives a battle to a
+    clean CombatState exit at step 4945.
+    """
+
+    def at_goal(self, session: Any) -> bool:
+        return any(
+            b.get_state().get("outcome") == "won"
+            for b in session.player.battle_handler.get_battles()
+        )
+#+end_src
+
+And on =TuxemonRules=, replace the abstract =dead= with:
+
+#+begin_src python
+    def dead(self, session: Any) -> bool:
+        """A wipe: party non-empty and every monster at 0 HP.
+
+        `party` is checked for non-emptiness first because `all([])` is
+        True -- an unassembled party is not a wipe.
+        """
+        party = session.player.monsters
+        return bool(party) and all(m.current_hp == 0 for m in party)
+#+end_src
+
+- [ ] *Step 4: Run, verify they pass*
+
+- [ ] *Step 5: Demonstrate*
+
+Two mutations, both captured:
+(a) change =TuxemonGymRules.at_goal= to =return self._n_gyms_won(session) >= 0=
+    — run =test_the_gym_goal_is_exercised...=, it must fail on the
+    initial =is False= assertion.
+(b) drop the =bool(party) and= guard from =dead= — run
+    =test_an_empty_party_is_not_dead=, it must fail.
+Restore after each; confirm with =git diff=.
+
+- [ ] *Step 6: ruff + mypy, run =tests/test_rules.py=, commit*
+
+---
+
+* Task 3: per-step observation in =seal=
+
+*Files*
+- Modify: =tuxghost/optimize/seal.py=
+- Test: =tests/test_rules_seal.py=
+
+*Interfaces*
+- Consumes: =GameRules= (Task 1).
+- Produces: =seal(..., rules: GameRules | None = None)=; =CandidateResult=
+  gains =max_progress: int = 0=, =goal_step: int | None = None=,
+  =died: bool = False=.
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""tests/test_rules_seal.py -- seal's per-step rules observer."""
+from pathlib import Path
+
+from tuxghost.optimize.schedule import lift
+from tuxghost.optimize.seal import seal
+from tuxghost.rules import TuxemonFirstBattleRules
+from tuxghost.trace import read
+
+PARENT = Path(__file__).parent / "golden" / "scripted_town_1234.tuxghost"
+
+
+def test_seal_records_max_progress_when_given_rules() -> None:
+    parent = read(PARENT)
+    script = lift(parent.inputs, parent.header.step_count)
+    result = seal(script, parent, rules=TuxemonFirstBattleRules())
+    assert result.max_progress > 0
+    assert result.goal_step is None      # this parent wins no battle
+    assert result.died is False
+
+
+def test_seal_without_rules_is_unchanged() -> None:
+    """The observer is OPTIONAL. Every existing caller passes no rules and
+    must keep working, with the new fields at their defaults."""
+    parent = read(PARENT)
+    script = lift(parent.inputs, parent.header.step_count)
+    result = seal(script, parent)
+    assert result.max_progress == 0
+    assert result.goal_step is None
+    assert result.died is False
+    assert result.trace.header.final_digest == parent.header.final_digest
+
+
+def test_the_observer_never_serializes_the_save(monkeypatch) -> None:
+    """THE COST CONSTRAINT, pinned structurally rather than by timing.
+
+    `observe` runs every step. If it called `state_of` it would serialize
+    the entire save (party, items, monsters) per step. The S4 plan made
+    exactly this mistake. A timing assertion would be flaky; making
+    `state_of` raise is not.
+
+    `seal` legitimately calls `state_of` ONCE at the end for
+    `final_state`, so the patch is installed only for the stepping
+    window -- see the module under test for where that boundary is.
+    """
+    import tuxghost.rules as rules_mod
+
+    def boom(*a, **k):  # pragma: no cover - must never be reached
+        raise AssertionError("observe() called state_of(); it must not")
+
+    monkeypatch.setattr(rules_mod, "state_of", boom, raising=False)
+
+    parent = read(PARENT)
+    script = lift(parent.inputs, parent.header.step_count)
+    result = seal(script, parent, rules=TuxemonFirstBattleRules())
+    assert result.max_progress > 0
+#+end_src
+
+*Note on the third test*: it only bites if =rules.py= imports
+=state_of= into its own namespace. It does not. So ALSO assert the
+absence directly — add to that test:
+
+#+begin_src python
+    import inspect
+    src = inspect.getsource(rules_mod)
+    assert "state_of" not in src, "rules.py must not reference state_of"
+#+end_src
+
+That second assertion is the one that actually discriminates; keep both.
+
+- [ ] *Step 2: Run, verify they fail*
+
+- [ ] *Step 3: Implement*
+
+Add the three fields to =CandidateResult= (=tuxghost/optimize/seal.py=,
+the dataclass at line ~54):
+
+#+begin_src python
+    #: Populated only when `seal` is given `rules`. `max_progress` is the
+    #: high-water mark (progress can plateau but must not decrease);
+    #: `goal_step` latches the FIRST step `at_goal` was true, which is why
+    #: the observer must run per-step rather than scoring the end state.
+    max_progress: int = 0
+    goal_step: int | None = None
+    died: bool = False
+#+end_src
+
+Add the parameter and extend the existing hook at =seal.py:125=:
+
+#+begin_src python
+def seal(
+    script: ActionScript,
+    parent: Trace,
+    *,
+    checkpoint: int = 0,
+    taints: Sequence[str] = (),
+    model: str | None = None,
+    max_cost: int | None = None,
+    rules: Any | None = None,
+) -> CandidateResult:
+#+end_src
+
+#+begin_src python
+    max_progress = 0
+    goal_step: int | None = None
+    died = False
+
+    def hook(i: int) -> None:
+        nonlocal ran, max_progress, goal_step, died
+        ran += 1
+        if checkpoint and i and i % checkpoint == 0:
+            checkpoints.append((i, digest_of(session)))
+            states[i] = state_of(session)
+        if rules is not None:
+            obs = rules.observe(session, i)
+            max_progress = max(max_progress, obs["progress"])
+            if goal_step is None and obs["at_goal"]:
+                goal_step = i
+            if obs["dead"]:
+                died = True
+#+end_src
+
+and pass the three through to the returned =CandidateResult=.
+
+*Do NOT early-return on =died=.* =seal= asserts it ran exactly
+=script.cost()= steps ("a clipped candidate would be scored as if the
+clip were the edit"); stopping early would trip that assertion. Death is
+reported, not acted on — the objective decides what it means.
+
+- [ ] *Step 4: Run, verify they pass*
+
+- [ ] *Step 5: Demonstrate*
+
+Change =goal_step= latching to overwrite on every =at_goal= step
+(=goal_step = i= with no =is None= guard). Write a test-local rules stub
+whose =at_goal= is True from step 0 onward, assert =goal_step == 0=, and
+show the mutated version reports the LAST step instead. Restore.
+
+- [ ] *Step 6: ruff + mypy, run the file, commit*
+
+---
+
+* Task 4: =RulesObjective=, and threading =rules= through =optimize=
+
+*Files*
+- Modify: =tuxghost/optimize/objective.py=
+- Modify: =tuxghost/optimize/runner.py=
+- Test: =tests/test_rules_seal.py=
+
+*Interfaces*
+- Consumes: =CandidateResult.max_progress/goal_step/died= (Task 3).
+- Produces: =RulesObjective=; =optimize(..., rules=None)=.
+
+*The runner's comparison logic is NOT changed.* =RulesObjective=
+implements the existing =Objective= protocol, so
+=tuple(objective.score(candidate))= and =if score > best_score= at
+=runner.py:217/297= work untouched.
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+from tuxghost.optimize.objective import RulesObjective
+from tuxghost.optimize.seal import CandidateResult
+
+
+def _candidate(steps, max_progress, goal_step=None, died=False):
+    trace = None  # never read by an objective
+    return CandidateResult(
+        trace=trace, steps=steps, final_state={},
+        max_progress=max_progress, goal_step=goal_step, died=died,
+    )
+
+
+def test_reaching_the_goal_beats_any_amount_of_progress() -> None:
+    obj = RulesObjective()
+    reached = obj.score(_candidate(999, 1, goal_step=10))
+    unreached = obj.score(_candidate(10, 10**12))
+    assert reached > unreached
+
+
+def test_among_goal_reaching_candidates_fewer_steps_wins() -> None:
+    obj = RulesObjective()
+    assert obj.score(_candidate(100, 5, goal_step=1)) > obj.score(
+        _candidate(200, 5, goal_step=1))
+
+
+def test_among_non_goal_candidates_higher_progress_wins() -> None:
+    """Ours must give a gradient BEFORE the goal is reachable. Their loop
+    rejects every non-goal candidate outright, which it can afford
+    because it seeds from a gold that already clears the level; our
+    parent does not, so progress is the only signal the search has."""
+    obj = RulesObjective()
+    assert obj.score(_candidate(100, 50)) > obj.score(_candidate(100, 10))
+
+
+def test_a_dead_candidate_scores_below_everything() -> None:
+    obj = RulesObjective()
+    dead = obj.score(_candidate(1, 10**12, goal_step=1, died=True))
+    assert dead < obj.score(_candidate(10**6, 0))
+
+
+def test_the_score_length_is_constant() -> None:
+    """`runner` refuses a varying tuple length -- a real check at
+    runner.py:286."""
+    obj = RulesObjective()
+    a = obj.score(_candidate(1, 1))
+    b = obj.score(_candidate(2, 2, goal_step=1, died=True))
+    assert len(a) == len(b) == 3
+#+end_src
+
+- [ ] *Step 2: Run, verify they fail*
+
+- [ ] *Step 3: Implement* in =tuxghost/optimize/objective.py=
+
+#+begin_src python
+class RulesObjective:
+    """Adapts a `GameRules` run to this project's lexicographic scoring.
+
+    (at_goal, max_progress, -steps), higher better:
+      * a goal-reaching candidate beats any non-goal candidate;
+      * among non-goal candidates, more progress wins -- this is what
+        gives the search a gradient before the goal is reachable at all;
+      * among goal-reaching candidates, fewer steps wins.
+
+    A dead candidate scores (-1.0, ...), below every live one.
+
+    TERMS names the tuple for `ClaudeEditor`'s prompt, the same way
+    `ReachTile.TERMS` does, and follows the same convention: every name
+    is a negated cost where 0 is best, so a model shown the numbers
+    cannot invert their meaning.
+    """
+
+    TERMS = ("-not_at_goal", "max_progress", "-steps")
+
+    def score(self, candidate: CandidateResult) -> tuple[float, ...]:
+        if candidate.died:
+            return (-1.0, 0.0, -float(candidate.steps))
+        return (
+            0.0 if candidate.goal_step is not None else -1.0 + 0.5,
+            float(candidate.max_progress),
+            -float(candidate.steps),
+        )
+#+end_src
+
+*That first term is deliberately awkward — fix it.* Use three distinct
+levels so dead < non-goal < goal:
+
+#+begin_src python
+        if candidate.died:
+            first = -1.0
+        elif candidate.goal_step is None:
+            first = 0.0
+        else:
+            first = 1.0
+        return (first, float(candidate.max_progress), -float(candidate.steps))
+#+end_src
+
+and set =TERMS = ("goal_state", "max_progress", "-steps")=. Note
+=goal_state= is NOT a negated cost (it is -1/0/1), so it must not carry
+a leading =-=; =tests/test_optimize_objective.py='s convention test
+asserts a term is named as a cost only when it goes negative for a worse
+candidate — check that test still passes and adjust its fixture if it
+now covers this objective too.
+
+- [ ] *Step 4: Run, verify they pass*
+
+- [ ] *Step 5: Thread =rules= through =optimize=*
+
+Add =rules: Any | None = None= to =optimize()='s signature and pass it
+to BOTH =seal()= calls — =runner.py:158= and =runner.py:216=. Missing
+the second one means round 0 (the parent baseline) is scored without
+rules while every candidate is scored with them, which would make the
+parent's score incomparable. Add a test that round 0 carries
+=max_progress > 0=.
+
+- [ ] *Step 6: Demonstrate*
+
+Remove =rules=rules= from the =runner.py:216= call only. Run the round-0
+test; it must fail with =max_progress == 0=. Restore.
+
+- [ ] *Step 7: ruff + mypy, run both rules test files, commit*
+
+---
+
+* Task 5: the vgbench exporter
+
+*Files*
+- Create: =tuxghost/vgbench.py=
+- Test: =tests/test_vgbench_export.py=
+
+*Interfaces*
+- Produces: =segments_of(inputs) -> list[dict]=,
+  =trajectory_of(trace, goal_frame=None) -> dict=
+
+- [ ] *Step 1: Write the failing tests*
+
+#+begin_src python
+"""tests/test_vgbench_export.py"""
+import json
+from pathlib import Path
+
+from tuxghost.trace import read
+from tuxghost.vgbench import segments_of, trajectory_of
+
+PARENT = Path(__file__).parent / "golden" / "scripted_town_1234.tuxghost"
+
+
+def test_segments_are_run_length_held_state() -> None:
+    """Their format is 'at frame N the held set becomes X, held until the
+    next segment' -- NOT our edge list. So consecutive segments must
+    never repeat a held set, and frames must ascend."""
+    segs = segments_of(read(PARENT).inputs)
+    assert segs, "no segments produced"
+    frames = [s["frame"] for s in segs]
+    assert frames == sorted(frames)
+    assert len(frames) == len(set(frames)), "one segment per frame"
+    for a, b in zip(segs, segs[1:]):
+        assert a["buttons"] != b["buttons"], (a, b)
+
+
+def test_edges_round_trip_through_segments() -> None:
+    """The conversion must be lossless: rebuilding edges from the
+    run-length form reproduces the trace's own inputs."""
+    inputs = read(PARENT).inputs
+    segs = segments_of(inputs)
+
+    from tuxghost.loop import PRESSED, RELEASED
+    from tuxghost.vgbench import _NAME_TO_BUTTON
+
+    rebuilt, held = [], set()
+    for s in segs:
+        now = {_NAME_TO_BUTTON[n] for n in s["buttons"]}
+        for b in sorted(now - held):
+            rebuilt.append((s["frame"], b, PRESSED))
+        for b in sorted(held - now):
+            rebuilt.append((s["frame"], b, RELEASED))
+        held = now
+    assert sorted(rebuilt) == sorted(tuple(i) for i in inputs)
+
+
+def test_total_frames_matches_the_header() -> None:
+    """20 of their 21 committed files disagree with their own
+    total_frames by +10 to +209 frames. Ours must not."""
+    trace = read(PARENT)
+    traj = trajectory_of(trace)
+    assert traj["total_frames"] == trace.header.step_count
+    assert traj["fps"] == trace.header.step_rate
+
+
+def test_provenance_is_our_real_value_not_theirs() -> None:
+    """Their `type` reads "human" in all 21 files INCLUDING the model
+    runs, so copying their values would import a known defect. We emit
+    their field name with our honest provenance."""
+    traj = trajectory_of(read(PARENT))
+    assert traj["type"] == read(PARENT).provenance.recorder
+
+
+def test_no_wall_clock_reaches_the_export() -> None:
+    """CLAUDE.md: real timestamps never enter this format. Their schema
+    has `started_at`; we deliberately omit it rather than breach that
+    rule for cosmetic parity."""
+    blob = json.dumps(trajectory_of(read(PARENT)))
+    assert "started_at" not in blob
+    assert "timestamp" not in blob
+#+end_src
+
+- [ ] *Step 2: Run, verify they fail*
+
+- [ ] *Step 3: Implement*
+
+#+begin_src python
+"""Export a .tuxghost trace as a videogamebench trajectory.
+
+Their format is RUN-LENGTH HELD STATE -- `{"frame": N, "buttons": [...]}`
+means "the held set becomes this at frame N, and stays until the next
+segment". Ours is an EDGE list, `(step, button, value)` with
+PRESSED/RELEASED. The two convert losslessly.
+
+Export only. Import is out of scope: 51% of their segments hold two or
+three buttons at once, and `tuxghost.optimize.schedule.lift` refuses
+that outright ("sequential and cannot express two buttons held at
+once"). Our single-button traces are a legal SUBSET of their format, so
+every .tuxghost exports to a valid trajectory -- the incompatibility
+only bites in the direction we are not going.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from tuxghost.loop import PRESSED
+from tuxghost.trace import Trace
+
+
+def _button_names() -> dict[int, str]:
+    """Int -> their button name.
+
+    Read from `tuxemon.platform.const.buttons`, never written as
+    literals: an upstream remap would otherwise leave us confidently
+    exporting the wrong button. `tests/test_optimize_claude.py` pins this
+    same rule for ClaudeEditor's prompt.
+    """
+    from tuxemon.platform.const import buttons
+
+    return {
+        getattr(buttons, name): name
+        for name in ("UP", "DOWN", "LEFT", "RIGHT", "A", "B")
+    }
+
+
+_NAME_TO_BUTTON = {v: k for k, v in _button_names().items()}
+
+
+def segments_of(inputs: Any) -> list[dict[str, Any]]:
+    names = _button_names()
+    held: set[int] = set()
+    segments: list[dict[str, Any]] = []
+    last: list[str] | None = None
+    for step, button, value in sorted(tuple(i) for i in inputs):
+        if value == PRESSED:
+            held.add(button)
+        else:
+            held.discard(button)
+        current = sorted(names[b] for b in held)
+        if current == last:
+            continue
+        if segments and segments[-1]["frame"] == step:
+            segments[-1]["buttons"] = current   # coalesce same-frame edges
+        else:
+            segments.append({"frame": step, "buttons": current})
+        last = current
+    return segments
+
+
+def trajectory_of(trace: Trace, goal_frame: int | None = None) -> dict[str, Any]:
+    traj: dict[str, Any] = {
+        "type": trace.provenance.recorder,
+        "game": trace.header.mod_id,
+        "fps": trace.header.step_rate,
+        "total_frames": trace.header.step_count,
+        "segments": segments_of(trace.inputs),
+    }
+    if goal_frame is not None:
+        traj["goal_frame"] = goal_frame
+    return traj
+#+end_src
+
+- [ ] *Step 4: Run, verify they pass*
+
+- [ ] *Step 5: Demonstrate*
+
+Remove the =if current == last: continue= dedup. Run
+=test_segments_are_run_length_held_state=; it must fail on the
+consecutive-duplicate assertion. Restore.
+
+- [ ] *Step 6: The button-remap pin*
+
+Add, modelled on
+=tests/test_optimize_claude.py::test_the_system_prompts_button_values_track_upstreams_constants=:
+
+#+begin_src python
+def test_button_names_track_upstreams_constants() -> None:
+    """Swap two VALID button values and confirm the export follows. A
+    literal table would emit the same names either way and pass."""
+    import importlib
+    from unittest import mock
+
+    from tuxemon.platform.const import buttons
+
+    import tuxghost.vgbench as vgb
+
+    assert (buttons.UP, buttons.LEFT) == (1, 4)
+    try:
+        with (mock.patch.object(buttons, "UP", 4),
+              mock.patch.object(buttons, "LEFT", 1)):
+            remapped = importlib.reload(vgb)
+            names = remapped._button_names()
+            assert names[4] == "UP"
+            assert names[1] == "LEFT"
+    finally:
+        importlib.reload(vgb)
+#+end_src
+
+Demonstrate by replacing =_button_names= with a hardcoded dict; the test
+must fail. Restore.
+
+- [ ] *Step 7: ruff + mypy, commit*
+
+---
+
+* Task 6: the =export= CLI subcommand
+
+*Files*
+- Modify: =tuxghost/cli.py=
+- Test: =tests/test_vgbench_export.py=
+
+*Interfaces*
+- Consumes: =trajectory_of= (Task 5).
+
+- [ ] *Step 1: Add the subparser*, mirroring =p_rec='s shape:
+
+#+begin_src python
+    p_exp = sub.add_parser(
+        "export", help="Write a trace as a videogamebench trajectory JSON."
+    )
+    p_exp.add_argument("--trace", type=Path, required=True)
+    p_exp.add_argument("--out", type=Path, required=True)
+#+end_src
+
+Add ="trace"= and ="out"= to =_PATH_ARGS["export"]= so relative paths
+resolve BEFORE the process chdirs into the vendored =tuxemon/=
+directory. A CLI path test in this project once passed only because
+every path it used was absolute, hiding exactly this bug.
+
+- [ ] *Step 2: Wire =_export= in =main=*, reading through the existing
+  =_read_trace_or_refuse= boundary so a missing or malformed trace is a
+  refusal (exit 2), never an uncaught traceback (exit 1).
+
+- [ ] *Step 3: Write the tests*
+
+#+begin_src python
+def test_export_refuses_a_missing_trace(tmp_path) -> None:
+    proc = _run_cli("export", "--trace", str(tmp_path / "nope.tuxghost"),
+                    "--out", str(tmp_path / "o.json"))
+    assert proc.returncode == 2, proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert not (tmp_path / "o.json").exists()
+
+
+def test_a_relative_trace_path_resolves_against_the_callers_cwd(tmp_path) -> None:
+    """The process chdirs into tuxemon/ before doing work, so a relative
+    path must be resolved first. Asserted on the RESOLVED path appearing
+    in the refusal, because both the fixed and broken versions exit 2 --
+    an exit-code-only assertion would not discriminate."""
+    resolved = tmp_path / "nope.tuxghost"
+    proc = _run_cli("export", "--trace", "nope.tuxghost",
+                    "--out", str(tmp_path / "o.json"), cwd=tmp_path)
+    assert proc.returncode == 2
+    assert str(resolved) in proc.stderr
+
+
+def test_the_export_loads_with_their_own_consumer_expression() -> None:
+    """THE CONSISTENCY CHECK. `{s["frame"]: set(s["buttons"]) for s in
+    data["segments"]}` is the exact line four of their scripts use to
+    read a trajectory. If our file survives it, their consumers can read
+    us."""
+    traj = trajectory_of(read(PARENT))
+    seg_at = {s["frame"]: set(s["buttons"]) for s in traj["segments"]}
+    assert seg_at
+    assert all(isinstance(k, int) for k in seg_at)
+    assert set(traj) <= {"type", "game", "rom", "started_at", "boot_frames",
+                         "fps", "total_frames", "segments", "goal_frame",
+                         "rationale"}
+#+end_src
+
+Write =_run_cli= in this file, modelled on
+=tests/test_optimize_cli.py='s =_run= (read it first): a
+=subprocess.run= with =SDL_VIDEODRIVER=dummy=, =SDL_AUDIODRIVER=dummy=,
+=PYTHONHASHSEED=0=, =cwd=ROOT= by default, =check=False=.
+
+- [ ] *Step 4: Demonstrate* — remove =_PATH_ARGS["export"]='s ="trace"=
+  entry; the relative-path test must fail on the resolved-path assertion
+  while the missing-trace test still passes. Restore.
+
+- [ ] *Step 5: ruff + mypy, run the file, commit*
+
+---
+
+* Task 7: docs and close-out
+
+- [ ] *Step 1*: =uptime=, then =make check= ALONE. Quote no timing taken
+  above load ~5.
+
+- [ ] *Step 2*: re-assert the invariants with real output —
+  =ls patches/ | wc -l= is 6; =git -C tuxemon diff --stat= is 18 files /
+  265 insertions(+) / 63 deletions(-); =EXEMPTIONS == {}=;
+  =FORMAT_VERSION == 1=.
+
+- [ ] *Step 3*: add a =docs/STATUS.org= S5 section recording the measured
+  counts, the gate output, the two goals and which is tested, and — with
+  equal prominence — *what is not covered*: =TuxemonGymRules= is
+  unreachable by any recordable trace, =dead= ships inert, and
+  =CRITICAL_PATH= is uncalibrated.
+
+- [ ] *Step 4*: amend =STATUS.org='s "Next subsystem" section, which
+  currently promises S5 changes nothing in S3's loop or seal. It does:
+  =seal()= gained a per-step observer and =CandidateResult= gained three
+  fields. Correct it rather than leaving a false claim.
+
+- [ ] *Step 5*: commit. Do NOT merge; that is the human's call.
+
+---
+
+* Self-review of this plan
+
+*Spec coverage.* Rules module → 1-2; per-step observation and the
+=state_of= ban → 3; lexicographic acceptance → 4; exporter and field
+mapping → 5; CLI surface → 6; validation items 1-11 → tasks 1-6; item 12
+(their consumer expression) → 6; invariants → 7. The spec's non-goals
+(no import, no hold-sets, no ROM execution) have no tasks, correctly.
+
+*Type consistency.* =Observation= is defined in Task 1 and consumed in
+2-3. =CandidateResult.max_progress/goal_step/died= are defined in Task 3
+and consumed in 4. =segments_of=/=trajectory_of= are defined in 5 and
+consumed in 6. =booted()= is defined once in the shared-helper section
+and imported by the other test files.
+
+*Deliberate deviation from the spec, recorded.* The spec says the runner
+changes; it does not. =RulesObjective= satisfies the existing
+=Objective= protocol, so =runner.py='s comparison at :217/:297 is
+untouched — the only runner edit is threading =rules= into the two
+=seal()= calls. This makes S5 smaller than the spec claimed, which is
+worth telling the reviewer so they do not go looking for absent changes.
+
+*One place I corrected myself mid-draft* rather than leaving it: Task
+4's first =RulesObjective.score= sketch used an awkward
+=-1.0 + 0.5= expression to squeeze three states into one term. Replaced
+with an explicit three-level branch and a =TERMS= name that does not
+falsely advertise itself as a negated cost — the exact convention
+=tests/test_optimize_objective.py= pins.
+
+*Known risk.* Task 3's third test only discriminates via its
+=inspect.getsource= assertion; the monkeypatch half cannot fail unless
+=rules.py= imports =state_of= by name. Both are kept because the
+monkeypatch guards the import-by-name case and the source scan guards
+the attribute-access case, but a reviewer should not read the
+monkeypatch alone as the pin.
