@@ -284,3 +284,102 @@ def test_export_writes_a_trajectory_the_cli_produces_end_to_end(
         "type", "game", "rom", "started_at", "boot_frames",
         "fps", "total_frames", "segments", "goal_frame", "rationale",
     }
+
+
+# --- Whole-branch review fix wave: I3 -- the spec's "Surface" section ---
+
+
+def test_trajectory_filename_follows_their_convention() -> None:
+    """`<role>_<model>_<game>_<stage>_<frames>f.json` (spec's "Surface"
+    section). `PARENT`'s own fields: provenance.recorder == "human",
+    model is None (-> "none"), header.mod_id == "tuxemon",
+    initial_state.npc_state.current_map == "spyder_paper_town.tmx"
+    (-> "spyder_paper_town"), header.step_count == 176.
+    """
+    from tuxghost.vgbench import trajectory_filename
+
+    trace = read(PARENT)
+    traj = trajectory_of(trace)
+    name = trajectory_filename(trace, traj)
+    assert name == "human_none_tuxemon_spyder_paper_town_176f.json", name
+
+
+def test_trajectory_filename_derives_the_frame_count_from_total_frames() -> None:
+    """Validation item 9: the frame count in the filename must be
+    DERIVED from `total_frames`, never independently recomputed or taken
+    from some other count that could drift out of step with it -- the
+    exact defect present in 20 of their 21 committed result files
+    (+10 to +209 frames off their own `total_frames`). Passing a `traj`
+    dict whose `total_frames` disagrees with `trace.header.step_count`
+    and asserting the FILENAME follows `traj`, not the trace header,
+    pins that the function reads the field it claims to rather than
+    some other count that happens to agree today.
+    """
+    from tuxghost.vgbench import trajectory_filename
+
+    trace = read(PARENT)
+    assert trace.header.step_count == 176
+    traj = trajectory_of(trace)
+    traj["total_frames"] = 999  # deliberately disagrees with the header
+    name = trajectory_filename(trace, traj)
+    assert name.endswith("_999f.json"), name
+    assert "176" not in name, name
+
+
+def test_export_writes_a_run_dir_copy_with_the_derived_filename(
+    tmp_path: Path,
+) -> None:
+    """I3: 'the same writer dropping a copy into --run-dir so every run
+    is comparable without a second command.' `--out` still gets its own
+    file (unchanged); `--run-dir`, when given, ALSO gets a copy under the
+    derived filename."""
+    out = tmp_path / "traj.json"
+    run_dir = tmp_path / "run"
+    proc = _run_cli(
+        "--trace", str(PARENT), "--out", str(out), "--run-dir", str(run_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert out.exists()
+
+    copy_path = run_dir / "human_none_tuxemon_spyder_paper_town_176f.json"
+    assert copy_path.exists(), sorted(p.name for p in run_dir.iterdir())
+    assert json.loads(copy_path.read_text()) == json.loads(out.read_text())
+
+
+def test_export_without_run_dir_writes_no_copy(tmp_path: Path) -> None:
+    """`--run-dir` is optional -- omitting it must not write anywhere but
+    `--out` (mirrors the existing `not (run_dir / "frames").exists()`-style
+    negative assertions elsewhere in this suite)."""
+    out = tmp_path / "traj.json"
+    proc = _run_cli("--trace", str(PARENT), "--out", str(out))
+    assert proc.returncode == 0, proc.stderr
+    assert list(tmp_path.iterdir()) == [out]
+
+
+def test_export_docstring_no_longer_claims_only_0_or_2() -> None:
+    """M2: an earlier docstring claimed `_export` 'can only ever return 0
+    or 2' -- demonstrated false by `--out` into a nonexistent directory,
+    which raises an uncaught `FileNotFoundError` (exit 1), same as
+    `agent`/`optimize`/`record`. Docstring only; behaviour is unchanged
+    (asserted below on the SAME real subprocess this suite already used
+    to demonstrate the claim was false)."""
+    import inspect
+
+    from tuxghost.cli import _export
+
+    # Collapse line-wrapping before matching: the docstring wraps at 79
+    # columns, so the claim can read "return 0\nor 2." in source with no
+    # contiguous "0 or 2" substring -- a naive `in` check over the raw
+    # docstring would false-pass even with the false claim still present.
+    doc = " ".join((inspect.getdoc(_export) or "").split())
+    assert "can only ever return 0 or 2" not in doc, doc
+
+
+def test_out_into_a_nonexistent_directory_exits_1_not_2(tmp_path: Path) -> None:
+    """The behavioural claim M2's docstring fix is about: unchanged, and
+    pinned directly rather than left implicit."""
+    proc = _run_cli(
+        "--trace", str(PARENT), "--out", str(tmp_path / "nosuchdir" / "o.json"),
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "FileNotFoundError" in proc.stderr, proc.stderr

@@ -1199,3 +1199,85 @@ def test_max_costs_help_states_that_the_parent_is_exempt(tmp_path: Path) -> None
     helptext = " ".join(proc.stdout.split())
     assert "EDITOR MAY PROPOSE" in helptext, helptext
     assert "parent-cost trace" in helptext, helptext
+
+
+# --- Whole-branch review fix wave: I2 -- `--objective progress` reaches
+# the CLI, and TuxemonFirstBattleRules is the goal it wires up. ---
+
+
+def test_a_progress_objective_run_succeeds_and_writes_its_artifacts(
+    tmp_path: Path,
+) -> None:
+    """`--objective progress` is the branch's headline claim -- a rules
+    interface replacing `ReachTile` -- reachable from the CLI at all
+    (whole-branch review, I2: before this fix `--objective` only ever
+    accepted `reach-tile`, so `RulesObjective`/`TuxemonFirstBattleRules`
+    were library-only). `--target` is intentionally NOT passed:
+    `progress` has no use for one.
+
+    An empty `--edits` file makes `ScriptedEditor` return STOP on its
+    first `propose` call, so only round 0 (sealing the parent with
+    `rules=TuxemonFirstBattleRules()`) actually runs -- cheap, and enough
+    to prove the wiring reaches a real `seal()` call with real rules.
+    """
+    edits = tmp_path / "edits.jsonl"
+    edits.write_text("")
+    out = tmp_path / "best.tuxghost"
+    run_dir = tmp_path / "run"
+    proc = _run(
+        "--trace", str(GOLDEN), "--editor", "scripted", "--edits", str(edits),
+        "--objective", "progress",
+        "--rounds", "1", "--patience", "1", "--max-rejections", "1",
+        "--max-cost", "4000", "--out", str(out), "--run-dir", str(run_dir),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert out.exists()
+
+    info = json.loads((run_dir / "run.json").read_text())
+    assert info["objective"] == "progress"
+    assert info["target"] is None
+    # `goal` stays `None` here: only `--editor claude` reads one, and
+    # `--editor scripted` never calls `_derived_goal` (mirrors every
+    # other non-claude editor in this file).
+    assert info["goal"] is None
+
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "optimize.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert rows[0]["index"] == 0 and rows[0]["accepted"] is True
+    # `RulesObjective.TERMS` shape: (goal_state, max_progress, -steps).
+    assert len(rows[0]["score"]) == 3, rows[0]["score"]
+
+
+def test_progress_objective_refuses_a_target(tmp_path: Path) -> None:
+    """The converse of the refusal below: `--target` is meaningless for
+    `progress` (`TuxemonFirstBattleRules` reads no map/tile), so passing
+    one is refused rather than silently ignored -- the same rule this
+    module already applies to `--seed`/`--goal` elsewhere in this file."""
+    proc = _run(
+        "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
+        "--objective", "progress",
+        "--target", "spyder_paper_town.tmx:19,14",
+        "--rounds", "1", "--patience", "1", "--max-rejections", "1",
+        "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
+        "--run-dir", str(tmp_path / "run"),
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "--target" in proc.stderr
+
+
+def test_reach_tile_objective_requires_a_target(tmp_path: Path) -> None:
+    """The other direction: `reach-tile` without `--target` is refused,
+    not a crash from `_parse_target(None)`."""
+    proc = _run(
+        "--trace", str(GOLDEN), "--editor", "mutation", "--seed", "7",
+        "--objective", "reach-tile",
+        "--rounds", "1", "--patience", "1", "--max-rejections", "1",
+        "--max-cost", "4000", "--out", str(tmp_path / "o.tuxghost"),
+        "--run-dir", str(tmp_path / "run"),
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "--target" in proc.stderr
+    assert "Traceback" not in proc.stderr

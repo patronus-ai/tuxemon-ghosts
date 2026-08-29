@@ -11,7 +11,7 @@ from tuxghost.optimize.objective import RulesObjective
 from tuxghost.optimize.runner import optimize
 from tuxghost.optimize.schedule import lift
 from tuxghost.optimize.seal import CandidateResult, seal
-from tuxghost.rules import Observation, TuxemonFirstBattleRules
+from tuxghost.rules import CRITICAL_PATH, Observation, TuxemonFirstBattleRules
 from tuxghost.trace import read
 
 PARENT = Path(__file__).parent / "golden" / "scripted_town_1234.tuxghost"
@@ -201,3 +201,87 @@ def test_round_zero_carries_rules_max_progress_through_optimize() -> None:
     assert result.rounds[0].accepted is True
     assert result.best_round == 0
     assert result.best.max_progress > 0
+
+
+# --- Whole-branch review fix wave: I1 (per-run vs per-instance leak) ---
+
+
+def test_a_shared_rules_instance_does_not_leak_furthest_map_across_seals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """I1, THE REAL BUG. `tuxghost.optimize.runner.optimize` threads ONE
+    shared `rules` object into every `seal()` call (round 0 and every
+    candidate via `_prepare`). `TuxemonRules._map_index` tracks its high
+    water mark on `self._furthest_map` -- INSTANCE state -- so without a
+    per-run reset, candidate B (fresh, only ever at `CRITICAL_PATH[0]`)
+    inherits candidate A's `CRITICAL_PATH[2]` floor when the same `rules`
+    object seals both.
+
+    `session.client.get_map_name` is monkeypatched via a wrapped
+    `boot_from_save` (rather than a fake session/client) so this exercises
+    the REAL `seal()` call path end to end -- the exact site the bug
+    lives at -- not just `TuxemonRules` in isolation.
+    """
+    import tuxghost.optimize.seal as seal_mod
+
+    parent = read(PARENT)
+    script = lift(parent.inputs, parent.header.step_count)
+    rules = TuxemonFirstBattleRules()
+
+    current_map = [CRITICAL_PATH[0]]
+    real_boot = seal_mod.boot_from_save
+
+    def wrapped_boot(*args: Any, **kwargs: Any) -> Any:
+        client, session = real_boot(*args, **kwargs)
+        client.get_map_name = lambda: current_map[0]
+        return client, session
+
+    monkeypatch.setattr(seal_mod, "boot_from_save", wrapped_boot)
+
+    # Candidate A genuinely reaches CRITICAL_PATH[2].
+    current_map[0] = CRITICAL_PATH[2]
+    result_a = seal(script, parent, rules=rules)
+    assert result_a.max_progress >= 2_000, result_a.max_progress
+
+    # Candidate B is fresh, at CRITICAL_PATH[0] for its entire run, and
+    # uses the SAME `rules` instance as candidate A.
+    current_map[0] = CRITICAL_PATH[0]
+    result_b = seal(script, parent, rules=rules)
+
+    assert result_b.max_progress < result_a.max_progress, (
+        "candidate B's own max_progress leaked candidate A's furthest "
+        f"map from the shared rules instance: A={result_a.max_progress} "
+        f"B={result_b.max_progress}"
+    )
+    # CRITICAL_PATH[0]'s own index contributes 0 to the map term, so B's
+    # progress is party_count * 10 only -- the map term must be exactly
+    # absent, not merely lower than A's.
+    party_term = result_b.max_progress
+    assert party_term % 1_000 == party_term, (
+        "candidate B's progress still carries a nonzero map term"
+    )
+
+
+# --- Whole-branch review fix wave: I2 (the vacuity trap) ---
+
+
+def test_optimize_refuses_rules_objective_without_rules() -> None:
+    """I2. `RulesObjective` reads `CandidateResult.max_progress`/
+    `.goal_step`/`.died`, which are populated ONLY when `seal` is given
+    `rules=...` -- both call sites in `runner.optimize` (round 0 and every
+    candidate). Combining `RulesObjective` with no `rules` silently scores
+    every candidate `(0.0, 0.0, -steps)`, degenerating the search into
+    "shortest wins" with no error. `optimize` must refuse this combination
+    outright, before booting anything.
+    """
+    parent = read(PARENT)
+    with pytest.raises(ValueError, match="RulesObjective"):
+        optimize(
+            parent,
+            ScriptedEditor([]),
+            RulesObjective(),
+            rounds=1,
+            patience=1,
+            max_rejections=1,
+            max_cost=10_000,
+        )
