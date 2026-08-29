@@ -1807,14 +1807,38 @@ battle to a clean =CombatState= exit at step 4945.
   record ever drives a party to a full wipe, so the =dead= branch of
   =RulesObjective.score= is real code, tested against hand-constructed
   state, but never exercised end to end by a real run.
-- =CRITICAL_PATH= is *UNCALIBRATED* and marked =VERIFY= in
-  =tuxghost/rules.py=: the shipped map order
-  (=spyder_paper_town.tmx=, =route1.tmx=, =taba_town.tmx=) is inferred
-  from where the dead =badge= gate happens to be checked, not measured
-  against a real route dump. This means the progress *SHAPING* — the
-  =+1000= term per critical-path map index — is not trustworthy yet.
+- =CRITICAL_PATH= has *VERIFIED NAMES but an UNCALIBRATED ORDER*, and
+  is marked =VERIFY= in =tuxghost/rules.py=.
+
+  An earlier draft of this section — and of the code — listed
+  =(spyder_paper_town.tmx, route1.tmx, taba_town.tmx)=, inferred from
+  where the dead =badge= gate happens to be checked. *That was wrong and
+  is corrected*: =route1.tmx= and =taba_town.tmx= belong to a different
+  map family and are unreachable from this project's fixture, so the map
+  term was permanently 0 and =progress= reduced to =party_count * 10= —
+  the objective had *no gradient at all*. The real adjacency, measured:
+  =spyder_route1.tmx= references =spyder_paper_town.tmx=,
+  =spyder_cotton_town.tmx= and =spyder_brideswood.tmx=.
+
+  What remains uncalibrated is the ORDER, not the names. The progress
+  *SHAPING* — the =+1000= term per critical-path index — is therefore
+  still not trustworthy, and the shaping stays *untested* until a trace
+  actually leaves =spyder_paper_town.tmx=: measured on the current
+  parent, round 0 scores =[0.0, 20.0, -176.0]=, where the map term
+  contributes 0 because the run never leaves index 0.
+
   The GOAL signal (=at_goal=, =n_gyms_won=) does *not* depend on
   =CRITICAL_PATH=; only the gradient between goal states does.
+- *CLI surface, added in the final fix wave and not in the original
+  plan*: =tuxghost optimize --objective progress= now reaches
+  =RulesObjective= (wiring =TuxemonFirstBattleRules=, the shipped tested
+  goal), with =--target= made per-objective; and =tuxghost export= gained
+  =--run-dir= (writing a =<role>_<model>_<game>_<stage>_<frames>f.json=
+  copy, the frame count DERIVED from the trajectory's own
+  =total_frames=) and =--goal-frame=. =optimize()= also *refuses*
+  =RulesObjective= with =rules=None=, which would otherwise score
+  =(0.0, 0.0, -steps)= on every candidate and silently degenerate to
+  "shortest wins".
 - The exporter's own reach is bounded the same way S4's =play.py=
   wiring was: this project can verify the export's *SHAPE* (field
   mapping, run-length coalescing, no-consecutive-duplicate segments) and
