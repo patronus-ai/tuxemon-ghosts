@@ -95,7 +95,13 @@ class TuxemonRules:
         raise NotImplementedError
 
     def dead(self, session: Any) -> bool:
-        return False
+        """A wipe: party non-empty and every monster at 0 HP.
+
+        `party` is checked for non-emptiness first because `all([])` is
+        True -- an unassembled party is not a wipe.
+        """
+        party = session.player.monsters
+        return bool(party) and all(m.current_hp == 0 for m in party)
 
     def observe(self, session: Any, step: int) -> Observation:
         del step
@@ -104,3 +110,33 @@ class TuxemonRules:
             "at_goal": self.at_goal(session),
             "dead": self.dead(session),
         }
+
+
+class TuxemonGymRules(TuxemonRules):
+    """at_goal = ANY gym leader defeated -- the Boulder Badge analogue.
+
+    "Any", not "the first": all 13 leaders are named
+    `classic_gym_leader_<name>` and NOTHING in the shipped data orders
+    them, so "the first gym" is not implementable. "Your first badge"
+    only requires that one has been won.
+
+    NOT REACHABLE by any trace this project can currently record. See
+    the spec's "horizon problem".
+    """
+
+    def at_goal(self, session: Any) -> bool:
+        return self._n_gyms_won(session) >= 1
+
+
+class TuxemonFirstBattleRules(TuxemonRules):
+    """at_goal = any battle won. The SHIPPED, TESTED goal.
+
+    Reachable: `tests/test_combat_determinism.py` drives a battle to a
+    clean CombatState exit at step 4945.
+    """
+
+    def at_goal(self, session: Any) -> bool:
+        return any(
+            b.get_state().get("outcome") == "won"
+            for b in session.player.battle_handler.get_battles()
+        )
