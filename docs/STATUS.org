@@ -2347,6 +2347,74 @@ the wrong starting map.
 268.41s; slow 4 passed; ruff + =lint-patched= + mypy (81 files) clean.
 461 → 464 (+3).
 
+* A second save fixture — =hearthrock_city.save=, where the gym goal can fire
+
+Direct consequence of the disconnection measured above. =paper_town.save=
+lives in the =spyder_*= campaign; all 13 gyms live in the =classic_*=
+one; the two share no path. So =TuxemonGymRules= could never fire from
+the only starting state this repo had. This adds one where it can.
+
+** Why Hearthrock City, specifically
+
+Measured from the map graph, not chosen by taste:
+
+- It is the ONLY city in the =classic_*= component with *two* gyms on it
+  — Granite and Mila — both *one hop* away.
+- It links to =classic_route_1=, so it is the campaign's first city.
+- Both leaders exist as real NPCs in those maps
+  (=classic_gym_leader_granite=, =classic_gym_leader_mila=).
+
+** Reachable is not the same as winnable
+
+Both leaders field =hydrone,20= and =nudikill,20= — read from the map
+data, not guessed. A level-5 party like =paper_town.save='s would have
+made the gym goal reachable in TOPOLOGY and unwinnable in PRACTICE,
+which moves the problem rather than solving it. The fixture ships two
+monsters at level 25 and two potions: a fair fight against two at 20,
+not a walkover.
+
+=test_the_party_can_actually_meet_the_gym_leaders= re-reads the leaders'
+levels from the =.tmx= files on every run, so a vendor bump that raises
+them fails the test instead of silently leaving the fixture too weak.
+
+** What the artifact actually does, verified rather than assumed
+
+| property | result |
+|---+---|
+| boots to | =classic_hearthrock_city.tmx=, tile (23,14) |
+| state stack | =['WorldState']= — bare |
+| party | rockitten 25, budaye 25 |
+| digest, two boots + 120 steps | =45dea604…5bd74f75=, identical |
+| gyms reachable (directed) | Granite and Mila, 1 hop each |
+
+The bare =WorldState= is worth asserting rather than trusting: the
+generator runs through a cold boot, so =ChoiceState= and =ImageState=
+ARE on the stack while it works. =SaveData= carries no state stack, so
+they do not survive into the artifact — measured, not inferred from the
+docstring that says they cannot.
+
+The spawn tile was probed before being chosen: four candidates were
+teleported to and stepped forward 90 frames; all four stayed put, so
+(23,14) does not re-trigger the gym door it sits outside.
+
+** Demonstrations
+
+| mutation | observed failure |
+|---+---|
+| party levels → 5 | =AssertionError: ([('rockitten', 5), ('budaye', 5)], 20)= |
+| =current_map= → =spyder_paper_town.tmx= | =AssertionError: no gym reachable from spyder_paper_town.tmx= |
+
+The fixture was confirmed byte-identical to its pre-mutation copy after
+each restore.
+
+*Gate:* =make check= =EXIT=0=, 468 passed / 4 skipped / 11 warnings in
+351.53s; slow 4 passed; ruff + =lint-patched= + mypy (83 files) clean.
+464 → 468 (+4).
+
+*That 351.53s is NOT comparable to the 268.41s above.* Load rose from
+4.61 to 6.69 across the run — the highest this session — so the figure
+measures the host, not the suite. Quote the 268.41s at load ~4 instead.
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.

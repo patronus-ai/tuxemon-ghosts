@@ -108,6 +108,36 @@ def test_no_gym_is_reachable_from_the_starting_map(
     assert not (reachable & gyms), sorted(reachable & gyms)
 
 
+def test_gyms_ARE_reachable_from_the_hearthrock_save(
+    graph: dict[str, set[str]],
+) -> None:
+    """The complement of the test above, and the whole reason
+    `hearthrock_city.save` exists.
+
+    A fixture that merely sits in a different campaign proves nothing;
+    what matters is that gym maps are reachable FROM it. Both halves are
+    asserted together here so they cannot drift apart: the same graph,
+    the same traversal, opposite results from the two committed saves.
+    """
+    import json
+
+    save = Path(__file__).parent / "fixtures" / "hearthrock_city.save"
+    start = json.loads(save.read_text())["npc_state"]["current_map"]
+
+    reachable = set(_hops(graph, start))
+    gyms = {p.name for p in MAPS.glob("classic_gym_*.tmx")}
+    found = reachable & gyms
+    assert found, f"no gym reachable from {start}"
+    # Directed, not undirected: the player must be able to actually walk
+    # there, and a reverse-only edge would not let them.
+    assert {"classic_gym_granite.tmx", "classic_gym_mila.tmx"} <= found
+
+    # One hop. That is the point of choosing this city.
+    hops = _hops(graph, start)
+    assert hops["classic_gym_granite.tmx"] == 1
+    assert hops["classic_gym_mila.tmx"] == 1
+
+
 def test_the_starting_map_is_the_one_the_committed_save_boots_on() -> None:
     """The two tests above are only meaningful if `START` is really where
     a run begins. Read from the save itself, never trusted to a literal.
