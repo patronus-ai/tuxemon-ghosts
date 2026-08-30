@@ -2985,7 +2985,12 @@ script. =objective.py= and =runner.py= byte-identical after each restore.
 1020 with zero battles; whether a real editor now walks the corridor is
 unmeasured.
 
-* S6 — browser play with a ghost, delivered
+* S6 — browser play with a ghost, delivered (acceptance PARTIAL)
+
+*Top line, so nobody has to read to the bottom:* it builds, it runs, a
+human played it. The ghost is drawn, in the right place, and provably
+does not perturb the digest — and it FAILED to communicate anything to
+the first human who saw it. See "The two human checks" below.
 
 A local browser build: Pyodide runs the real engine, a human plays with
 their arrow keys, and a ghost — a previously recorded run replayed as a
@@ -3060,9 +3065,50 @@ similar figures. That query needed one line of instrumentation on the
 BUILT page (=pyodide= is a local in the shim's IIFE);
 =web/index.html= source was never touched and =make web= overwrote it.
 
-*STILL HUMAN-ONLY, and not yet done:* whether it FEELS responsive, and
-whether the ghost reads as a translucent "another you" rather than as
-just another NPC.
+** The two human checks: PARTIAL PASS, 2026-08-30
+
+Performed by the human against the real build.
+
+*Check A — does it feel responsive: PASS.* Their words: "it works".
+
+*Check B — does the ghost read as a translucent "another you": FAIL.*
+Their words, unprompted and on first sight: *"why is there a random
+ghost there?"*
+
+The ghost was visible, in the right place, and behaving exactly as
+designed. It still did not communicate anything. Three causes, all
+independently true and all compounding:
+
+1. *The walk is over before anyone looks.* The trace is 176 steps — under
+   three seconds at 60 steps/sec — while boot takes a minute or more. The
+   human sees the aftermath, never the motion.
+2. *It then stands at its finish tile forever.* That behaviour was chosen
+   deliberately (see "Defect 1" in S4's acceptance section) over hiding
+   it, and the choice was right — hiding is exactly why S4's ghost went
+   unnoticed across three subsystems. But "waiting at its finish line
+   like a racing ghost" reads as "a motionless stranger" to someone who
+   missed the race.
+3. *It wears the PLAYER's own sprite* by design, so it looks like a
+   duplicate of you rather than something distinct. That choice came from
+   S5's whole-branch review (M1), which corrected a hardcoded
+   =sprite_slug= back to the spec's "another you" requirement. The spec's
+   intent was right; the result is illegible without motion to explain it.
+4. *The fixture is not a playthrough.* =scripted_town_1234= is a test
+   trace recorded to exercise the replay machinery: it walks six tiles
+   and stops, because that is all it was ever asked to do.
+
+*So: mechanically correct, experientially thin.* Recorded as a PARTIAL
+pass rather than a pass, deliberately. S4 was marked done while three
+defects were live, and most of 2026-08-30 was spent paying for that; a
+green mark here for a feature the human could not interpret would be the
+same mistake in a new place.
+
+*What would actually fix it, in the order likely to help most:* a longer,
+purposeful ghost trace (the 442-step =claude_town_1234= is already in the
+tree and triggers NPC dialogue); a visual marker or distinct sprite so it
+reads as A GHOST rather than a clone; and a start delay or replay loop so
+the walk happens while somebody is watching. None of these are
+implemented and none are scheduled.
 
 ** What is NOT covered — stated plainly
 
