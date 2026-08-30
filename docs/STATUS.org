@@ -2397,7 +2397,7 @@ The spawn tile was probed before being chosen: four candidates were
 teleported to and stepped forward 90 frames; all four stayed put, so
 (23,14) does not re-trigger the gym door it sits outside.
 
-** Demonstrations
+*** Demonstrations
 
 | mutation | observed failure |
 |---+---|
@@ -2502,13 +2502,19 @@ cannot silently become vacuous a third time.
 explicitly re-exported by =tuxghost.optimize.schedule= — *the third time
 this session that mypy was run before the last edit rather than after.*
 
-* THE OPTIMIZER MOVED max_progress FOR THE FIRST TIME
+* The optimizer moved =max_progress= ONCE — and did not reproduce it
+
+*Read the reliability section at the end of this entry before quoting
+any of it.* The headline is real but it is n=1, and a second run under
+the same conditions found nothing.
+
+** THE OPTIMIZER MOVED max_progress FOR THE FIRST TIME
 
 Round 8 of a run from =hearthrock_city.save= scored
 =[0.0, 1020.0, -1120.0]=. Before that, across four runs and 37 rounds,
 =max_progress= had never once left 20.
 
-** The cause was not what I said it was
+*** The cause was not what I said it was
 
 I reported that the editor "sees only the score tuple: no map name, no
 tile, no hint that UP leads anywhere". *That was wrong, and it was wrong
@@ -2522,7 +2528,7 @@ maximise an integer nothing defined. It knew it was on
 =classic_hearthrock_city= at (23,14); nothing told it that walking onto a
 new map was worth 1000.
 
-** The fix, and what the model then did with it
+*** The fix, and what the model then did with it
 
 =TuxemonRules.describe_progress()= renders the weights in words,
 GENERATED from the same named constants =progress()= sums (=GYM_POINTS=,
@@ -2544,7 +2550,7 @@ The SYSTEM prompt's line "You never see the game" was also corrected: it
 is misleading (the model sees map, tile and facing) and may itself have
 been suppressing the spatial reasoning the task needs.
 
-** The run then died — from success, not from plateauing
+*** The run then died — from success, not from plateauing
 
 Stop reason: =editor rejected 5 rounds consecutively=, immediately after
 its first win. Two distinct failure modes, both measured:
@@ -2584,6 +2590,42 @@ One existing test needed narrowing rather than fixing:
 equality on the answers record, so it failed when the record grew. What
 it pins is the ORDERING — that the text survives the raise — so it now
 asserts the fields it is about and not the record's shape.
+
+** RELIABILITY: one success in 30 post-fix rounds. Not a working search.
+
+A second run (=run5=), same save, same objective, 15 rounds, patience 14,
+=max_cost= 8000: *every round scored 20.0* and it stopped on patience
+exhausted. Round 8 did not reproduce.
+
+| | rounds | reached >20 | editor failures |
+|---+---+---+---|
+| before the legend (4 runs) | 37 | 0 | 5 |
+| =run4=, after the legend | 14 | 1 (round 8) | 5 |
+| =run5=, after robustness | 15 | 0 | *0* |
+
+So the honest statement is: explaining the metric made a success POSSIBLE
+where 37 rounds had produced none, and then a further 30 rounds produced
+exactly one. *That is weak evidence of improvement, not a working
+search.* I called it "the hypothesis was right" on n=1, which was
+premature; this table is the correction.
+
+The two claims separate cleanly and only one is established:
+
+- *The robustness fix is VALIDATED.* =run5= had ZERO editor failures
+  across 15 rounds against =run4='s five. Every =stop_reason= came back
+  =end_turn=, the longest reply was 3058 characters — well inside the
+  raised cap — and =answers.jsonl= now carries =stop_reason= and
+  =block_types= on every row.
+- *The search is NOT established.* One hit in 30 rounds is
+  indistinguishable from luck at this sample size, and nothing here
+  measures whether the legend caused it.
+
+What that suggests next, in order of what it would actually settle:
+repeat =run5= two or three times to get a real hit rate before changing
+anything else; the LLM's sampling is the dominant variable and n=2 cannot
+see past it. Only then is it worth asking whether the editor needs the
+map's exits (the option deliberately declined earlier, precisely so a win
+would demonstrate search rather than execution).
 
 *Gate:* =make check= =EXIT=0=, 479 passed / 4 skipped / 11 warnings in
 267.64s; slow 5 passed; ruff + =lint-patched= + mypy (83 files) clean.
