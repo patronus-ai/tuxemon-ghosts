@@ -2722,6 +2722,97 @@ would demonstrate search rather than execution).
 Load 3.2 → 4.7, so this timing IS comparable to the 268.41s figure.
 472 → 479 (+7).
 
+* The 1020 ceiling, finally explained — a held button does not survive a map transition
+
+*I proposed three causes for this ceiling and measured all three. The
+first two were wrong.* Recorded in order, because the sequence is the
+useful part:
+
+1. "Greedy accept locks onto the first success." *Falsified:*
+   =classic_gym_granite= is ONE TILE above the spawn while =gym_mila= is
+   6 and the routes 17-23. It was not preferred, it was the only thing
+   within one move.
+2. "A one-tile-wide door needs hold precision the editor cannot manage."
+   *True but not the cause.* It IS one tile wide (LEFT hold 72-80 lands
+   on it, 64 and 88 miss), but the runs were never trying for it.
+3. "Feedback density." *Falsified by experiment:* three runs at
+   =--checkpoint 16= (one snapshot per tile) against four at the default
+   64. Both groups: reached 1020, never exceeded it.
+
+| checkpoint | reached 1020 | exceeded 1020 |
+|---+---+---|
+| 64 (4 runs) | 3 | *0* |
+| 16 (3 runs) | 3 | *0* |
+
+** What the runs were actually doing — read their own notes
+
+They were not failing to find =gym_mila=. They were *correctly ignoring
+it.* =RulesObjective.TERMS= is =(goal_state, max_progress, -steps)= and
+=goal_state= dominates lexicographically, so winning a battle beats any
+amount of map progress. Having entered a gym, trying to fight its leader
+is the right play and walking off to another map for +1000 would be
+strictly worse.
+
+Their notes say so plainly. From =run9=: "confirms A alone from that
+position/distance isn't immediately resolving". From =run10=: "clearly
+insufficient... added 20 more A presses to push through leader dialogue".
+From =run11=: "confirmed gym_granite corridor y=19: x=9-11 walkable, wall
+x=12 east, north blocked at x=10".
+
+They were pressing A at a leader who was thirteen tiles away.
+
+** The mechanic
+
+*Entering a map with a button still held leaves the player frozen on the
+entry tile.* Measured:
+
+| input | ends |
+|---+---|
+| UP held continuously, 1600 steps | =gym_granite= (10,19) — frozen |
+| UP 40, RELEASE, UP again | =gym_granite= *(10,6)* |
+| repeated fresh UP presses | =gym_granite= *(10,6)* |
+
+(10,6) is the =start_battle= tile. The gym door is one tile above the
+spawn, so the single cheapest move in the game — hold UP — is *exactly*
+the move that walks in and freezes. Every run found it, and it is a trap.
+
+A second consequence: after a transition each action advances exactly ONE
+tile regardless of =hold=, where the same hold walks several tiles in the
+town. Thirteen tiles needs thirteen actions, not one long hold.
+
+** Nothing is broken, and the goal is fully reachable
+
+Driving it manually with fresh press edges: step 901 =DialogState= (the
+leader's =pre_battle= talk), step 981 *=CombatState=* — a real gym battle
+— step 1378 =MainCombatMenuState=, step 2781 =LevelUpSummaryState=. The
+trigger is =behav1: talk classic_gym_leader_granite=, an interaction, not
+a step-on, and =cond1= is =not battle_outcome player,won,...=, so it
+fires once.
+
+So the path from the committed save to a gym battle is traversable with
+the vocabulary that already exists. What blocks the optimizer is one
+mechanic it has no way to learn about.
+
+=test_a_held_button_does_not_survive_a_map_transition= (slow) pins all
+three measurements: one action → (10,19) frozen, two → (10,18) one tile,
+fourteen → (10,6).
+
+*Gate:* =make check= =EXIT=0=, 481 passed / 4 skipped / 11 warnings in
+278.51s; slow 7 passed; ruff + =lint-patched= + mypy (83 files) clean.
+
+** What this implies for the next change, stated as options not a plan
+
+The editor cannot discover this from the prompt: nothing tells it that a
+held button dies at a map edge, and the checkpoint trail shows a frozen
+tile without saying why. Three candidates, none yet chosen:
+
+- Say it in the SYSTEM prompt — one sentence, cheapest by far, and
+  testable against the same seven-run baseline.
+- Make =seal= inject a release edge on every map change, so the harness
+  removes the trap rather than documenting it. Changes replay semantics
+  and needs care against the trace format.
+- Leave it. It is arguably a real skill the benchmark should measure.
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.

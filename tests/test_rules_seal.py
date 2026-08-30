@@ -413,3 +413,70 @@ def test_two_actions_double_the_ceiling_five_live_runs_never_passed() -> None:
             )
             == 20
         ), hold
+
+
+@pytest.mark.slow
+def test_a_held_button_does_not_survive_a_map_transition() -> None:
+    """The single mechanic that trapped every live optimizer run.
+
+    Seven runs from `hearthrock_city.save` all stalled at
+    `max_progress` 1020 and none ever started a battle. The reason is
+    not search, not the map, and not feedback density (checkpoint 16 was
+    tried against checkpoint 64: 3 of 3 still stalled at 1020).
+
+    Entering a map with a button STILL HELD leaves the player frozen on
+    the entry tile. Measured: hold UP continuously from the spawn and
+    the player crosses into `classic_gym_granite.tmx` at (10,19) and
+    then does not move for 1580 further steps. Release and press again
+    and they walk the whole corridor to (10,6).
+
+    Every run found the same one-action move -- hold UP from spawn --
+    which enters the gym and freezes there. They then spent their
+    remaining rounds pressing A from the entry tile, two tiles from
+    where the leader could hear them, reporting in their own notes that
+    "A alone from that position isn't resolving".
+
+    A second consequence, pinned here too: after the transition each
+    action advances exactly ONE tile regardless of `hold`, where the
+    same `hold` walks several tiles in the town. 13 tiles therefore
+    needs 13+ actions, not one long hold.
+
+    Nothing here is broken. The path is fully traversable with the
+    existing vocabulary -- a longer script reaches the leader, talks,
+    and a real `CombatState` begins. This pins the trap so a future
+    change can be measured against it.
+    """
+    from tuxemon.platform.const import buttons
+
+    from tuxghost.agent.types import Action
+    from tuxghost.optimize.schedule import ActionScript
+    from tuxghost.optimize.seal import seal
+    from tuxghost.rules import TuxemonFirstBattleRules
+
+    parent = read(
+        Path(__file__).parent / "golden" / "hearthrock_idle_600.tuxghost"
+    )
+
+    def end_tile(*actions: Action) -> tuple[str, list[int]]:
+        state = seal(
+            ActionScript(lead_in=0, actions=actions),
+            parent,
+            checkpoint=64,
+            model=None,
+            rules=TuxemonFirstBattleRules(),
+        ).final_state
+        return str(state.get("map")), list(state.get("tile_pos") or [])
+
+    up = Action(button=buttons.UP, hold=40, settle=20)
+
+    # One action: through the door, then frozen. This is what four of
+    # five live runs found and could not improve on.
+    assert end_tile(up) == ("classic_gym_granite.tmx", [10, 19])
+
+    # A second action moves exactly ONE tile, not the 2+ the same hold
+    # buys in the town.
+    assert end_tile(up, up) == ("classic_gym_granite.tmx", [10, 18])
+
+    # Enough separate actions and the leader's tile is reachable, so the
+    # vocabulary was never the limit.
+    assert end_tile(*([up] * 14)) == ("classic_gym_granite.tmx", [10, 6])
