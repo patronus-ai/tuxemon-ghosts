@@ -1079,11 +1079,6 @@ def _optimize(args: argparse.Namespace) -> int:
     # reads no map/tile at all. Both directions are refused explicitly,
     # not silently accepted-and-ignored, the same rule this module
     # already applies to `--seed`/`--goal` above.
-    # `--target` is meaningful only for `reach-tile` (whole-branch
-    # review, I2): `progress` scores via `TuxemonFirstBattleRules`, which
-    # reads no map/tile at all. Both directions are refused explicitly,
-    # not silently accepted-and-ignored, the same rule this module
-    # already applies to `--seed`/`--goal` above.
     target: tuple[str, tuple[int, int]] | None = None
     if args.objective == "reach-tile":
         if args.target is None:
@@ -1659,6 +1654,20 @@ def main(argv: list[str] | None = None) -> int:
     if command == "play":
         return _play(args)
     if command == "export":
+        # `--goal-frame` is a numeric CLI boundary and every other one in
+        # this module is checked here rather than trusted (see
+        # `--checkpoint` above). NO UPPER BOUND: a goal frame past
+        # `total_frames` is legitimate in their own data -- 16 of their 21
+        # committed files carry `goal_frame`, and
+        # `agent-kimi_sml_1-1_3047f.json` records 3173 against a
+        # `total_frames` of 3057. Only negativity is meaningless.
+        if args.goal_frame is not None and args.goal_frame < 0:
+            print(
+                f"refused: --goal-frame must be >= 0, got "
+                f"{args.goal_frame!r}",
+                file=sys.stderr,
+            )
+            return 2
         return _export(args.trace, args.out, args.run_dir, args.goal_frame)
     if command == "verify":
         return _verify(args.trace, args.allow_mismatch)

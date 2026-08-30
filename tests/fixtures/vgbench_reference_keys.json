@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Reference key sets from videogamebench, MEASURED not typed, so spec",
+    "item 12 ('assert our key set is a subset of their gold_human file's')",
+    "can be checked without that repo being present. Regenerate by",
+    "re-running the derivation in the commit that added this file.",
+    "Their own sandbox/trajectory_schema.json is NOT usable for this: it",
+    "sets additionalProperties:false over only {segments,total_frames,fps},",
+    "which forbids type/game/goal_frame -- keys present in every one of",
+    "their own outputs. Their FILES are the format; the schema is a fossil."
+  ],
+  "observed": "2026-08-29",
+  "gold_human": {
+    "file": "results/speedrun/gold_human_sml_1-1_6017f.json",
+    "sha256": "ae9e32a42aee2ee7cfd26cedcc97dd2f64a642985c69fdc0d5d3a9bb827edadf",
+    "keys": [
+      "boot_frames",
+      "fps",
+      "game",
+      "rom",
+      "segments",
+      "started_at",
+      "total_frames",
+      "type"
+    ]
+  },
+  "corpus": {
+    "files": 21,
+    "key_frequency": {
+      "type": 21,
+      "game": 21,
+      "fps": 21,
+      "total_frames": 21,
+      "segments": 21,
+      "goal_frame": 16,
+      "rom": 1,
+      "started_at": 1,
+      "boot_frames": 1,
+      "rationale": 1
+    }
+  }
+}

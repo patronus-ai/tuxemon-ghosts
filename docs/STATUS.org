@@ -2207,6 +2207,71 @@ was added rather than after. That is the same lesson recorded in the S5
 section, repeated within the same day: *run the gate's own command after
 the last edit, not before it.*
 
+* The three deferred S5 residuals, closed
+
+All three were logged as non-blocking at S5's close-out and are now done.
+
+** =--goal-frame= was the last unvalidated numeric CLI boundary
+
+Every other numeric argument in =tuxghost.cli= is checked rather than
+trusted; this one was not. Now refuses =< 0= with exit 2.
+
+*NO UPPER BOUND, deliberately.* A =goal_frame= past =total_frames= is
+legitimate in their own corpus: =agent-kimi_sml_1-1_3047f.json= records
+=goal_frame= 3173 against =total_frames= 3057. An upper bound here would
+refuse files they actually ship. Only negativity is meaningless, and
+=test_a_goal_frame_past_total_frames_is_accepted= is the control that
+keeps someone from "tightening" this into a defect.
+
+** The verbatim-duplicated =--target= comment
+
+A five-line comment block appeared twice, consecutively. Deleted one.
+
+** Spec item 12 was under-enforced — and the fix is smaller than it looks
+
+Item 12 requires our key set be a subset of *their =gold_human= file's*.
+The tests instead asserted against a hardcoded TEN-key literal that was
+the UNION of every key across all 21 of their files.
+
+Now measured, not typed: =tests/fixtures/vgbench_reference_keys.json=
+carries their =gold_human= key set, that file's sha256, and the corpus
+key frequency, all derived from their repo rather than written by hand.
+=test_the_vendored_reference_still_matches_their_repo= re-derives and
+compares whenever their repo is checked out, and skips otherwise, so the
+suite stays portable.
+
+*A tension item 12's wording hides.* =gold_human= has EIGHT keys and
+=goal_frame= is not among them — it is a human reference run with no
+scored goal. But =goal_frame= is unambiguously part of their format:
+16 of their 21 files carry it. So the strict item-12 ceiling holds for
+our DEFAULT export and *cannot* hold once =--goal-frame= is used. Both
+halves are now asserted, so neither drifts silently.
+
+*How much this actually tightened, stated precisely — the first version
+of this note overclaimed and a mutation caught it.* The union admitted
+=goal_frame= and =rationale=; =gold_human= does not. That is the whole
+tightening: two keys. It does NOT newly catch =rom= or =started_at=,
+which this exporter promises never to emit — both ARE in =gold_human=,
+so neither ceiling would notice them. That gap needed its own test,
+=test_started_at_and_rom_are_never_emitted=. A promise no test checks is
+not a promise.
+
+** The demonstrations, including one that documents a LIMIT
+
+| mutation | ceiling test | gap test |
+|---+---+---|
+| =--goal-frame= check removed | =AssertionError= (exit 0, wrote the file) | — |
+| emits =rationale= (outside =gold_human=) | *FAILS* — caught | — |
+| emits =started_at= (inside =gold_human=) | *passes* — misses it, as documented | *FAILS* — caught |
+
+The third row is the point: it proves the ceiling's documented blind
+spot is real and that the separate test is what closes it. =cli.py= and
+=vgbench.py= both byte-identical after restore.
+
+*Gate:* =make check= =EXIT=0=, 461 passed / 4 skipped / 11 warnings in
+285.27s; slow 4 passed; ruff + =lint-patched= + mypy (80 files) clean.
+456 → 461 (+5).
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.

@@ -18,6 +18,7 @@ import subprocess
 import sys
 from itertools import pairwise
 from pathlib import Path
+from typing import Any
 
 from tuxghost.trace import read
 from tuxghost.vgbench import segments_of, trajectory_of
@@ -90,6 +91,41 @@ def test_redundant_edges_do_not_produce_duplicate_segments() -> None:
     ]
     segs = segments_of(inputs)
     assert segs == [{"frame": 0, "buttons": ["A"]}]
+
+
+REFERENCE = Path(__file__).parent / "fixtures" / "vgbench_reference_keys.json"
+
+
+def _reference() -> dict[str, Any]:
+    """Their key sets, measured from their own committed files and
+    vendored so this suite does not need their repo checked out."""
+    data: dict[str, Any] = json.loads(REFERENCE.read_text())
+    return data
+
+
+def _gold_human_keys() -> set[str]:
+    """SPEC ITEM 12, literally: "assert our key set is a subset of their
+    `gold_human` file's".
+
+    This replaced a hardcoded ten-key literal that was the UNION of every
+    key across all 21 of their files. Stated precisely, because the
+    first attempt at this docstring overclaimed and a mutation caught it:
+
+      * The union admitted `goal_frame` and `rationale`; `gold_human`
+        does not. That is the whole tightening -- two keys -- and it is
+        what makes `test_goal_frame_is_outside_gold_humans_key_set...`
+        below able to say something true about the DEFAULT export.
+      * It does NOT newly catch `rom` or `started_at`, which this
+        exporter deliberately never emits. Both ARE in `gold_human`, so
+        neither ceiling would notice them. `test_started_at_and_rom_are_
+        never_emitted` covers that separately, and has to.
+
+    The second, larger gain is that the ceiling is now MEASURED from
+    their file rather than typed from memory, with
+    `test_the_vendored_reference_still_matches_their_repo` catching
+    drift whenever their repo is present.
+    """
+    return set(_reference()["gold_human"]["keys"])
 
 
 def test_edges_round_trip_through_segments() -> None:
@@ -260,10 +296,7 @@ def test_the_export_loads_with_their_own_consumer_expression() -> None:
     seg_at = {s["frame"]: set(s["buttons"]) for s in traj["segments"]}
     assert seg_at
     assert all(isinstance(k, int) for k in seg_at)
-    assert set(traj) <= {
-        "type", "game", "rom", "started_at", "boot_frames",
-        "fps", "total_frames", "segments", "goal_frame", "rationale",
-    }
+    assert set(traj) <= _gold_human_keys()
 
 
 def test_export_writes_a_trajectory_the_cli_produces_end_to_end(
@@ -280,10 +313,7 @@ def test_export_writes_a_trajectory_the_cli_produces_end_to_end(
     seg_at = {s["frame"]: set(s["buttons"]) for s in data["segments"]}
     assert seg_at
     assert all(isinstance(k, int) for k in seg_at)
-    assert set(data) <= {
-        "type", "game", "rom", "started_at", "boot_frames",
-        "fps", "total_frames", "segments", "goal_frame", "rationale",
-    }
+    assert set(data) <= _gold_human_keys()
 
 
 # --- Whole-branch review fix wave: I3 -- the spec's "Surface" section ---
@@ -468,3 +498,106 @@ def test_the_alias_is_derived_from_upstreams_keymap() -> None:
     moved = {**keymap, buttons.BACK: intentions.NOCLIP}
     with mock.patch("tuxemon.platform.tools.keymap", moved):
         assert buttons.BACK not in _button_names()
+
+
+# --- Deferred residuals from the S5 whole-branch review, closed ---------
+
+
+def test_goal_frame_is_outside_gold_humans_key_set_and_that_is_correct() -> None:
+    """The tension spec item 12's wording hides, recorded rather than
+    smoothed over.
+
+    Item 12 says our key set must be a subset of their `gold_human`
+    file's. That file has EIGHT keys and `goal_frame` is not one of them
+    -- it is a human reference run with no scored goal. But `goal_frame`
+    is unambiguously part of their format: 16 of their 21 committed files
+    carry it. So the strict item-12 ceiling holds for our DEFAULT export
+    and cannot hold once `--goal-frame` is used.
+
+    Both facts are asserted here so neither can drift silently.
+    """
+    ref = _reference()
+    gold = set(ref["gold_human"]["keys"])
+    assert "goal_frame" not in gold
+    assert ref["corpus"]["key_frequency"]["goal_frame"] == 16
+    assert ref["corpus"]["files"] == 21
+
+    plain = set(trajectory_of(read(PARENT)))
+    assert plain <= gold, plain - gold
+
+    stamped = set(trajectory_of(read(PARENT), goal_frame=99))
+    assert stamped - gold == {"goal_frame"}
+    assert stamped <= gold | {"goal_frame"}
+
+
+def test_export_refuses_a_negative_goal_frame(tmp_path: Path) -> None:
+    """`--goal-frame` was the one unvalidated numeric boundary left in
+    this parser; every other one is checked rather than trusted.
+
+    Pinned against that check: removing it makes the CLI exit 0 and write
+    a trajectory stamping a negative frame index.
+    """
+    out = tmp_path / "traj.json"
+    proc = _run_cli(
+        "--trace", str(PARENT), "--out", str(out), "--goal-frame", "-1"
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "--goal-frame must be >= 0" in proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert not out.exists()
+
+
+def test_a_goal_frame_past_total_frames_is_accepted(tmp_path: Path) -> None:
+    """The control for the refusal above, and it is not hypothetical:
+    their own `agent-kimi_sml_1-1_3047f.json` records `goal_frame` 3173
+    against a `total_frames` of 3057. An upper bound here would refuse
+    files their corpus actually contains.
+    """
+    out = tmp_path / "traj.json"
+    trace = read(PARENT)
+    beyond = trace.header.step_count + 500
+    proc = _run_cli(
+        "--trace", str(PARENT), "--out", str(out),
+        "--goal-frame", str(beyond),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(out.read_text())["goal_frame"] == beyond
+
+
+def test_the_vendored_reference_still_matches_their_repo() -> None:
+    """Opportunistic drift check: when their repo IS checked out here,
+    the vendored fixture must still describe it. Skipped otherwise, so
+    the suite stays portable -- the assertions above never depend on
+    their repo being present.
+    """
+    import hashlib
+
+    import pytest
+
+    ref = _reference()
+    vgb = Path.home() / "Workspace" / "videogamebench" / "results" / "speedrun"
+    gold = vgb / Path(ref["gold_human"]["file"]).name
+    if not gold.exists():
+        pytest.skip("videogamebench not checked out here")
+
+    raw = gold.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == ref["gold_human"]["sha256"]
+    assert sorted(json.loads(raw)) == ref["gold_human"]["keys"]
+    assert len(list(vgb.glob("*.json"))) == ref["corpus"]["files"]
+
+
+def test_started_at_and_rom_are_never_emitted() -> None:
+    """The gap the `gold_human` ceiling CANNOT close, covered explicitly.
+
+    Both keys are in `gold_human`, so a subset assertion would happily
+    accept them. But `tuxghost.vgbench`'s module docstring promises
+    neither is ever emitted: `started_at` is wall-clock, which CLAUDE.md
+    forbids entering this format at all, and `rom` is meaningless for a
+    game with no ROM. A promise no test checks is not a promise.
+    """
+    for traj in (
+        trajectory_of(read(PARENT)),
+        trajectory_of(read(PARENT), goal_frame=7),
+    ):
+        assert "started_at" not in traj
+        assert "rom" not in traj
