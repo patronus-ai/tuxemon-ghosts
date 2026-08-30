@@ -14,6 +14,7 @@
 <div>
   <button id="start">Click to start</button>
   <p id="status">Pyodide takes about 7 seconds to boot.</p>
+  <p id="fps"></p>
   <canvas id="canvas" width="1280" height="720" tabindex="0"
           hidden></canvas>
 </div>
@@ -23,6 +24,40 @@
 // Emscripten's SDL delivers DOM key events into pygame.event directly,
 // which is why there is no input code anywhere in this build.
 const status = (t) => document.getElementById("status").textContent = t;
+
+// The manual acceptance requires a MEASURED, READABLE frame rate ("at
+// least 30fps sustained over 10 seconds of walking"). ROUND 1 of this
+// review shipped a `requestAnimationFrame` counter here -- rejected on
+// re-review: it ticks at the BROWSER's paint rate, which keeps going
+// even if the Python game loop stalls completely, so it could read a
+// healthy 60 on a frozen build. This build instead polls
+// `tuxghost.web.measured_rate`, a number the game loop itself computes
+// as its own real steps-taken-per-real-second (see `web.py`'s
+// `main`) -- it IS the loop's progress, not a proxy for it, so it
+// drops to 0 the instant the loop stops making progress, whatever the
+// browser is doing on screen. Polling (not a callback from Python)
+// keeps `web.py` free of any browser-specific code beyond its one
+// documented `await`.
+let fpsInterval = null;
+function startFpsPoller(pyodide) {
+  fpsInterval = setInterval(() => {
+    let rate;
+    try {
+      // Re-`import`ing is a cheap no-op once `tuxghost.web` is already
+      // in `sys.modules` -- this only does real work on the tick or two
+      // before the game script's own `import tuxghost.web as web` line
+      // has run, and is otherwise how this poller reads the module's
+      // live state without web.py ever reaching back into JS itself.
+      rate = pyodide.runPython(
+        "import tuxghost.web as web; web.measured_rate"
+      );
+    } catch (e) {
+      return; // tuxghost.web isn't importable yet -- try again next tick
+    }
+    document.getElementById("fps").textContent = `${rate.toFixed(1)} steps/sec`;
+  }, 1000);
+}
+
 document.getElementById("start").onclick = async (ev) => {
   ev.target.disabled = true;
   try {
@@ -47,6 +82,7 @@ document.getElementById("start").onclick = async (ev) => {
     pyodide.canvas.setCanvas2D(canvas);
     canvas.focus();
     status("arrow keys to move · Enter to interact");
+    startFpsPoller(pyodide);
     await pyodide.runPythonAsync(`
 import sys, os
 sys.path.insert(0, "/game"); os.chdir("/game")
