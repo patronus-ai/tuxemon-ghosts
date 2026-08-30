@@ -109,7 +109,8 @@ state regardless.
 
 Builds =build/web/=: the shim page, =code.zip= (vendored engine +
 =tuxghost=), =mods.zip= and =fixtures.zip=. Serving is
-=python -m http.server= from that directory — Pyodide requires =http://=
+=make serve= (a target, not a typed command: =python= is not on PATH on
+every machine — measured, on this one). Pyodide requires =http://=
 and will not run from =file://=. Built from the vendored tree so it
 cannot drift from what the native tests run against.
 

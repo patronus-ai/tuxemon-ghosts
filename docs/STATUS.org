@@ -2995,7 +2995,7 @@ Scope was cut deliberately by the human, and each cut is a clean second
 increment rather than rework: *play only* (no traces written, so the
 format's =platform=/=patch_series_id= guarantees are untouched), *one
 fixed scenario* (=paper_town.save= + =scripted_town_1234= as the ghost),
-*local only* (=make web=, =python -m http.server=).
+*local only* (=make web=, then =make serve= on port 8777).
 
 Feasibility was measured BEFORE any of it was designed —
 =docs/2026-08-30-wasm-spike.org=.
