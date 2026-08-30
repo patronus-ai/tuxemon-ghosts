@@ -1643,7 +1643,19 @@ human or automated:
 - The world or the ghost rendering at the *correct scale* — see the next
   section.
 
-** MANUAL ACCEPTANCE — the one outstanding item, and it needs a human at a real screen
+** MANUAL ACCEPTANCE — DONE 2026-08-29; see "S4's MANUAL ACCEPTANCE: PERFORMED, and now PASSED"
+
+*This section is no longer current and is corrected here rather than left
+standing, per this project's rule against silently outdated claims.* It
+called manual acceptance "the one outstanding item"; it was performed on
+2026-08-29 and PASSED, but only after finding three defects that were
+live at S4's close-out — the ghost hid after 2.9 seconds, a space bar
+destroyed the recorded session, and =build_track= re-created the display
+and holed the windowed render. The section below described the procedure
+correctly; what it could not know is what running it would find.
+
+The original text follows, unchanged, because the command it gives is
+still the right one.
 
 This is not something this close-out task can perform, and nothing above
 should be read as implying it was. It requires a human to actually watch
@@ -1960,14 +1972,65 @@ Their progress function is =n_badges*1e6 + furthest_critical_path_map*1e3
 wipe. Both sides carry the same unresolved =CRITICAL_PATH= ordering,
 marked =VERIFY= in both repos.
 
-* S4's MANUAL ACCEPTANCE, finally performed — and it failed
+* S4's MANUAL ACCEPTANCE: PERFORMED, and now PASSED
+
+*Status: SATISFIED, 2026-08-29.* A human confirmed, in their own words,
+"I can see it, it works". This closes the item that had been outstanding
+since S4 shipped, through S5 and two fix waves.
+
+It did not pass on the first attempt. The first windowed run found THREE
+defects, all recorded below, all fixed; the confirmation above is of the
+tree AFTER those fixes (=main= at =8840756=).
+
+*What was actually confirmed.* A ghost-race clip: the live character
+driven by =tests/golden/claude_town_1234.tuxghost= (442 steps) while the
+ghost replays =tests/golden/scripted_town_1234.tuxghost= (176 steps) —
+same save, same seed 1234, same clock epoch 1787659200, same map. Both
+are real recorded traces; nothing was synthesised for the demonstration.
+The ghost completes its route at step 176 and stands at tile (16,14) for
+the remaining 266 steps.
+
+*Three independent confirmations accompany the human's, so this does not
+rest on one pair of eyes:*
+
+- *Pixel diff.* Rendering the final frame with and without the ghost
+  installed and differencing them yields exactly ONE changed region,
+  70×100 px at (1010, 295). The ghost is drawn, and it is the only
+  thing it changes.
+- *Digest invariance.* Final digest with ghost (run 1) = with ghost
+  (run 2) = WITHOUT ghost = the trace's own recorded =final_digest= =
+  =bc717075d0ba16b8731ae89ddf92f8aa9ff3201429f6766c480f02cded5faf1f=.
+  The ghost is drawn but state-invisible, measured rather than asserted.
+- *Render fidelity.* Headless output is byte-identical to windowed since
+  the =build_track= context fix, so the clip is a faithful stand-in for
+  what the window shows.
+
+*One honest caveat, recorded rather than buried:* re-rendering the clip
+does NOT produce a byte-identical GIF — consecutive runs came out at 109
+and 106 frames, because animation phase and dialogue timing differ
+between runs. The four digests above are identical regardless. That is
+exactly the guarantee this project makes and no more: a window changes
+what is DRAWN, never what HAPPENS.
+
+The clip itself was a throwaway: a script under the job's tmp directory,
+no =tuxghost= subcommand, nothing committed. If a ghost video is ever
+wanted as a real feature it is unbuilt, and would need its own spec.
+
+** The three defects the acceptance found — and why it had to be a human
 
 The item outstanding since S4 closed. A human ran =tuxghost play= at a
 real window on 2026-08-29 and reported: *"I don't see the ghosts"*.
 Every automated test passed throughout. Two defects, both invisible to
 the suite, and one of them destroyed the session.
 
-** Defect 1 — the ghost was visible for 2.9 seconds, then hidden forever
+*A test suite cannot see a three-second window, and cannot see a
+translucent sprite at all.* S4 shipped with three ghost properties
+"DEMONSTRATED, not asserted", a fully green suite, and a documented claim
+that the feature worked. All three defects below were live at that
+moment. The single manual step was the only thing that could have caught
+any of them, and it sat undone across two subsequent subsystems.
+
+*** Defect 1 — the ghost was visible for 2.9 seconds, then hidden forever
 
 *Not an implementation bug.* =advance_ghost= did exactly what S4
 designed and what =test_the_ghost_is_hidden_past_the_end_of_its_track=
@@ -2006,7 +2069,7 @@ the same way: visible at step 1200 (20 seconds), still at (16, 14).
 An empty track still hides the ghost: the linger reads
 =track.frames[-1]=, and there is no final tile to stand on.
 
-** Defect 2 — a space bar destroyed the whole recorded session
+*** Defect 2 — a space bar destroyed the whole recorded session
 
 =tuxemon.platform.const.events= shares the =PlayerInput.button= channel
 with real buttons — =QUIT= (20000), =UNICODE= (20001), =BACKSPACE=
@@ -2032,7 +2095,7 @@ reader. The value guard is separate from the button guard on purpose,
 and =bool= is excluded explicitly — it is an =int= subclass, and
 =float(True)= would silently record 1.0.
 
-** All four regression tests were demonstrated to fail
+*** All four regression tests were demonstrated to fail
 
 | test | mutation | observed failure |
 |---+---+---|
@@ -2051,7 +2114,7 @@ project has shipped exactly that class of vacuous test before.
 245.55s; slow 4 passed; ruff + =lint-patched= + mypy (80 files) clean.
 Load 3.56 → 2.93. 450 → 455 (+5, one being the new control).
 
-** The lesson, stated plainly
+*** The lesson, stated plainly
 
 S4 shipped with three ghost properties "DEMONSTRATED, not asserted", a
 full green suite, and a documented claim that the feature worked. It did
