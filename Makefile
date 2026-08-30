@@ -28,12 +28,12 @@ unpatch:
 	cd tuxemon && git checkout -- . && git clean -fd
 
 lint:
-	$(PY) -m ruff check tuxghost tests
+	$(PY) -m ruff check tuxghost tests scripts
 
 # `mypy` has `follow_imports = "skip"` for `tuxemon.*` and `ruff check`
-# above only scans `tuxghost tests` -- neither ever looks at the vendored
-# engine files our patches actually edit. That hole is real: reverting a
-# patched call site back to `uuid4()` leaves an unused
+# above only scans `tuxghost tests scripts` -- neither ever looks at the
+# vendored engine files our patches actually edit. That hole is real:
+# reverting a patched call site back to `uuid4()` leaves an unused
 # `from tuxemon.core.ids import new_id` import, and nothing catches it.
 # Lint exactly the engine files the currently-applied patches touch,
 # derived from `git -C tuxemon diff`/untracked status rather than a
@@ -49,7 +49,7 @@ lint-patched:
 	echo "$$files" | sed 's|^|tuxemon/|' | xargs $(PY) -m ruff check
 
 types:
-	$(PY) -m mypy tuxghost tests
+	$(PY) -m mypy tuxghost tests scripts
 
 test:
 	PYTHONHASHSEED=0 $(PY) -m pytest -q
