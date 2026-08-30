@@ -44,16 +44,23 @@ class GameRules(Protocol):
 #: named a different, unreachable map family -- those two maps exist in
 #: `mods/tuxemon/maps/` but nothing connects them to `spyder_paper_town
 #: .tmx`, so the map term was permanently 0 and `progress` reduced to
-#: `party_count * 10` with no gradient at all. The ORDER below is still
-#: VERIFY, exactly as their Pokemon CRITICAL_PATH is: real adjacency
-#: (route1 is a hub touching all three towns) does not by itself say
-#: which town comes "further" along a critical path. Dump the map
-#: sequence over a reference run and fix the ORDER before trusting the
-#: shaping. The GOAL does not depend on it; only the shape.
+#: `party_count * 10` with no gradient at all.
+#:
+#: THE ORDER IS NOW MEASURED, not assumed. Every `transition_teleport
+#: player,<map>.tmx` in all 263 shipped `.tmx` files was parsed into a
+#: directed graph (472 edges over 199 maps with outgoing links) and
+#: breadth-first searched from the starting save's own map. Hop counts:
+#: `spyder_paper_town` 0, `spyder_route1` 1, `spyder_cotton_town` 2 --
+#: strictly increasing, exactly the order below. This replaced the
+#: earlier "ORDER still VERIFY" marker, which was correct to raise and
+#: turned out to be correct as written.
+#: `tests/test_rules_mapgraph.py` re-derives this from the map data on
+#: every run, so a vendor bump that reorders the route fails rather than
+#: silently reshaping the gradient.
 CRITICAL_PATH: tuple[str, ...] = (
-    "spyder_paper_town.tmx",     # VERIFIED name, ORDER still VERIFY
-    "spyder_route1.tmx",         # VERIFIED name, ORDER still VERIFY
-    "spyder_cotton_town.tmx",    # VERIFIED name, ORDER still VERIFY
+    "spyder_paper_town.tmx",     # VERIFIED name, ORDER VERIFIED (0 hops)
+    "spyder_route1.tmx",         # VERIFIED name, ORDER VERIFIED (1 hop)
+    "spyder_cotton_town.tmx",    # VERIFIED name, ORDER VERIFIED (2 hops)
 )
 
 #: All 13 leaders are named `classic_gym_leader_<name>`; nothing in the
@@ -162,8 +169,21 @@ class TuxemonGymRules(TuxemonRules):
     them, so "the first gym" is not implementable. "Your first badge"
     only requires that one has been won.
 
-    NOT REACHABLE by any trace this project can currently record. See
-    the spec's "horizon problem".
+    NOT REACHABLE by any trace this project can currently record -- and
+    the reason is STRONGER than the spec's "horizon problem" framing,
+    which implies a long-but-possible search. It is not long. It is
+    impossible from the shipped save.
+
+    Measured over the map graph (see `tests/test_rules_mapgraph.py`):
+    all 13 `classic_gym_*.tmx` maps sit in a 22-map connected component
+    that contains NO `spyder_*` map at all, and the starting save's map
+    `spyder_paper_town.tmx` reaches 88 maps directed / 94 undirected,
+    zero of them a gym. The `classic_*` campaign and the `spyder_*`
+    campaign are disconnected. No amount of search time crosses that.
+
+    So this class is aspirational until a `classic_*` starting save
+    exists. `TuxemonFirstBattleRules` is the goal anything actually runs
+    against today.
     """
 
     def at_goal(self, session: Any) -> bool:

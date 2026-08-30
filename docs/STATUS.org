@@ -2272,6 +2272,81 @@ spot is real and that the separate test is what closes it. =cli.py= and
 285.27s; slow 4 passed; ruff + =lint-patched= + mypy (80 files) clean.
 456 → 461 (+5).
 
+* CRITICAL_PATH calibrated, and the gym goal shown to be UNREACHABLE
+
+Both were assumptions carried since S5, marked =VERIFY= in the code and
+never measured. Both are now measured, from the shipped map data.
+
+*Method.* Every =transition_teleport player,<map>.tmx= in all 263 =.tmx=
+files under =tuxemon/mods/tuxemon/maps/= parsed into a directed graph —
+472 edges over 199 maps with outgoing links — then breadth-first
+searched from =spyder_paper_town.tmx=, which is the map the committed
+save actually boots on (read from the save, not assumed). Parsing all
+263 maps takes 0.04s, so this lives in the fast suite.
+
+This is the same calibration their =scripts/pokemon_calibrate.py= exists
+to perform, and which =POKEMON_SETUP.md= lists as their blocker #2. They
+cannot run theirs — it needs a ROM they do not have. Ours needed no such
+thing: the map data is right there in the tree.
+
+** CRITICAL_PATH's ORDER was right all along — now with evidence
+
+| map | hops from start |
+|---+---|
+| =spyder_paper_town.tmx= | 0 |
+| =spyder_route1.tmx= | 1 |
+| =spyder_cotton_town.tmx= | 2 |
+
+Strictly increasing, exactly the order the tuple already declared. The
+=VERIFY= marker was correct to raise — adjacency alone genuinely could
+not settle it, since =spyder_route1= is a hub touching all three towns —
+and the answer turned out to be the one already written. Markers removed
+and replaced with the measurement.
+
+*Demonstrated:* reversing the tuple fails
+=test_critical_path_is_ordered_by_real_map_distance= with
+=assert [2, 1, 0] == [0, 1, 2]=.
+
+** The gym goal is not "far". It is DISCONNECTED.
+
+=TuxemonGymRules='s docstring said "NOT REACHABLE ... See the spec's
+'horizon problem'". That framing is too weak and is corrected: a horizon
+problem implies a long-but-possible search. Measured:
+
+- All 13 =classic_gym_*.tmx= maps sit in a *22-map connected component
+  containing NO =spyder_*= map at all*.
+- =spyder_paper_town.tmx= reaches 88 maps directed, 94 undirected. Zero
+  are gyms.
+- Checked UNDIRECTED as well as directed, deliberately: a one-way link
+  would still make the goal reachable, and testing only the directed
+  graph would have missed it.
+
+The =classic_*= campaign and the =spyder_*= campaign are separate games
+that happen to ship in one mods directory. *No amount of search time
+crosses that.* =TuxemonGymRules= is aspirational until a =classic_*=
+starting save exists; =TuxemonFirstBattleRules= is the goal anything
+actually runs against today, exactly as its docstring already said.
+
+*Demonstrated:* adding a SINGLE edge from =spyder_cotton_town= to
+=classic_gym_astra= makes all 13 gyms reachable and fails
+=test_no_gym_is_reachable_from_the_starting_map=. That is the test's
+purpose — if a vendor bump ever connects the campaigns, it fails, and
+that is the moment to revisit =TuxemonGymRules=.
+
+** Why these are tests and not comments
+
+Both facts are properties of 263 vendored =.tmx= files, which =make
+patch= can replace without touching a line of our code. A comment
+recording a measurement goes stale silently; a test re-derives it on
+every run. =tests/test_rules_mapgraph.py= also re-reads =START= from
+=tests/fixtures/paper_town.save= rather than trusting the literal, so
+the other two assertions cannot quietly become vacuous by pointing at
+the wrong starting map.
+
+*Gate:* =make check= =EXIT=0=, 464 passed / 4 skipped / 11 warnings in
+268.41s; slow 4 passed; ruff + =lint-patched= + mypy (81 files) clean.
+461 → 464 (+3).
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.
