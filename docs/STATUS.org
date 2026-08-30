@@ -2626,11 +2626,60 @@ start. A run reaching route_1 would score 3020. =_map_index= takes the
 MAX over a run, so a script that enters the gym and then leaves for
 route_1 keeps both — nothing has to be given up.
 
-The likely cause is the greedy accept rule: the first transition found
-becomes the accepted best, and every later proposal is an edit to a
-script that ends inside a dead-end gym. The search locks onto its first
-success. That is a hypothesis, stated as one, and the next thing worth
-testing.
+*I proposed the greedy accept rule as the cause and then measured it,
+which mostly falsified it.* The exits are not equidistant at all:
+
+| exit | tiles from spawn (23,14) | rank | worth |
+|---+---+---+---|
+| =classic_gym_granite= | *1* | 1 | 1020 |
+| =classic_gym_mila= | 6 | 2 | 2020 |
+| =classic_route_8= | 17 | 4 | 4020 |
+| =classic_route_1= | 23 | 3 | 3020 |
+
+Granite is ONE TILE above the spawn. It was not chosen over the others;
+it is the only thing within a single move. "The search locks onto its
+first success" assumed the alternatives were comparably findable, and
+they are not.
+
+*** The real cause: a one-tile-wide target, measured
+
+=gym_mila= is six tiles away, worth 2020, and no run in five found it.
+Sweeping the LEFT hold that walks toward it:
+
+| LEFT hold | lands on tile | max_progress |
+|---+---+---|
+| 64 | x=19 | 20 |
+| *72* | *x=18* | *2020* |
+| *80* | *x=18* | *2020* |
+| 88 | x=17 | 20 |
+
+The door is one tile wide, and the editor must choose a hold duration
+that lands exactly on it. Granite asks for nothing of the sort: any hold
+>= 20 straight up works, with no lateral precision at all. *A forgiving
+target was found by 4 of 5 runs; a one-tile target by none of them.*
+
+That is a property of the ACTION VOCABULARY -- durations in steps, when
+the world is quantised in tiles -- not of the search's willingness to
+explore. The SYSTEM prompt does state "one tile of walking takes 16
+steps", and the checkpoint trail does report tiles, so the information
+needed to correct is present; converting it into an exact hold is what
+does not happen.
+
+Greedy accept may still contribute -- nothing here rules it out -- but it
+is no longer the leading explanation, and it should not be the first
+thing fixed.
+
+*** 2020 is reachable in TWO actions
+
+=test_two_actions_double_the_ceiling_five_live_runs_never_passed=
+(slow) pins it: =LEFT 80= then =UP 48= scores 2020, against the 1020 that
+five live runs never passed. It also pins the one-tile window, asserting
+that 64 and 88 both score 20.
+
+So the ceiling is a property of the search, not of the map or the
+scoring, and the bar a future change has to clear is now written down and
+checked on every run. Demonstrated by ranking =classic_gym_mila= off the
+critical path: =AssertionError: assert 20 == 2020=.
 
 ** Superseded: the n=2 reading
 

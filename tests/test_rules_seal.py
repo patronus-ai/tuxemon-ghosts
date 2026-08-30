@@ -344,3 +344,72 @@ def test_one_action_beats_the_parent_from_the_hearthrock_save() -> None:
     # One action, one map transition, a full rank of the critical path.
     assert moved.max_progress == 1020, moved.max_progress
     assert moved.max_progress > idle.max_progress
+
+
+@pytest.mark.slow
+def test_two_actions_double_the_ceiling_five_live_runs_never_passed() -> None:
+    """Better scores than the search finds are TRIVIALLY expressible.
+
+    Five live runs from this save all stopped at `max_progress` 1020,
+    and the three that got there ended on the identical tile --
+    `classic_gym_granite.tmx` (10,19) -- having found the identical
+    move, hold UP from spawn. None reached 2020.
+
+    This pins that 2020 is not merely reachable but reachable in TWO
+    actions, so the ceiling is a property of the SEARCH, not of the map
+    or the scoring. If a future change makes the optimizer clear 1020,
+    this is the bar it cleared.
+
+    The measured asymmetry is why the search stalls where it does:
+
+      granite: 1 tile from spawn, straight up. Any hold >= 20 works and
+               no lateral precision is needed at all.
+      mila:    6 tiles away, and the door is ONE TILE WIDE. Sweeping the
+               LEFT hold, 64 lands on x=19 and 88 on x=17 -- both score
+               20 -- while only 72..80 land on x=18 and score 2020.
+
+    A forgiving target was found by 4 of 5 runs; a one-tile target by
+    none of them.
+    """
+    from tuxemon.platform.const import buttons
+
+    from tuxghost.agent.types import Action
+    from tuxghost.optimize.schedule import ActionScript
+    from tuxghost.optimize.seal import seal
+    from tuxghost.rules import TuxemonFirstBattleRules
+
+    parent = read(
+        Path(__file__).parent / "golden" / "hearthrock_idle_600.tuxghost"
+    )
+
+    def run(*actions: Action) -> int:
+        return seal(
+            ActionScript(lead_in=0, actions=actions),
+            parent,
+            checkpoint=64,
+            model=None,
+            rules=TuxemonFirstBattleRules(),
+        ).max_progress
+
+    # What every successful live run found.
+    assert run(Action(button=buttons.UP, hold=40, settle=20)) == 1020
+
+    # What none of them found, in one extra action.
+    assert (
+        run(
+            Action(button=buttons.LEFT, hold=80, settle=20),
+            Action(button=buttons.UP, hold=48, settle=20),
+        )
+        == 2020
+    )
+
+    # The one-tile window, which is the point: overshoot or undershoot
+    # the lateral walk by a single tile and the door is missed entirely.
+    for hold in (64, 88):
+        assert (
+            run(
+                Action(button=buttons.LEFT, hold=hold, settle=20),
+                Action(button=buttons.UP, hold=48, settle=20),
+            )
+            == 20
+        ), hold
