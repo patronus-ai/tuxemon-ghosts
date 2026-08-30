@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,3 +132,29 @@ def step_once(state: WebSession, elapsed: float) -> int:
     state.display.blit(state.frames.surface(), (0, 0))
     pg.display.flip()
     return steps
+
+
+async def main(
+    save: Path, ghost: Path, *, seed: int, clock_epoch: int
+) -> None:
+    """The browser's entry point.
+
+    `await asyncio.sleep(0)` is the ONLY browser-specific line in this
+    module. Without it the loop never returns control and the tab
+    freezes; with it, Pyodide gets to run the event loop and deliver the
+    keyboard events the game reads through `client.update`.
+
+    Pacing is `steps_owed` against `time.monotonic()`, exactly as
+    `tuxghost.play` does, rather than trusting the browser's frame
+    timing. It already handles catch-up and already carries
+    `CATCH_UP_CAP`.
+    """
+    import asyncio
+
+    state = boot(save, ghost, seed=seed, clock_epoch=clock_epoch)
+    last = time.monotonic()
+    while state.client.is_running:
+        now = time.monotonic()
+        step_once(state, now - last)
+        last = now
+        await asyncio.sleep(0)

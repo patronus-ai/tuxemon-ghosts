@@ -11,6 +11,8 @@ import ast
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 FIXTURES = Path(__file__).parent / "fixtures"
 GOLDEN = Path(__file__).parent / "golden"
 SAVE = FIXTURES / "paper_town.save"
@@ -129,3 +131,39 @@ def test_web_never_uses_the_headless_context() -> None:
         node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
     }
     assert "headless_context" not in names, sorted(names)
+
+
+def test_main_yields_between_frames() -> None:
+    """The `await` is the entire reason this module is not JavaScript: a
+    loop that never yields freezes the browser tab. Pinned by counting
+    yields, since the browser cannot be here to notice.
+    """
+    import asyncio
+
+    from tuxghost import web
+
+    calls = {"steps": 0, "yields": 0}
+    real_sleep = asyncio.sleep
+
+    async def counting_sleep(delay: float) -> None:
+        calls["yields"] += 1
+        if calls["yields"] >= 3:
+            raise KeyboardInterrupt  # stop the loop deterministically
+        await real_sleep(delay)
+
+    def counting_step(state: Any, elapsed: float) -> int:
+        calls["steps"] += 1
+        return 1
+
+    original_step, original_sleep = web.step_once, asyncio.sleep
+    web.step_once, asyncio.sleep = counting_step, counting_sleep  # type: ignore[assignment]
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(
+                web.main(SAVE, GHOST, seed=SEED, clock_epoch=CLOCK_EPOCH)
+            )
+    finally:
+        web.step_once, asyncio.sleep = original_step, original_sleep
+
+    assert calls["yields"] == 3, calls
+    assert calls["steps"] == 3, calls
