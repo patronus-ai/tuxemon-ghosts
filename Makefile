@@ -1,6 +1,6 @@
 PY := ./.venv/bin/python
 
-.PHONY: check check-fast lint lint-patched types test slow patch unpatch
+.PHONY: check check-fast lint lint-patched types test slow patch unpatch web
 check: lint lint-patched types test slow
 check-fast: lint lint-patched types test
 
@@ -58,3 +58,9 @@ slow:
 	# exit 5 means "no tests collected", which is correct until Task 6 adds
 	# the first slow test. Any other non-zero status is a real failure.
 	PYTHONHASHSEED=0 TUXGHOST_RUN_SLOW=1 $(PY) -m pytest -q -m slow || [ $$? -eq 5 ]
+
+# Builds build/web/. Serve it with:
+#   cd build/web && python -m http.server
+# Pyodide requires http:// -- it will NOT run from file://.
+web:
+	$(PY) scripts/build_web.py

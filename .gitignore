@@ -10,3 +10,7 @@ spike/_p.py
 # Recorded play sessions -- artifacts, never source. Keeps a stray
 # `git add -A` from sweeping traces into the tree the way uv.lock got in.
 runs/
+
+# `make web` output -- rebuildable from web/index.html + scripts/build_web.py
+# + the vendored tuxemon/ tree; never source.
+build/
