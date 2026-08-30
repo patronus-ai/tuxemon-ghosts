@@ -1,0 +1,729 @@
+#+TITLE: S6 — browser play, with a ghost — implementation plan
+
+* For agentic workers
+
+REQUIRED SUB-SKILL: use =superpowers:subagent-driven-development=
+(recommended) or =superpowers:executing-plans=. Steps use =- [ ]=
+checkboxes for tracking.
+
+*Goal:* a local browser page that boots Tuxemon under Pyodide and lets a
+human play with a ghost walking beside them.
+
+*Architecture:* one new module =tuxghost/web.py= owns the session and a
+one-frame-at-a-time step function; an ~20-line JS shim boots Pyodide and
+calls it; =make web= packages the lot. Input and drawing need NO new code
+— measured.
+
+*Tech stack:* Pyodide 0.29.1, pygame-ce (2.5.6.dev2 in Pyodide),
+micropip, existing =tuxghost= modules.
+
+*Spec:* =docs/superpowers/specs/2026-08-30-browser-play-design.org= —
+read it too; every number in this plan comes from its evidence table.
+
+* Global Constraints
+
+- =SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy= on EVERY native
+  invocation, tests included. =tuxghost play= is the only exception and
+  this plan adds no others.
+- *NEVER edit =tuxemon/= directly.* This plan adds NO patch. The series
+  stays at SIX and =patch_series_id= must not change.
+- =EXEMPTIONS== ={}= in =tuxghost/digest.py=. Do not add an entry.
+- =FORMAT_VERSION== =1=. The browser writes NO trace.
+- Docs are =.org=, never =.md=.
+- Every regression test must be DEMONSTRATED to fail against the defect
+  it pins: mutate, run, capture the real failure, restore, re-run, and
+  put the actual output in the report.
+- =make check= before calling anything done. Never two suites at once.
+- Run the gate's OWN commands (=mypy tuxghost tests=, 80+ files) — not a
+  narrower =mypy --strict tuxghost=. This bit the project three times in
+  one day.
+
+* File structure
+
+| file | responsibility |
+|---+---|
+| =tuxghost/web.py= (new) | boot a windowed session with a ghost; advance one frame; async loop |
+| =tests/test_web.py= (new) | native tests for boot + =step_once= + the no-headless guard |
+| =web/index.html= (new) | the JS shim, checked in as source |
+| =scripts/build_web.py= (new) | zips the engine, mods and fixtures into =build/web/= |
+| =Makefile= (modify) | add a =web= target |
+| =docs/STATUS.org= (modify) | close-out, including the manual acceptance result |
+
+---
+
+* Task 1: =tuxghost/web.py= — boot and =step_once=
+
+*Files:*
+- Create: =tuxghost/web.py=
+- Test: =tests/test_web.py=
+
+*Interfaces:*
+- Consumes: =tuxghost.boot.boot_from_save=,
+  =tuxghost.ghost.track.build_track=,
+  =tuxghost.ghost.entity.install_ghost/advance_ghost=,
+  =tuxghost.ghost.pump.steps_owed=, =tuxghost.loop.run_steps=,
+  =tuxghost.observe.FrameRenderer=, =tuxghost.trace.read=.
+- Produces: =WebSession= dataclass; =boot(save, ghost, *, seed,
+  clock_epoch) -> WebSession=; =step_once(state: WebSession, elapsed:
+  float) -> int= returning the number of fixed steps taken.
+
+- [ ] *Step 1: write the failing test*
+
+Create =tests/test_web.py=:
+
+#+begin_src python
+"""Native tests for `tuxghost.web`, the browser entry point.
+
+Everything here runs under the dummy SDL drivers like the rest of the
+suite. Only `web.main`'s `await` is browser-only, and it is deliberately
+not exercised here -- see the spec's "What the gate CANNOT cover".
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+FIXTURES = Path(__file__).parent / "fixtures"
+GOLDEN = Path(__file__).parent / "golden"
+SAVE = FIXTURES / "paper_town.save"
+GHOST = GOLDEN / "scripted_town_1234.tuxghost"
+SEED = 1234
+CLOCK_EPOCH = 1787659200
+
+
+def _booted() -> Any:
+    from tuxghost.web import boot
+
+    return boot(SAVE, GHOST, seed=SEED, clock_epoch=CLOCK_EPOCH)
+
+
+def test_boot_installs_the_ghost_on_the_players_map() -> None:
+    """The whole point of the page: a ghost beside you when it loads."""
+    from tuxghost.ghost.entity import GHOST_SLUG
+
+    state = _booted()
+    assert GHOST_SLUG in state.client.npc_manager.npcs
+    assert state.client.get_map_name() == "spyder_paper_town.tmx"
+    assert len(state.track.frames) == 177
+#+end_src
+
+- [ ] *Step 2: run it and watch it fail*
+
+#+begin_src bash
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  ./.venv/bin/python -m pytest tests/test_web.py -q
+#+end_src
+
+Expected: =ModuleNotFoundError: No module named 'tuxghost.web'=.
+
+- [ ] *Step 3: write =tuxghost/web.py=*
+
+#+begin_src python
+"""The browser entry point: a windowed session with a ghost, advanced one
+frame at a time so the browser stays responsive.
+
+`step_once` is synchronous and runs natively under `make check`; only
+`main`'s `await` is browser-only. That split is the whole reason this
+module exists rather than the loop living in JavaScript.
+
+THE `ssl` STUB. `tuxemon.base_client` imports `NetworkManager` at module
+level, which imports `ssl`, which browsers do not have. Multiplayer over
+raw sockets cannot work in a browser anyway. Measured (spike stage D):
+with this stub and an OTHERWISE UNPATCHED engine, every tuxemon import
+succeeds. Deliberately NOT a seventh patch -- `patch_series_id` digests
+`patches/*.patch`, so a new patch would make three golden fixtures stale
+at once, including the very ghost this module plays, and
+`tests/conftest.py` turns that into a failure on purpose.
+
+BOOT ORDER is `tuxghost.play`'s, and each step of it was paid for:
+  1. `pygame_init()` FIRST, then import `tuxemon.graphics` and
+     `tuxemon.map.view`, so they bind the windowed scale (play.py's
+     "Ordering note 2").
+  2. `build_track(..., context=ctx)` -- the context argument is REQUIRED.
+     Without it the ghost's own boot calls `pg.display.set_mode()` a
+     second time and invalidates every already-converted surface. That
+     cost a whole session; see commit 8840756.
+  3. Seed, pin the clock, THEN boot the live session -- `boot_from_save`
+     resets the `local_session` singleton, so the track must already
+     exist (play.py's "Ordering note 1").
+
+The browser is a WINDOWED consumer, like `tuxghost play`, never a
+headless one: SDL's `dummy` driver does not exist under Emscripten
+(measured: `pygame.error: dummy not available`). This module must never
+call `tuxghost.boot.headless_context`, and a test enforces it.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import time
+import types
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from tuxghost.ghost.entity import advance_ghost, install_ghost
+from tuxghost.ghost.pump import steps_owed
+from tuxghost.ghost.track import GhostTrack, build_track
+from tuxghost.loop import run_steps
+from tuxghost.trace import read
+
+#: Same bound `tuxghost.play` uses. Past this, elapsed time is DISCARDED
+#: rather than banked -- see `steps_owed`.
+CATCH_UP_CAP = 5
+
+
+@dataclass
+class WebSession:
+    """Everything one frame needs. Mutable: `step` and `accumulator`
+    carry across frames, which is why this is a dataclass and not a
+    tuple."""
+
+    client: Any
+    session: Any
+    npc: Any
+    track: GhostTrack
+    frames: Any
+    display: Any
+    step: int = 0
+    accumulator: float = 0.0
+
+
+def boot(
+    save: Path, ghost: Path, *, seed: int, clock_epoch: int
+) -> WebSession:
+    """Open a window, build the ghost's track, boot the save, install the
+    ghost. See the module docstring for why this order is not negotiable.
+    """
+    sys.modules.setdefault("ssl", types.ModuleType("ssl"))
+
+    from tuxemon.prepare import pygame_init
+
+    context = pygame_init()
+
+    import tuxemon.graphics  # noqa: F401
+    import tuxemon.map.view  # noqa: F401
+    from tuxemon.save_system.save_state import SaveData
+
+    from tuxghost.boot import boot_from_save
+    from tuxghost.determinism import pin_clock, seed_all
+    from tuxghost.observe import FrameRenderer
+
+    track = build_track(read(ghost), context=context)
+
+    seed_all(seed)
+    pin_clock(clock_epoch)
+    save_data = SaveData.model_validate(json.loads(save.read_text()))
+    _client, session = boot_from_save(
+        save_data, seed=seed, clock_epoch=clock_epoch, context=context
+    )
+    npc = install_ghost(session, track)
+    return WebSession(
+        client=session.client,
+        session=session,
+        npc=npc,
+        track=track,
+        frames=FrameRenderer(session.client, upscale=1),
+        display=context.screen,
+    )
+
+
+def step_once(state: WebSession, elapsed: float) -> int:
+    """Advance by however many fixed steps `elapsed` owes, then draw.
+
+    Returns the number of steps taken, which is 0 on a frame that arrived
+    faster than one fixed step -- normal, not an error.
+    """
+    import pygame as pg
+
+    steps, state.accumulator = steps_owed(
+        state.accumulator, elapsed, CATCH_UP_CAP
+    )
+    for _ in range(steps):
+        run_steps(state.client, 1)
+        state.step += 1
+        advance_ghost(
+            state.client,
+            state.npc,
+            state.track,
+            state.step,
+            state.client.get_map_name(),
+        )
+    state.display.blit(state.frames.surface(), (0, 0))
+    pg.display.flip()
+    return steps
+#+end_src
+
+- [ ] *Step 4: run the test and watch it pass*
+
+#+begin_src bash
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  ./.venv/bin/python -m pytest tests/test_web.py -q
+#+end_src
+
+Expected: 1 passed.
+
+- [ ] *Step 5: add the stepping and no-headless tests*
+
+Append to =tests/test_web.py=:
+
+#+begin_src python
+def test_step_once_walks_the_ghost_along_its_track() -> None:
+    """`elapsed` drives how many fixed steps a frame owes, so a frame
+    worth 60 steps must move the ghost 60 frames along its track."""
+    state = _booted()
+    start = tuple(int(v) for v in state.npc.tile_pos)
+    taken = step_once_many(state, 60)
+    assert taken == 60, taken
+    assert state.step == 60
+    moved = tuple(int(v) for v in state.npc.tile_pos)
+    assert moved == state.track.at(60).tile, (moved, state.track.at(60))
+    assert moved != start, "the ghost never moved"
+
+
+def step_once_many(state: Any, n: int) -> int:
+    """Drive exactly `n` fixed steps, one frame's worth at a time."""
+    from tuxghost.loop import FIXED_DT
+    from tuxghost.web import step_once
+
+    return step_once(state, FIXED_DT * n)
+
+
+def test_the_ghost_does_not_perturb_the_digest() -> None:
+    """S4's invariant, re-run in this new caller. The ghost is drawn but
+    must stay invisible to `state_of`.
+
+    The control is a session that NEVER had a ghost -- not one where the
+    ghost is removed afterwards. Removing it would leave whatever the
+    install itself did behind, so the comparison would be against the
+    wrong thing and would pass even if `install_ghost` perturbed state.
+    """
+    import json
+
+    from tuxemon.save_system.save_state import SaveData
+
+    from tuxghost.boot import boot_from_save
+    from tuxghost.determinism import pin_clock, seed_all
+    from tuxghost.digest import digest_of
+    from tuxghost.loop import run_steps
+
+    with_ghost = _booted()
+    step_once_many(with_ghost, 60)
+    a = digest_of(with_ghost.session)
+
+    seed_all(SEED)
+    pin_clock(CLOCK_EPOCH)
+    save_data = SaveData.model_validate(json.loads(SAVE.read_text()))
+    _c, plain = boot_from_save(
+        save_data, seed=SEED, clock_epoch=CLOCK_EPOCH
+    )
+    run_steps(plain.client, 60)
+    b = digest_of(plain)
+    assert a == b, (a, b)
+
+
+def test_web_never_uses_the_headless_context() -> None:
+    """SDL's `dummy` driver does not exist under Emscripten, so
+    `headless_context()` would break the browser build while every native
+    test still passed -- the worst possible failure shape.
+
+    An AST scan, not a substring search: the module DOCSTRING names
+    `headless_context` in prose, so `"headless_context" in source` would
+    false-fail on correct code. S5 shipped exactly that bug once.
+    """
+    source = Path("tuxghost/web.py").read_text()
+    tree = ast.parse(source)
+    names = {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    } | {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    }
+    assert "headless_context" not in names, sorted(names)
+#+end_src
+
+- [ ] *Step 6: run them*
+
+#+begin_src bash
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONHASHSEED=0 \
+  ./.venv/bin/python -m pytest tests/test_web.py -q
+#+end_src
+
+Expected: 4 passed.
+
+- [ ] *Step 7: DEMONSTRATE each test against its defect*
+
+Required, not optional. For each mutation: apply, run, capture the REAL
+failure text, restore, re-run, confirm =cmp -s= byte-identical.
+
+| mutation | test that must fail |
+|---+---|
+| drop =context=context= from the =build_track= call | =test_boot_installs_the_ghost_on_the_players_map= (or a later render check) |
+| =advance_ghost= call deleted from =step_once= | =test_step_once_walks_the_ghost_along_its_track= |
+| =install_ghost= given =sprite_slug="allie"= | digest test stays green — record that it does NOT catch this, and say so |
+| =npc.persistence= left at its database default instead of =False= | =test_the_ghost_does_not_perturb_the_digest= — this is the mutation that test exists for |
+| =boot= switched to =headless_context()= | =test_web_never_uses_the_headless_context= |
+
+- [ ] *Step 8: gate and commit*
+
+#+begin_src bash
+make check
+git add tuxghost/web.py tests/test_web.py
+git commit -m "feat: tuxghost.web -- a browser session with a ghost"
+#+end_src
+
+---
+
+* Task 2: the async loop
+
+*Files:*
+- Modify: =tuxghost/web.py=
+- Test: =tests/test_web.py=
+
+*Interfaces:*
+- Consumes: =boot=, =step_once= from Task 1.
+- Produces: =async def main(save: Path, ghost: Path, *, seed: int,
+  clock_epoch: int) -> None=.
+
+- [ ] *Step 1: write the failing test*
+
+Append to =tests/test_web.py=:
+
+#+begin_src python
+def test_main_yields_between_frames() -> None:
+    """The `await` is the entire reason this module is not JavaScript: a
+    loop that never yields freezes the browser tab. Pinned by counting
+    yields, since the browser cannot be here to notice.
+    """
+    import asyncio
+
+    import tuxghost.web as web
+
+    calls = {"steps": 0, "yields": 0}
+    real_sleep = asyncio.sleep
+
+    async def counting_sleep(delay: float) -> None:
+        calls["yields"] += 1
+        if calls["yields"] >= 3:
+            raise KeyboardInterrupt  # stop the loop deterministically
+        await real_sleep(delay)
+
+    def counting_step(state: Any, elapsed: float) -> int:
+        calls["steps"] += 1
+        return 1
+
+    original_step, original_sleep = web.step_once, asyncio.sleep
+    web.step_once, asyncio.sleep = counting_step, counting_sleep  # type: ignore[assignment]
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(
+                web.main(SAVE, GHOST, seed=SEED, clock_epoch=CLOCK_EPOCH)
+            )
+    finally:
+        web.step_once, asyncio.sleep = original_step, original_sleep  # type: ignore[assignment]
+
+    assert calls["yields"] == 3, calls
+    assert calls["steps"] == 3, calls
+#+end_src
+
+- [ ] *Step 2: run it, watch it fail*
+
+Expected: =AttributeError: module 'tuxghost.web' has no attribute 'main'=.
+
+- [ ] *Step 3: implement*
+
+Append to =tuxghost/web.py=:
+
+#+begin_src python
+async def main(
+    save: Path, ghost: Path, *, seed: int, clock_epoch: int
+) -> None:
+    """The browser's entry point.
+
+    `await asyncio.sleep(0)` is the ONLY browser-specific line in this
+    module. Without it the loop never returns control and the tab
+    freezes; with it, Pyodide gets to run the event loop and deliver the
+    keyboard events the game reads through `client.update`.
+
+    Pacing is `steps_owed` against `time.monotonic()`, exactly as
+    `tuxghost.play` does, rather than trusting the browser's frame
+    timing. It already handles catch-up and already carries
+    `CATCH_UP_CAP`.
+    """
+    import asyncio
+
+    state = boot(save, ghost, seed=seed, clock_epoch=clock_epoch)
+    last = time.monotonic()
+    while state.client.is_running:
+        now = time.monotonic()
+        step_once(state, now - last)
+        last = now
+        await asyncio.sleep(0)
+#+end_src
+
+- [ ] *Step 4: run the test, watch it pass*
+
+- [ ] *Step 5: DEMONSTRATE it*
+
+Delete the =await asyncio.sleep(0)= line. The test must fail with
+=assert 0 == 3=. Restore; confirm byte-identical.
+
+- [ ] *Step 6: gate and commit*
+
+#+begin_src bash
+make check
+git add tuxghost/web.py tests/test_web.py
+git commit -m "feat: tuxghost.web.main -- the async browser loop"
+#+end_src
+
+---
+
+* Task 3: the build — =make web=
+
+*Files:*
+- Create: =web/index.html=
+- Create: =scripts/build_web.py=
+- Modify: =Makefile=
+
+*Interfaces:*
+- Consumes: =tuxghost.web.main= from Task 2.
+- Produces: =build/web/= containing =index.html=, =code.zip=,
+  =mods.zip=, =fixtures.zip=.
+
+- [ ] *Step 1: write =scripts/build_web.py=*
+
+#+begin_src python
+"""Packages the browser build into `build/web/`.
+
+Zips are built from the VENDORED tree, so the page cannot drift from what
+the native tests run against.
+
+AUDIO IS STUBBED TO ZERO BYTES. Measured: the db's pydantic validators
+check that music and sound records exist IN THE DB, not that the audio
+files have content, so zero-byte placeholders satisfy them and 147MB of
+music need not ship. Whether PLAYING one raises is UNTESTED -- if it
+does, disable audio in the browser build (see the spec).
+
+Filter on the audio DIRECTORY, never on `"music" in parts`: the db's own
+records live under `mods/tuxemon/db/music/`, and an earlier attempt
+zeroed those by mistake and failed loudly.
+"""
+
+from __future__ import annotations
+
+import shutil
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "build" / "web"
+AUDIO_DIR = ROOT / "tuxemon" / "mods" / "tuxemon" / "music"
+
+
+def _zip_python(target: Path) -> None:
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
+        for base, prefix in (
+            (ROOT / "tuxemon" / "tuxemon", "tuxemon"),
+            (ROOT / "tuxghost", "tuxghost"),
+        ):
+            for f in base.rglob("*.py"):
+                if "__pycache__" in f.parts:
+                    continue
+                z.write(f, f"{prefix}/{f.relative_to(base)}")
+
+
+def _zip_mods(target: Path) -> None:
+    mods = ROOT / "tuxemon" / "mods"
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in mods.rglob("*"):
+            if not f.is_file() or "__pycache__" in f.parts:
+                continue
+            arc = str(f.relative_to(ROOT / "tuxemon"))
+            if AUDIO_DIR in f.parents:
+                z.writestr(arc, b"")
+            else:
+                z.write(f, arc)
+
+
+def _zip_fixtures(target: Path) -> None:
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(ROOT / "tests/fixtures/paper_town.save",
+                "fixtures/paper_town.save")
+        z.write(ROOT / "tests/golden/scripted_town_1234.tuxghost",
+                "fixtures/ghost.tuxghost")
+
+
+def main() -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    shutil.copy(ROOT / "web" / "index.html", OUT / "index.html")
+    _zip_python(OUT / "code.zip")
+    _zip_mods(OUT / "mods.zip")
+    _zip_fixtures(OUT / "fixtures.zip")
+    for f in sorted(OUT.iterdir()):
+        print(f"  {f.name:16s} {f.stat().st_size / 1e6:6.1f} MB")
+
+
+if __name__ == "__main__":
+    main()
+#+end_src
+
+- [ ] *Step 2: write =web/index.html=*
+
+#+begin_src html
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Tuxemon — ghost</title>
+<style>
+  body { margin:0; background:#101820; color:#e2e8e6;
+         font:16px/1.5 system-ui, sans-serif; display:grid;
+         place-items:center; height:100vh }
+  canvas { image-rendering:pixelated; outline:none;
+           border:1px solid #2b3843 }
+  #start { padding:.8rem 1.6rem; font:inherit; cursor:pointer }
+  #status { font-family:ui-monospace, monospace; font-size:.8rem;
+            color:#93a2a8 }
+</style></head>
+<body>
+<div>
+  <button id="start">Click to start</button>
+  <p id="status">Pyodide takes about 7 seconds to boot.</p>
+  <canvas id="canvas" width="1280" height="720" tabindex="0"
+          hidden></canvas>
+</div>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.29.1/full/pyodide.js"></script>
+<script>
+// The canvas must hold FOCUS for keyboard events to reach pygame --
+// Emscripten's SDL delivers DOM key events into pygame.event directly,
+// which is why there is no input code anywhere in this build.
+const status = (t) => document.getElementById("status").textContent = t;
+document.getElementById("start").onclick = async (ev) => {
+  ev.target.disabled = true;
+  try {
+    status("loading pyodide...");
+    const pyodide = await loadPyodide();
+    status("loading pygame...");
+    await pyodide.loadPackage(["micropip", "pygame-ce"]);
+    const mp = pyodide.pyimport("micropip");
+    status("installing dependencies...");
+    for (const d of ["pydantic","pyyaml","pytmx","pyscroll","natsort",
+                     "babel","requests","packaging","prompt_toolkit",
+                     "pygame-menu-ce","websockets","pillow"]) {
+      await mp.install(d);
+    }
+    status("unpacking game...");
+    for (const f of ["code.zip", "mods.zip", "fixtures.zip"]) {
+      const buf = await (await fetch(f)).arrayBuffer();
+      await pyodide.unpackArchive(buf, "zip", { extractDir: "/game" });
+    }
+    const canvas = document.getElementById("canvas");
+    canvas.hidden = false;
+    pyodide.canvas.setCanvas2D(canvas);
+    canvas.focus();
+    status("arrow keys to move · Enter to interact");
+    await pyodide.runPythonAsync(`
+import sys, os
+sys.path.insert(0, "/game"); os.chdir("/game")
+from pathlib import Path
+import tuxghost.web as web
+await web.main(Path("fixtures/paper_town.save"),
+               Path("fixtures/ghost.tuxghost"),
+               seed=1234, clock_epoch=1787659200)
+`);
+  } catch (e) { status("failed: " + e); throw e; }
+};
+</script></body></html>
+#+end_src
+
+- [ ] *Step 3: add the Makefile target*
+
+Append to =Makefile= (tab-indented, like the existing targets):
+
+#+begin_src makefile
+# Builds build/web/. Serve it with:
+#   cd build/web && python -m http.server
+# Pyodide requires http:// -- it will NOT run from file://.
+web:
+	$(PY) scripts/build_web.py
+#+end_src
+
+- [ ] *Step 4: build it and check the sizes*
+
+#+begin_src bash
+make web
+#+end_src
+
+Expected: four files; =mods.zip= around 31 MB, =code.zip= around 1 MB.
+If =mods.zip= is over 100 MB the audio filter is wrong — check it matched
+the directory and not the string ="music"=.
+
+- [ ] *Step 5: gate and commit*
+
+#+begin_src bash
+make check
+git add web/index.html scripts/build_web.py Makefile
+git commit -m "feat: make web -- package the browser build"
+#+end_src
+
+---
+
+* Task 4: manual acceptance
+
+*Files:*
+- Modify: =docs/STATUS.org=
+
+This task has NO automated test and that is the point. S4 shipped with
+three "demonstrated" properties, a green suite, and a documented claim
+that the ghost worked. It did not: three defects were live at close-out
+and only a human at a screen found them.
+
+- [ ] *Step 1: serve it*
+
+#+begin_src bash
+make web && cd build/web && python -m http.server
+#+end_src
+
+- [ ] *Step 2: the five checks*
+
+A human opens =http://localhost:8000=, clicks start, and confirms ALL of:
+
+1. The page boots without error.
+2. The map DRAWS — the actual town, tiles and sprites, not a flat fill.
+3. Arrow keys move the player.
+4. A translucent second character walks the ghost's route and stops at
+   its finish tile.
+5. Movement feels responsive AND a measured frame rate of at least
+   *30fps sustained over 10 seconds of walking*.
+
+Anything short of all five is a FAILURE. Record the result either way, in
+the human's own words.
+
+- [ ] *Step 3: record it in =docs/STATUS.org=*
+
+A new =* S6 — browser play= section: what was verified, the measured
+frame rate, and — separately and plainly — what is still NOT covered
+(real-frame rendering was unproven before this step; busy-map cost; audio;
+the pygame-ce 2.5.6.dev2 vs pinned 2.5.7 gap; input latency).
+
+- [ ] *Step 4: commit*
+
+#+begin_src bash
+git add docs/STATUS.org
+git commit -m "docs: S6 manual acceptance -- <passed|failed>"
+#+end_src
+
+---
+
+* Self-review notes for the executor
+
+- The =sprite_slug= row in Task 1 Step 7 expects the digest test NOT to
+  catch that mutation. Record that honestly rather than strengthening the
+  test to make it look better — the ghost's sprite is cosmetic and
+  genuinely outside the digest.
+- =step_once_many= is defined AFTER its first use in the test file. That
+  is legal at module scope in Python and matches how the rest of this
+  suite reads; do not reorder it and claim a fix.
+- If audio playback raises during Task 4, do NOT ship the 147MB. Disable
+  audio in the browser build and record the decision.
