@@ -480,3 +480,68 @@ def test_a_held_button_does_not_survive_a_map_transition() -> None:
     # Enough separate actions and the leader's tile is reachable, so the
     # vocabulary was never the limit.
     assert end_tile(*([up] * 14)) == ("classic_gym_granite.tmx", [10, 6])
+
+
+@pytest.mark.slow
+def test_walking_toward_the_goal_scores_WORSE_than_stopping_at_the_door() -> None:
+    """The objective punishes the only route to its own goal.
+
+    Nine live runs stalled at `max_progress` 1020 and none started a
+    battle. Four explanations were proposed and measured, and the first
+    four were wrong: greedy accept (the gym is one tile away, the
+    alternatives 6-23); hold precision (real, but not what the runs were
+    attempting); feedback density (3 runs at checkpoint 16 vs 4 at 64 --
+    identical ceiling); and an unlearnable engine mechanic (stated in the
+    SYSTEM prompt; two further runs still stalled).
+
+    The cause is the SCORE. `RulesObjective.TERMS` is
+    `(goal_state, max_progress, -steps)`. Every tile inside
+    `classic_gym_granite` is rank 1, so walking its thirteen-tile
+    corridor leaves `max_progress` at 1020 and `-steps` strictly worse.
+    Among candidates tied on progress, the objective prefers the one that
+    steps through the door and STOPS.
+
+    `run13` shows it directly: rounds 6 through 19, fourteen consecutive
+    candidates, every one scoring 1020 and every one rejected for costing
+    more steps. The model was walking toward the leader each time. Only
+    winning the battle would outrank it, and the battle cannot be reached
+    without first paying those thirteen tiles.
+
+    This test states the trap as an assertion so a future objective can
+    be measured against it. It is EXPECTED TO FAIL once the shaping is
+    fixed -- that is the point of it.
+    """
+    from tuxemon.platform.const import buttons
+
+    from tuxghost.agent.types import Action
+    from tuxghost.optimize.objective import RulesObjective
+    from tuxghost.optimize.schedule import ActionScript
+    from tuxghost.optimize.seal import seal
+    from tuxghost.rules import TuxemonFirstBattleRules
+
+    parent = read(
+        Path(__file__).parent / "golden" / "hearthrock_idle_600.tuxghost"
+    )
+    objective = RulesObjective()
+
+    def score(*actions: Action) -> tuple[float, ...]:
+        return tuple(
+            objective.score(
+                seal(
+                    ActionScript(lead_in=0, actions=actions),
+                    parent,
+                    checkpoint=64,
+                    model=None,
+                    rules=TuxemonFirstBattleRules(),
+                )
+            )
+        )
+
+    up = Action(button=buttons.UP, hold=40, settle=20)
+    at_the_door = score(up)                 # steps inside, stops
+    toward_leader = score(*([up] * 14))     # walks the corridor
+
+    # Identical progress: the whole gym is one rank.
+    assert at_the_door[1] == toward_leader[1] == 1020
+    # And the approach is scored WORSE, purely for its length.
+    assert toward_leader < at_the_door, (toward_leader, at_the_door)

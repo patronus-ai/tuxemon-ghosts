@@ -2813,6 +2813,83 @@ tile without saying why. Three candidates, none yet chosen:
   and needs care against the trace format.
 - Leave it. It is arguably a real skill the benchmark should measure.
 
+* THE REAL CAUSE: the objective punishes the only route to its own goal
+
+Nine live runs, five proposed explanations, four of them wrong. This one
+is measured directly from the round logs rather than inferred.
+
+** The evidence, from =run13='s log
+
+Rounds 6 through 19 — *fourteen consecutive candidates* — every one
+scoring =[0.0, 1020.0, -steps]= and every one REJECTED. Not for being
+wrong. For being LONGER.
+
+: r 5  score=[0.0, 1020.0, -1000.0]  acc=True     <- accepted, stops at the door
+: r 6  score=[0.0, 1020.0, -1252.0]  acc=False
+: r 7  score=[0.0, 1020.0, -1344.0]  acc=False
+: ...
+: r19  score=[0.0, 1020.0, -1240.0]  acc=False
+
+The model was walking further into the gym each time. The objective threw
+every attempt away.
+
+** Why
+
+=RulesObjective.TERMS= is =(goal_state, max_progress, -steps)=. Every
+tile inside =classic_gym_granite= is rank 1 of the critical path, so
+walking its thirteen-tile corridor leaves =max_progress= at exactly 1020
+and makes =-steps= strictly worse. *Among candidates tied on progress the
+objective prefers the one that steps through the door and stops.*
+
+Only =goal_state= outranks that, and the battle cannot be reached without
+first paying the thirteen tiles the objective refuses to pay for. The
+approach to the goal is a region of pure cost with no intermediate
+reward, and the search is behaving correctly inside a scoring function
+that forbids the approach.
+
+** The four explanations that were wrong, in order
+
+| # | proposed | verdict |
+|---+---+---|
+| 1 | greedy accept locks onto the first success | *false* — granite is 1 tile away, mila 6, routes 17-23. Not preferred; the only thing in reach. |
+| 2 | a one-tile door needs hold precision | *true but irrelevant* — the runs were never trying for mila. |
+| 3 | feedback density | *false* — 3 runs at =--checkpoint 16= vs 4 at 64. Both reached 1020, neither exceeded it. |
+| 4 | an unlearnable engine mechanic | *true, and stated in the prompt* — held buttons do die at map transitions. Two further runs still stalled, because #5 vetoes acting on it. |
+
+*The prompt sentence (#4) never got a fair test.* It may well have
+worked: =run12= and =run13= produced longer, deeper walks than any
+earlier run. The objective rejected all of them. That change cannot be
+evaluated until the shaping is fixed, and calling it a failure now would
+be a fifth wrong conclusion.
+
+** Pinned as a test that is EXPECTED TO FAIL once fixed
+
+=test_walking_toward_the_goal_scores_WORSE_than_stopping_at_the_door=
+(slow) asserts the trap: one =UP= action and fourteen =UP= actions both
+score =max_progress= 1020, and the fourteen-action approach scores
+strictly worse. When a future objective makes the approach pay, this test
+breaks — deliberately. It is a statement of the current defect, not of
+desired behaviour.
+
+*Gate:* =make check= =EXIT=0=, 483 passed / 4 skipped / 11 warnings in
+267.98s; slow 8 passed; ruff + =lint-patched= + mypy (83 files) clean.
+
+** What would fix it — options, not a plan
+
+- *Drop =-steps= from =RulesObjective=.* One line. Removes the veto
+  outright, at the cost of any pressure toward short traces — and short
+  traces are much of the point of an optimizer.
+- *Only apply =-steps= once =goal_state= is reached.* Keeps the pressure
+  where it belongs (shortening a WINNING run) and removes it while the
+  goal is still unreached.
+- *Make progress finer than a map rank* — distance to the nearest
+  unvisited objective, say — so the corridor pays as it is walked. The
+  most faithful shaping and the largest change.
+
+The second looks right to me and is nearly as small as the first, but
+this is a decision about what the benchmark rewards, so it is the
+human's.
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.
