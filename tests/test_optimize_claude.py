@@ -343,3 +343,57 @@ def test_answers_accumulate_across_calls_and_number_themselves() -> None:
     assert [a["call"] for a in editor.answers] == [1, 2, 3]
     assert all(a["raw"] == reply for a in editor.answers)
     assert editor.last_raw == reply
+
+
+def test_the_prompt_explains_what_progress_rewards() -> None:
+    """Score term NAMES were not enough.
+
+    The prompt has always carried the map, the tile and a checkpoint
+    trail -- the editor was never blind to where it stood. What nothing
+    told it was that walking onto a new map raised the number it was
+    asked to maximise; `score_legend` supplies only the term's name,
+    `max_progress`. Across four runs and 37 rounds from
+    `hearthrock_city.save` that number never moved off 20.
+
+    Pinned against `build_prompt` rendering `progress_legend`: drop that
+    branch and the weights vanish from the prompt.
+    """
+    from tuxghost.optimize.editors.claude import ClaudeEditor
+    from tuxghost.optimize.schedule import ActionScript
+    from tuxghost.rules import MAP_POINTS, TuxemonRules
+
+    editor = ClaudeEditor(
+        goal="win a battle",
+        score_legend="goal_state, max_progress, -steps",
+        progress_legend=TuxemonRules.describe_progress(),
+        client=object(),
+    )
+    prompt = editor.build_prompt(
+        ActionScript(lead_in=10, actions=()),
+        _candidate(),
+        (0.0, 20.0, -600.0),
+    )
+    assert f"{MAP_POINTS:,}" in prompt
+    assert "per new map reached" in prompt
+
+
+def test_the_prompt_omits_the_explanation_when_none_is_given() -> None:
+    """The control. `reach-tile`'s terms describe themselves from their
+    names, so `tuxghost.cli` passes no `progress_legend` there, and the
+    prompt must not grow a stray empty section.
+    """
+    from tuxghost.optimize.editors.claude import ClaudeEditor
+    from tuxghost.optimize.schedule import ActionScript
+
+    editor = ClaudeEditor(
+        goal="reach a tile",
+        score_legend="-distance_to_target, -steps",
+        client=object(),
+    )
+    prompt = editor.build_prompt(
+        ActionScript(lead_in=10, actions=()),
+        _candidate(),
+        (0.0, -2.0, -442.0),
+    )
+    assert "per new map reached" not in prompt
+    assert "max_progress is a sum" not in prompt

@@ -78,8 +78,10 @@ The trace is a list of ACTIONS. Each action presses one button, holds it
 steps per second and one tile of walking takes 16 steps of a direction
 held. Buttons: """ + _BUTTON_LEGEND + """.
 
-You never see the game. You see the action list, where the run ended, and
-a sequence of checkpoints showing where it was along the way. Propose
+You never see the screen, but you are not blind: you see the action list,
+the map and tile the run ended on, and a checkpoint trail of the map,
+tile and facing along the way. Use them -- they are your only way to tell
+where a button actually took you. Propose
 EDITS to the action list; the trace is then re-run and scored for you.
 
 Reply with exactly one fenced json block:
@@ -109,6 +111,17 @@ class ClaudeEditor:
         # an editor never sees the `Objective` itself -- and
         # `tuxghost.cli` passes `ReachTile.TERMS`.
         score_legend: str = "",
+        # What the score's terms MEAN, as opposed to what they are
+        # called. `score_legend` gives names -- "goal_state,
+        # max_progress, -steps" -- and names alone proved not to be
+        # enough: the editor knew where it was standing (this prompt has
+        # carried map, tile and a checkpoint trail all along) but nothing
+        # told it that walking onto a new map raised the number it was
+        # asked to maximise. Across four runs and 37 rounds from
+        # `hearthrock_city.save`, `max_progress` never moved off 20.
+        # Supplied by the CALLER, like `score_legend`; `tuxghost.cli`
+        # passes `TuxemonRules.describe_progress()`.
+        progress_legend: str = "",
         # The injected `anthropic.Anthropic` instance (real or test stub).
         # Bare `Any` for the same reason `ClaudePolicy` uses it: naming
         # the type would need an unconditional import of an optional
@@ -119,6 +132,7 @@ class ClaudeEditor:
         self.model = model
         self.goal = goal
         self.score_legend = score_legend
+        self.progress_legend = progress_legend
         self.notes = ""
         self.last_raw: str | None = None
         #: Every reply this editor has received, in order, recorded
@@ -155,6 +169,8 @@ class ClaudeEditor:
             lines.append(
                 f"Score terms, in priority order: {self.score_legend}"
             )
+        if self.progress_legend:
+            lines.append(f"\n{self.progress_legend}")
         state = candidate.final_state
         lines.append(
             f"\nEnded on map {state.get('map')!r}, tile_pos "

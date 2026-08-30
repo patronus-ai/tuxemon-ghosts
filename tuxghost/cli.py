@@ -1050,7 +1050,11 @@ def _optimize(args: argparse.Namespace) -> int:
     from tuxghost.optimize.objective import Objective, ReachTile, RulesObjective
     from tuxghost.optimize.runner import Editor, optimize
     from tuxghost.optimize.seal import seal
-    from tuxghost.rules import GameRules, TuxemonFirstBattleRules
+    from tuxghost.rules import (
+        GameRules,
+        TuxemonFirstBattleRules,
+        TuxemonRules,
+    )
     from tuxghost.trace import write
 
     for name, value in (
@@ -1292,10 +1296,24 @@ def _optimize(args: argparse.Namespace) -> int:
         # recomputed at the writer could silently disagree with the one
         # the model was actually sent.
         goal = args.goal or _derived_goal(args.objective, target)
+        # Only `progress` has a metric worth explaining: `reach-tile`'s
+        # terms are self-describing from their names alone
+        # (`-distance_to_target` says what it is), while `max_progress`
+        # is an opaque integer nothing in the prompt defined. Generated
+        # by the rules class from the same constants `progress()` sums,
+        # so it cannot drift out of step with the score the model is
+        # actually being paid on -- the same discipline `score_legend`
+        # already follows by reading the objective's own `TERMS`.
+        progress_legend = (
+            TuxemonRules.describe_progress()
+            if args.objective == "progress"
+            else ""
+        )
         editor = ClaudeEditor(
             model=model,
             goal=goal,
             score_legend=", ".join(terms),
+            progress_legend=progress_legend,
         )
     else:  # pragma: no cover -- argparse `choices` already refuses this
         raise AssertionError(f"unhandled editor {args.editor!r}")

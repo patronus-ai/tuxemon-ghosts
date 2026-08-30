@@ -133,6 +133,22 @@ CRITICAL_PATHS: tuple[tuple[str, ...], ...] = (
 GYM_LEADER_PREFIX = "classic_gym_leader_"
 
 
+#: The three terms of `TuxemonRules.progress`, as named constants rather
+#: than magic numbers inline in the sum. They are constants because TWO
+#: things must agree about them: `progress()`, which computes the score,
+#: and `describe_progress()`, which tells the editor what the score
+#: rewards. A prose description typed by hand beside a numeric literal is
+#: exactly the pair that drifts apart silently -- this file has already
+#: shipped three comments that went stale that way. Deriving both from
+#: one constant removes the failure mode instead of documenting it.
+#:
+#: The magnitudes are a strict lexicographic ordering, not a weighting to
+#: be tuned: one gym outranks every map, and one map outranks any party.
+GYM_POINTS = 1_000_000_000
+MAP_POINTS = 1_000
+PARTY_POINTS = 10
+
+
 class TuxemonRules:
     """Shared progress; subclasses supply the goal.
 
@@ -210,9 +226,36 @@ class TuxemonRules:
         return self._furthest_map
 
     def progress(self, session: Any) -> int:
-        return (self._n_gyms_won(session) * 1_000_000_000
-                + self._map_index(session) * 1_000
-                + len(session.player.monsters) * 10)
+        return (self._n_gyms_won(session) * GYM_POINTS
+                + self._map_index(session) * MAP_POINTS
+                + len(session.player.monsters) * PARTY_POINTS)
+
+    @classmethod
+    def describe_progress(cls) -> str:
+        """What `progress` rewards, in words, for the editor's prompt.
+
+        GENERATED from the same constants `progress` sums, never typed
+        beside them. Before this existed the editor was handed the score
+        term NAMES only -- `"goal_state, max_progress, -steps"` -- and
+        asked to maximise a number nothing ever explained. It knew where
+        it was standing (the prompt has carried map, tile and a
+        checkpoint trail all along) but not that walking onto a new map
+        was worth anything at all. Across four runs and 37 rounds from
+        `hearthrock_city.save`, `max_progress` never once moved off 20.
+
+        Deliberately says nothing about WHICH maps or where they are:
+        naming the route would hand over the answer and a successful run
+        would then demonstrate execution rather than search.
+        """
+        return (
+            "max_progress is a sum, and higher is better:\n"
+            f"  {GYM_POINTS:>13,}  per gym leader defeated\n"
+            f"  {MAP_POINTS:>13,}  per new map reached along the "
+            "campaign route\n"
+            f"  {PARTY_POINTS:>13,}  per party member\n"
+            "Reaching a map you have not been to before is the cheapest "
+            "way to raise it."
+        )
 
     def at_goal(self, session: Any) -> bool:
         raise NotImplementedError

@@ -268,3 +268,57 @@ def test_a_map_on_no_critical_path_scores_only_the_party() -> None:
         ),
     )
     assert rules.progress(stub) == 20
+
+
+def test_the_progress_description_is_generated_from_the_same_weights() -> None:
+    """`describe_progress` and `progress` must not be able to disagree.
+
+    A prose line saying "worth 1000" typed beside a numeric literal is
+    the exact pair that drifts silently, and this file has already
+    shipped three comments that went stale that way. Both now read the
+    same module constants, and this proves it by MOVING one: patch the
+    constant and BOTH the sum and the sentence must follow. A description
+    built from hardcoded text would keep saying 10 here and pass.
+    """
+    from types import SimpleNamespace
+    from unittest import mock
+
+    from tuxghost import rules
+
+    stub = SimpleNamespace(
+        client=SimpleNamespace(get_map_name=lambda: "start_tuxemon.tmx"),
+        player=SimpleNamespace(
+            monsters=[SimpleNamespace(current_hp=10) for _ in range(3)],
+            battle_handler=SimpleNamespace(get_battles=list),
+        ),
+    )
+
+    with mock.patch.object(rules, "PARTY_POINTS", 7):
+        described = rules.TuxemonRules.describe_progress()
+        party_line = next(
+            ln for ln in described.splitlines() if "per party member" in ln
+        )
+        assert party_line.strip().startswith("7"), party_line
+
+        scored = rules.TuxemonFirstBattleRules()
+        scored.reset()
+        assert scored.progress(stub) == 21, "3 monsters x the patched 7"
+
+
+def test_the_progress_description_names_every_term_of_the_sum() -> None:
+    """A description that silently omitted a term would be worse than
+    none: the editor would optimise the two it was told about.
+    """
+    from tuxghost.rules import (
+        GYM_POINTS,
+        MAP_POINTS,
+        PARTY_POINTS,
+        TuxemonRules,
+    )
+
+    described = TuxemonRules.describe_progress()
+    for points in (GYM_POINTS, MAP_POINTS, PARTY_POINTS):
+        assert f"{points:,}" in described, (points, described)
+    assert "gym" in described.lower()
+    assert "map" in described.lower()
+    assert "party" in described.lower()
