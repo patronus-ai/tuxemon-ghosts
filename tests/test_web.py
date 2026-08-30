@@ -1,8 +1,10 @@
 """Native tests for `tuxghost.web`, the browser entry point.
 
 Everything here runs under the dummy SDL drivers like the rest of the
-suite. Only `web.main`'s `await` is browser-only, and it is deliberately
-not exercised here -- see the spec's "What the gate CANNOT cover".
+suite. `test_main_yields_between_frames` does exercise `main`'s
+`await asyncio.sleep(0)` natively. What it cannot exercise is the
+Pyodide boot and genuine browser scheduling around that `await` -- see
+the spec's "What the gate CANNOT cover".
 """
 
 from __future__ import annotations
@@ -137,6 +139,13 @@ def test_main_yields_between_frames() -> None:
     """The `await` is the entire reason this module is not JavaScript: a
     loop that never yields freezes the browser tab. Pinned by counting
     yields, since the browser cannot be here to notice.
+
+    Termination is driven by `counting_step`, not `counting_sleep`: if it
+    depended on the patched `asyncio.sleep` raising, deleting the
+    `await` under test would delete the only exit path along with it,
+    and this test would hang instead of failing. `step_once` runs every
+    iteration regardless of the `await`, so it is the one place a stop
+    condition is guaranteed to fire either way.
     """
     import asyncio
 
@@ -147,11 +156,17 @@ def test_main_yields_between_frames() -> None:
 
     async def counting_sleep(delay: float) -> None:
         calls["yields"] += 1
-        if calls["yields"] >= 3:
-            raise KeyboardInterrupt  # stop the loop deterministically
         await real_sleep(delay)
 
     def counting_step(state: Any, elapsed: float) -> int:
+        # The stop condition lives HERE, not in `counting_sleep`:
+        # `main`'s loop calls `step_once` every iteration whether or not
+        # the `await` under test is present, so this still terminates --
+        # and the yield-count assertion below still fails with a real
+        # message -- even when the defect this test pins (a missing
+        # `await`) removes every call to `asyncio.sleep` from the loop.
+        if calls["steps"] >= 3:
+            raise KeyboardInterrupt  # stop the loop deterministically
         calls["steps"] += 1
         return 1
 
