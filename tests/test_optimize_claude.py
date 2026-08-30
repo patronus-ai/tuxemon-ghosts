@@ -319,7 +319,15 @@ def test_an_unparseable_reply_is_still_recorded() -> None:
     with pytest.raises(ValueError, match="no fenced json block"):
         editor.propose(SCRIPT, _candidate(), (0.0, -2.0, -48.0))
 
-    assert editor.answers == [{"call": 1, "raw": "no fence here, just prose"}]
+    # Field-by-field rather than whole-dict equality: the record grew
+    # `stop_reason` and `block_types` when a live run produced four
+    # consecutive EMPTY replies the answers file could not explain. What
+    # this test pins is the ORDERING -- that the text survives the raise
+    # -- not the record's exact shape, and an equality assertion made it
+    # fail for a reason it does not care about.
+    assert len(editor.answers) == 1
+    assert editor.answers[0]["call"] == 1
+    assert editor.answers[0]["raw"] == "no fence here, just prose"
     # And `last_raw` is untouched, because nothing parsed. The two fields
     # mean different things and this pins that they are not merged.
     assert editor.last_raw is None
@@ -397,3 +405,95 @@ def test_the_prompt_omits_the_explanation_when_none_is_given() -> None:
     )
     assert "per new map reached" not in prompt
     assert "max_progress is a sum" not in prompt
+
+
+# --- Failure modes measured in a live run, not imagined ------------------
+#
+# Round 8 from `hearthrock_city.save` was the first time this project's
+# optimizer ever moved `max_progress` (20 -> 1020). Rounds 9-13 then
+# ended the run: four replies of ZERO characters and one truncated
+# mid-JSON on `{"`. The answers file recorded only `raw`, so it could
+# say the replies were empty but not why.
+
+
+class _BlockResponse:
+    """A response whose blocks and stop_reason are both controllable --
+    the real API returns non-text block types and a stop_reason, and
+    `_StubResponse` models neither."""
+
+    def __init__(self, blocks: list[Any], stop_reason: str | None) -> None:
+        self.content = blocks
+        self.stop_reason = stop_reason
+
+
+class _BlockClient:
+    def __init__(self, blocks: list[Any], stop_reason: str | None) -> None:
+        self._blocks = blocks
+        self._stop_reason = stop_reason
+        self.calls: list[dict[str, Any]] = []
+        self.messages = self
+
+    def create(self, **kwargs: Any) -> _BlockResponse:
+        self.calls.append(kwargs)
+        return _BlockResponse(self._blocks, self._stop_reason)
+
+
+class _NonTextBlock:
+    type = "thinking"
+
+
+def test_an_empty_reply_is_reported_as_empty_not_as_a_missing_fence() -> None:
+    """The message a reader gets has to point at the real defect.
+
+    A reply with no TEXT block and a reply with text but no json fence
+    are different failures with different causes, and the generic "no
+    fenced json block" sent a reader hunting for a malformed fence when
+    there was no text to fence. Four consecutive empty replies ended a
+    live run and the error never said so.
+
+    Pinned against the `if not raw` guard: remove it and this raises the
+    fence error instead, which is the misdiagnosis being fixed.
+    """
+    editor = ClaudeEditor(
+        client=_BlockClient([_NonTextBlock()], stop_reason="max_tokens")
+    )
+    with pytest.raises(ValueError, match="no text"):
+        editor.propose(SCRIPT, _candidate(), (0.0, 20.0, -600.0))
+
+
+def test_a_failed_reply_records_why_it_failed() -> None:
+    """`raw` cannot explain its own absence.
+
+    Whether the model emitted only non-text blocks or stopped before
+    writing any looks identical in a file that records the text alone,
+    and the two need different fixes. Pinned against the extra fields:
+    drop them and the answers file goes back to being unable to explain
+    the failure it just recorded.
+    """
+    editor = ClaudeEditor(
+        client=_BlockClient([_NonTextBlock()], stop_reason="max_tokens")
+    )
+    with pytest.raises(ValueError):
+        editor.propose(SCRIPT, _candidate(), (0.0, 20.0, -600.0))
+
+    assert editor.answers[0]["raw"] == ""
+    assert editor.answers[0]["stop_reason"] == "max_tokens"
+    assert editor.answers[0]["block_types"] == ["thinking"]
+
+
+def test_the_token_cap_leaves_room_for_a_grown_script() -> None:
+    """The cap must not shrink the model's answer as the search succeeds.
+
+    Edits do not persist between rounds, so the model restates the whole
+    action list every time; an ACCEPTED edit therefore makes every later
+    reply longer. Round 8's winning script was 13 actions and the next
+    reply was cut off mid-JSON at 4096. This asserts headroom against
+    that measured size rather than a number someone liked.
+    """
+    from tuxghost.optimize.editors.claude import EDITOR_MAX_TOKENS
+
+    # ~35 tokens per restated action is generous for
+    # `{"op": "insert", "index": N, "action": {...}}` plus notes and
+    # reasoning; 13 actions truncated at 4096, so the floor must clear it
+    # by a wide margin, not by one action.
+    assert EDITOR_MAX_TOKENS >= 4 * 4096

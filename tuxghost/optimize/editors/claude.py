@@ -54,7 +54,14 @@ from tuxghost.optimize.edits import Edit
 from tuxghost.optimize.schedule import ActionScript
 from tuxghost.optimize.seal import CandidateResult
 
-EDITOR_MAX_TOKENS = 4096
+#: Raised from 4096 after a live run truncated a reply mid-JSON, ending
+#: on `{"`, at exactly the moment the search started working. The failure
+#: is self-inflicted by success: an ACCEPTED edit grows the script, and
+#: because edits do not persist between rounds the model must restate the
+#: whole action list every time. Round 8's winning script was 13 actions;
+#: the reply after it was cut off. A cap that shrinks the model's ability
+#: to answer as it makes progress is a cap in the wrong place.
+EDITOR_MAX_TOKENS = 16384
 
 _JSON_BLOCK = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
 
@@ -234,9 +241,11 @@ class ClaudeEditor:
                 }
             ],
         )
+        blocks = list(getattr(response, "content", None) or ())
+        block_types = [getattr(b, "type", None) for b in blocks]
+        stop_reason = getattr(response, "stop_reason", None)
         raw = "".join(
-            block.text
-            for block in response.content
+            block.text for block in blocks
             if getattr(block, "type", None) == "text"
         )
         # Recorded BEFORE parsing, and this ordering is the whole point.
@@ -246,7 +255,33 @@ class ClaudeEditor:
         # hid behind for sixteen stub tests. With the append below the
         # fence, that reply was discarded and the run directory kept no
         # trace of what the model actually said.
-        self.answers.append({"call": self.calls, "raw": raw})
+        # `stop_reason` and `block_types` alongside the text, because
+        # `raw` alone cannot explain its own absence. A live run produced
+        # FOUR consecutive replies of zero characters and the run
+        # directory could not say why: the model may have emitted only
+        # non-text blocks, or stopped before writing any. Both look
+        # identical in an answers file that records the text only, and
+        # they need different fixes. This file exists to be read after
+        # the fact; it has to carry enough to be worth reading.
+        self.answers.append(
+            {
+                "call": self.calls,
+                "raw": raw,
+                "stop_reason": stop_reason,
+                "block_types": block_types,
+            }
+        )
+        if not raw:
+            # Distinguished from "no fenced json block" deliberately.
+            # The generic message sent a reader looking for a malformed
+            # fence when there was no text at all -- a different defect
+            # with a different cause, and the one that ended a live run
+            # five rounds after its first success.
+            raise ValueError(
+                f"model returned no text (stop_reason={stop_reason!r}, "
+                f"block types={block_types!r}); expected one "
+                '```json { "edits": [...] } ``` block'
+            )
         edits, notes = self.parse_response(raw)
         self.last_raw = raw
         if notes:

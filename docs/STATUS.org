@@ -2502,6 +2502,94 @@ cannot silently become vacuous a third time.
 explicitly re-exported by =tuxghost.optimize.schedule= — *the third time
 this session that mypy was run before the last edit rather than after.*
 
+* THE OPTIMIZER MOVED max_progress FOR THE FIRST TIME
+
+Round 8 of a run from =hearthrock_city.save= scored
+=[0.0, 1020.0, -1120.0]=. Before that, across four runs and 37 rounds,
+=max_progress= had never once left 20.
+
+** The cause was not what I said it was
+
+I reported that the editor "sees only the score tuple: no map name, no
+tile, no hint that UP leads anywhere". *That was wrong, and it was wrong
+because I inferred it instead of reading =build_prompt=.* The prompt has
+always carried the final map and tile plus a checkpoint trail of
+map/tile/facing. The editor was never blind to where it stood.
+
+What it lacked was any explanation of the METRIC. It received score term
+NAMES only — ="goal_state, max_progress, -steps"= — and was asked to
+maximise an integer nothing defined. It knew it was on
+=classic_hearthrock_city= at (23,14); nothing told it that walking onto a
+new map was worth 1000.
+
+** The fix, and what the model then did with it
+
+=TuxemonRules.describe_progress()= renders the weights in words,
+GENERATED from the same named constants =progress()= sums (=GYM_POINTS=,
+=MAP_POINTS=, =PARTY_POINTS=) so the two cannot drift. =ClaudeEditor=
+takes a =progress_legend=; =cli= passes it for =--objective progress=
+only.
+
+Deliberately says nothing about WHICH maps or where — naming the route
+would hand over the answer, and a win would then show execution rather
+than search. That was the human's explicit choice.
+
+Round 8's winning edit was real search: UP held 64 twice, then A, then
+RIGHT, then A, then LEFT held 128. Its own notes read: "explore UP x2
+(128 steps) then A (interact, in case gym door/NP..." — and it had
+worked out unprompted that edits do not persist between rounds, so it
+must restate the whole action list each time.
+
+The SYSTEM prompt's line "You never see the game" was also corrected: it
+is misleading (the model sees map, tile and facing) and may itself have
+been suppressing the spatial reasoning the task needs.
+
+** The run then died — from success, not from plateauing
+
+Stop reason: =editor rejected 5 rounds consecutively=, immediately after
+its first win. Two distinct failure modes, both measured:
+
+- *Calls 9-12 returned ZERO characters.* Not truncation — no text block
+  at all. =propose= filters to =type == "text"=, so the generic error
+  "response contains no fenced json block" pointed a reader at a
+  malformed fence when there was no text to fence.
+- *Call 13 was truncated mid-JSON*, ending on ={"=. =EDITOR_MAX_TOKENS=
+  was 4096. This failure is *self-inflicted by success*: an accepted
+  edit grows the script, edits do not persist between rounds, so every
+  later reply must restate a longer list. Round 8's script was 13
+  actions. A cap that shrinks the model's ability to answer as it makes
+  progress is a cap in the wrong place.
+
+And underneath both: =answers.jsonl= recorded only =raw=, so it could
+show that four replies were empty but not why. A file whose only purpose
+is post-hoc diagnosis has to carry enough to be worth reading.
+
+*Fixed:* cap raised to 16384; =stop_reason= and =block_types= recorded
+beside =raw=; empty replies raise a distinct error naming both.
+
+** Demonstrations
+
+| mutation | observed failure |
+|---+---+---|
+| hardcode the party line in =describe_progress= | =AssertionError: "             10  per party member"= (constant patched to 7) |
+| drop the =progress_legend= branch from =build_prompt= | =assert '1,000' in "lead_in: 10 steps..."= |
+| remove the empty-reply guard | =Regex pattern did not match= (raises the fence error again) |
+| record only =raw= | =KeyError: 'stop_reason'= |
+| cap back to 4096 | =assert 4096 >= (4 * 4096)= |
+
+=rules.py= and =claude.py= byte-identical after every restore.
+
+One existing test needed narrowing rather than fixing:
+=test_an_unparseable_reply_is_still_recorded= asserted whole-dict
+equality on the answers record, so it failed when the record grew. What
+it pins is the ORDERING — that the text survives the raise — so it now
+asserts the fields it is about and not the record's shape.
+
+*Gate:* =make check= =EXIT=0=, 479 passed / 4 skipped / 11 warnings in
+267.64s; slow 5 passed; ruff + =lint-patched= + mypy (83 files) clean.
+Load 3.2 → 4.7, so this timing IS comparable to the 268.41s figure.
+472 → 479 (+7).
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.
