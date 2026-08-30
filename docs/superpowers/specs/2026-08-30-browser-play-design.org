@@ -113,21 +113,49 @@ Builds =build/web/=: the shim page, =code.zip= (vendored engine +
 and will not run from =file://=. Built from the vendored tree so it
 cannot drift from what the native tests run against.
 
-* The seventh patch
+* NO seventh patch — corrected before implementation
+
+*This section previously specified a seventh patch. That was wrong, and
+the correction matters more than the work it saves.*
 
 =tuxemon/base_client.py= imports =NetworkManager= at module level, which
-imports =ssl=, which browsers do not have. Measured: =ModuleNotFoundError:
-No module named 'ssl'=; with the import deferred, every remaining import
-succeeded.
+imports =ssl=, which browsers lack. The spec proposed deferring that
+import as patch 0007.
 
-Deferring it is correct on its own terms — multiplayer over raw sockets
-cannot work in a browser sandbox — and the runtime half already exists:
-*patch 0006 added =start_networking: bool= to =BaseClient.__init__=*. Only
-the module-level import is left.
+Re-reading the spike record: *stage D used the UNPATCHED engine* plus a
+Python-level =ssl= stub, and =tuxemon.db=, =prepare=, =client=,
+=session=, =LocalPygameClient=, =pygame.init=, =set_mode= and
+=draw+flip= ALL succeeded. The patch was never the thing that worked. A
+later stage happened to carry both, and this spec credited the wrong one.
 
-Regenerated properly from a pristine-vs-edited diff, verified with
-=make unpatch && make patch=, and gated. NOT the in-zip hack the spike
-used; the spike never touched the vendored tree.
+So =tuxghost/web.py= installs the stub itself, before importing tuxemon:
+
+#+begin_src python
+sys.modules.setdefault("ssl", types.ModuleType("ssl"))
+#+end_src
+
+*Why avoiding the patch matters far more than the two lines it saves.*
+=tuxghost.trace.patch_series_id()= digests =patches/*.patch=, and every
+trace header records it. A seventh patch changes that digest, so THREE
+golden fixtures currently carrying the live id — =claude_town_1234=,
+=scripted_town_1234= and =hearthrock_idle_600= — would go stale at once.
+=scripted_town_1234= is *the ghost this subsystem plays*. And
+=tests/conftest.py='s =_TRACKED_FILES= comment says the quiet part out
+loud:
+
+#+begin_quote
+Tracking it means the day someone adds a seventh patch, the live-capture
+fixture going stale FAILS here instead of quietly joining the ambient
+noise.
+#+end_quote
+
+That gate is aimed precisely at this change. Taking the patch route would
+have meant re-recording three fixtures and updating every digest asserted
+against them — a large, risky task, to buy nothing the stub does not.
+
+*Consequence for the invariants:* the patch series stays at SIX, and
+=patch_series_id= is unchanged, so no golden trace goes stale and no
+fixture is re-recorded.
 
 * Assets
 
@@ -208,6 +236,7 @@ the result either way, in the human's own words.
 
 - =EXEMPTIONS == {}=.
 - =FORMAT_VERSION == 1=, and no trace is written by the browser at all.
-- Seven patches, the seventh regenerated and verified from pristine.
+- SIX patches, unchanged. =patch_series_id= unchanged, so no golden
+  trace goes stale.
 - =make check= green, and the manual acceptance above performed and
   recorded — passed or failed.
