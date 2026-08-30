@@ -2502,11 +2502,14 @@ cannot silently become vacuous a third time.
 explicitly re-exported by =tuxghost.optimize.schedule= — *the third time
 this session that mypy was run before the last edit rather than after.*
 
-* The optimizer moved =max_progress= ONCE — and did not reproduce it
+* The optimizer reliably moves =max_progress= — 4 of 5 runs, n=5
 
-*Read the reliability section at the end of this entry before quoting
-any of it.* The headline is real but it is n=1, and a second run under
-the same conditions found nothing.
+*This heading has been rewritten twice and both earlier versions were
+wrong in opposite directions.* At n=1 I called the hypothesis confirmed;
+at n=2 I called it "weak evidence, not a working search". Neither sample
+could see what n=5 shows. The sequence is preserved below because the
+error is instructive: a single run is not evidence, and two runs are not
+much better when the dominant variable is a language model's sampling.
 
 ** THE OPTIMIZER MOVED max_progress FOR THE FIRST TIME
 
@@ -2591,7 +2594,45 @@ equality on the answers record, so it failed when the record grew. What
 it pins is the ORDERING — that the text survives the raise — so it now
 asserts the fields it is about and not the record's shape.
 
-** RELIABILITY: one success in 30 post-fix rounds. Not a working search.
+** RELIABILITY, at n=5: it works, and =run5= was the outlier
+
+Three further runs at =run5='s EXACT parameters (24 rounds, patience 14,
+=max_rejections= 6, =max_cost= 8000) were run with nothing else changed.
+
+| run | rounds | first hit | best | editor failures |
+|---+---+---+---+---|
+| =run4= (patience 12, cost 6000) | 14 | round 8 | 1020 | 5 |
+| =run5= | 15 | *never* | 20 | 0 |
+| =run6= | 18 | round 3 | 1020 | 0 |
+| =run7= | 17 | round 2 | 1020 | 1 |
+| =run8= | 19 | round 4 | 1020 | 2 |
+
+*4 of 5 post-legend runs reached 1020; 0 of 4 pre-legend runs did, across
+37 rounds.* At =run5='s exact configuration it is 3 of 4, and the three
+successes first hit at rounds 3, 2 and 4 — fast, not lucky-late.
+=run5= was the outlier, and calling it the rule at n=2 was as premature
+as calling =run4= the rule at n=1.
+
+** A HARD CEILING at 1020, and it is not structural
+
+No run in five ever reached 2020. Every one of the three new winners
+ended on the SAME tile: =classic_gym_granite.tmx= at (10,19), the gym
+entry. They all found the identical move — hold UP from the spawn.
+
+Better scores are available and equally close. =CLASSIC_CRITICAL_PATH=
+ranks =classic_gym_granite= at index 1, but =classic_gym_mila= is index
+2 and =classic_route_1= is index 3, and BOTH are also one hop from the
+start. A run reaching route_1 would score 3020. =_map_index= takes the
+MAX over a run, so a script that enters the gym and then leaves for
+route_1 keeps both — nothing has to be given up.
+
+The likely cause is the greedy accept rule: the first transition found
+becomes the accepted best, and every later proposal is an edit to a
+script that ends inside a dead-end gym. The search locks onto its first
+success. That is a hypothesis, stated as one, and the next thing worth
+testing.
+
+** Superseded: the n=2 reading
 
 A second run (=run5=), same save, same objective, 15 rounds, patience 14,
 =max_cost= 8000: *every round scored 20.0* and it stopped on patience
