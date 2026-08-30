@@ -1,0 +1,132 @@
+#+TITLE: Can Tuxemon run in a browser? — the Pyodide feasibility spike
+#+DATE: 2026-08-30
+#+STATUS: measured; answered YES
+
+* Why this file exists
+
+S6's single most consequential decision — *no seventh patch* — rests on
+what this spike measured. The spike's own scratch pages live in
+=runs/wasm-spike/=, which is *git-ignored*, so without this file the
+evidence for that decision would exist only on one machine. This project's
+convention is a committed =.org= measurement note
+(=docs/2026-08-25-determinism-spike.org=,
+=docs/2026-08-26-display-scale-measurement.org=); S6 nearly skipped it.
+
+*=runs/wasm-spike/README.org= is superseded by this file.* That README is
+stale in two ways: it lists only stages A–D (never E/F, which are the
+evidence =tuxghost/web.py= now cites), and it says "Not tested: keyboard
+input" when keyboard input WAS later measured. Believe this file.
+
+* Method
+
+Real headless Chromium (Playwright's cached build) driving real Pyodide
+from the jsdelivr CDN, serving a local directory over =http://= —
+Pyodide will not run from =file://=. Staged A→F, each stage answering one
+question and only proceeding if the previous passed.
+
+* What was measured
+
+| question | result |
+|---+---|
+| =pydantic= + =pydantic_core= under Pyodide | install via micropip, 2.10.6 |
+| =pygame-ce= | *ABSENT from Pyodide 0.28.2, present in 0.29.1* (2.5.6.dev2) |
+| the other 11 dependencies | install; only =cbor= fails |
+| =tuxemon.db= — all 75 pydantic models | imports |
+| =prepare=, =session=, =client=, =LocalPygameClient= | import |
+| =tuxghost= | imports |
+| =build_client= | boots in 6.1–7.5s, real map loaded |
+| game logic throughput | *1000–9700 steps/sec* against the 60 needed |
+| render path | 60 blit+flip in 0.04s |
+| the ghost | track built (177 frames), installed, walked its route at 1250 steps/sec, ended (16,14) beside a player at (12,12) |
+| keyboard | =pygame.event= receives DOM KEYDOWN/KEYUP with correct key names |
+| payload | 31MB with audio stubbed |
+
+* The three findings that shaped the design
+
+** 1. NO seventh patch is needed — and the patch would have been costly
+
+=tuxemon/base_client.py= imports =NetworkManager= at module level, which
+imports =ssl=, which browsers lack. The obvious fix is an engine patch
+deferring that import.
+
+*Stages E and F settle that no patch is required*: both boot
+=build_client= and walk the ghost with only a Python-level =ssl= shim,
+against an otherwise unmodified engine. (Stage D is ambiguous — its zip's
+provenance cannot be reconstructed, and the scratch README and the page's
+own comment disagree about it. Cite E/F, never D.)
+
+Avoiding the patch matters far more than the two lines it saves.
+=patch_series_id()= digests =patches/*.patch=, and every trace header
+records it. A seventh patch changes that digest, staling THREE golden
+fixtures at once — =claude_town_1234=, =scripted_town_1234= and
+=hearthrock_idle_600= — and =scripted_town_1234= is *the ghost S6 plays*.
+=tests/conftest.py='s =_TRACKED_FILES= comment aims a gate at precisely
+this: "the day someone adds a seventh patch, the live-capture fixture
+going stale FAILS here instead of quietly joining the ambient noise."
+
+*The shim must be =try/except ImportError=, not =setdefault=.*
+=setdefault= keys on "already imported" rather than "importable", and
+Pyodide ships a real =ssl=. A hollow =ssl= provably breaks the exact
+submodule the engine imports:
+
+: $ python -c "import sys,types; sys.modules.setdefault('ssl',types.ModuleType('ssl')); import websockets.asyncio.client"
+: AttributeError: module 'ssl' has no attribute 'SSLWantReadError'
+
+** 2. Input and drawing need NO new code
+
+Emscripten's SDL delivers DOM keyboard events straight into
+=pygame.event= with correct key names, and Tuxemon's =default_input_map=
+already binds arrows, =K_RETURN= → A, shift → B, =K_ESCAPE= → BACK. An
+earlier draft of the S6 design carried a JS→Python key bridge; this
+measurement deleted it.
+
+=pg.display.set_mode= writes to the canvas under Pyodide, so the two
+lines =tuxghost/play.py= already runs work unchanged.
+
+*The browser is a WINDOWED consumer, not a headless one.* SDL's =dummy=
+driver does not exist under Emscripten — measured: =pygame.error: dummy
+not available=. So the browser path uses =pygame_init()=, never
+=headless_context()=.
+
+** 3. The 147MB of music need not ship
+
+The db's pydantic validators check that music and sound records exist *IN
+THE DB*, not that the audio files have content. Zero-byte placeholders
+satisfy them, taking the payload from 194MB to 31MB.
+
+Found the hard way: an earlier attempt filtered on ="music" in parts=,
+which also zeroed the db's own records under =mods/tuxemon/db/music/= and
+failed with a confusing error about music "not existing in the db". Filter
+on the audio DIRECTORY.
+
+*UNTESTED:* whether PLAYING a zero-byte audio file raises.
+
+* What the spike did NOT establish
+
+- Real game frames on a canvas. The spike drew a =fill= and flipped it.
+  (S6's acceptance later settled this — see =docs/STATUS.org=.)
+- Frame cost on a busy map: the spike's boot lands on =start_tuxemon.tmx=.
+- Audio playback.
+- Input latency: keys arrive; how promptly is unmeasured.
+- =pygame-ce= version gap: 2.5.6.dev2 in Pyodide against the =2.5.7= this
+  project pins natively. No incompatibility observed, none looked for.
+
+* Rejected alternatives, with reasons
+
+- *pygbag.* Its package index carries wheels for =pillow= and =PyYAML=
+  but *not =pydantic-core=*, and its docs state Pyodide's Emscripten
+  wheels "aren't compatible out of the box with pygbag runtime" while
+  porting binary modules is "not documented at the moment". Dropping
+  pydantic is not available either: 13 of 747 engine files import it, but
+  those carry 75 =BaseModel= subclasses and 615 validators — the whole
+  content schema.
+- *py2wasm / Nuitka.* Targets WASI and Wasmer, not the browser. No canvas,
+  no DOM. Python 3.11 only.
+- *A bespoke Emscripten build.* Genuinely possible — CPython has official
+  Emscripten support (PEP 776, Tier 3 from 3.14) and Rust targets
+  =wasm32-unknown-emscripten= — and it needs NO game rewrite. Rejected
+  only because it means owning an ABI-matched CPython plus six compiled
+  dependencies forever, which is the work Pyodide already does.
+- *Rewriting the game in a compiled language.* The only reading of
+  "native wasm" that requires a rewrite, and it would abandon every
+  determinism guarantee this project built.

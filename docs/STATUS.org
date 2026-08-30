@@ -2985,6 +2985,117 @@ script. =objective.py= and =runner.py= byte-identical after each restore.
 1020 with zero battles; whether a real editor now walks the corridor is
 unmeasured.
 
+* S6 — browser play with a ghost, delivered
+
+A local browser build: Pyodide runs the real engine, a human plays with
+their arrow keys, and a ghost — a previously recorded run replayed as a
+translucent NPC — walks beside them.
+
+Scope was cut deliberately by the human, and each cut is a clean second
+increment rather than rework: *play only* (no traces written, so the
+format's =platform=/=patch_series_id= guarantees are untouched), *one
+fixed scenario* (=paper_town.save= + =scripted_town_1234= as the ghost),
+*local only* (=make web=, =python -m http.server=).
+
+Feasibility was measured BEFORE any of it was designed —
+=docs/2026-08-30-wasm-spike.org=.
+
+** NO seventh patch. The series stays at SIX.
+
+The obvious implementation deferred =base_client.py='s module-level
+=NetworkManager= import (it pulls in =ssl=, which browsers lack) as patch
+0007. Measured: unnecessary. A Python-level =ssl= shim in
+=tuxghost/web.py= is sufficient against an otherwise unmodified engine.
+
+That mattered far more than the lines it saved. =patch_series_id()=
+digests =patches/*.patch=; a seventh patch stales THREE golden fixtures
+at once, one of which is the ghost this subsystem plays, and
+=tests/conftest.py= turns that into a failure on purpose.
+
+The shim is =try/except ImportError=, NOT =setdefault=: Pyodide ships a
+real =ssl=, and a hollow one provably breaks =websockets.asyncio.client=
+with =AttributeError: module 'ssl' has no attribute 'SSLWantReadError'=.
+
+** What shipped
+
+| file | what |
+|---+---|
+| =tuxghost/web.py= | =boot()=, =step_once()= (synchronous, gate-tested), =async main()= |
+| =tests/test_web.py= | 8 tests |
+| =tests/test_build_web.py= | 3 tests |
+| =web/index.html= | ~20-line Pyodide shim + a steps/sec readout |
+| =scripts/build_web.py= | packages =build/web/= |
+| =Makefile= | =web= target; =scripts= added to =lint= and =types= |
+
+=step_once= holds every decision — pacing, catch-up, ghost advance,
+blit/flip — and runs natively under =make check=. =main='s only
+browser-specific line is the =await=.
+
+** MANUAL ACCEPTANCE — four of five checks verified by machine
+
+Driven in real headless Chromium against the real =make web= output.
+
+| check | result |
+|---+---|
+| 1 page boots | *PASS* — canvas appears, no page errors |
+| 2 the map DRAWS | *PASS* — real tiles, sprites, buildings, water, fence, trees. NOT a fill. |
+| 3 arrow keys move the player | *PASS* — camera scrolls on held Down, then Right |
+| 4 ghost walks its route and stops | *PASS* — =npc_manager.npcs= = ghost, npc_red, spyder_papertown_silver, spyder_sign; ghost at (16,14), its known finish tile; player at (12,12) |
+| 5 >= 30 steps/sec sustained | *PASS* — 60.0, re-read 59.9, re-read 60.0 |
+
+*Check 2 was this subsystem's largest unverified risk.* Every earlier
+claim rested on the spike having drawn a =fill= to a canvas; a real game
+frame had never been rendered in a browser until this run.
+
+*Check 5's number measures the GAME LOOP, not paints.* The first
+implementation counted =requestAnimationFrame=, which ticks at ~60fps
+whether or not the Python loop advances — it would have read 60 on a
+stalled build. Caught in review and replaced with the loop's own step
+count per wall-clock second, pinned by a test that fails when a stalled
+loop keeps reporting 60.
+
+Identifying the ghost required querying =npc_manager= directly: it wears
+the PLAYER's own sprite by design, so visually it is one of several
+similar figures. That query needed one line of instrumentation on the
+BUILT page (=pyodide= is a local in the shim's IIFE);
+=web/index.html= source was never touched and =make web= overwrote it.
+
+*STILL HUMAN-ONLY, and not yet done:* whether it FEELS responsive, and
+whether the ghost reads as a translucent "another you" rather than as
+just another NPC.
+
+** What is NOT covered — stated plainly
+
+- *The browser cannot verify trace provenance.* Measured during
+  acceptance: it computes =patch_series_id = sha256:e3b0c442...=, which
+  is the sha256 of EMPTY INPUT, because =patches/= ships in no zip and
+  the glob matches nothing. Every trace read in the browser therefore
+  warns =patch_series_id differs=. Warn-not-refuse, so nothing breaks,
+  and for a play-only build it is arguably correct that provenance is
+  uncheckable — but the spec claimed no such limitation. (The sibling
+  =platform= warning, macOS vs =Emscripten-4.0.9-wasm32-32bit=, is
+  expected.)
+- *Audio.* 143 music files ship as zero bytes; whether PLAYING one raises
+  is untested. The spec's stated fallback — disable audio in the browser
+  build — has no switch anywhere in the code.
+- *Busy-map frame cost.* The scenario is Paper Town.
+- *Input latency.* Keys arrive; how promptly is unmeasured.
+- *=pygame-ce= version gap*: 2.5.6.dev2 in Pyodide vs the pinned 2.5.7.
+- *Pyodide boot and the async wrapper* have no native test. That surface
+  is small, and the acceptance above is its compensating control.
+
+** A test that was green for the wrong reason
+
+=tests/test_web.py= originally set no SDL drivers. It passed only because
+~13 alphabetically-earlier test files call =headless_context()=, which
+sets them as a side effect — so running that file ALONE opened a real
+window, and it would fail on a display-less machine. Found by the
+whole-branch review; fixed by setting both vars at the top of the file,
+verified by re-running with the variables deliberately BLANKED.
+
+Worth recording because the controller's own resource ruling had
+instructed implementers to run exactly that file alone.
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.
