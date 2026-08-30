@@ -1,0 +1,213 @@
+#+TITLE: S6 — browser play, with a ghost
+#+DATE: 2026-08-30
+#+STATUS: designed, not implemented
+
+* What this is
+
+A browser build of Tuxemon that a human plays with a ghost walking
+beside them. One page, one bundled scenario, run locally.
+
+Three scope decisions, taken deliberately and all reversible later:
+
+1. *PLAY ONLY.* The browser records no traces. The =.tuxghost= format's
+   =platform= and =patch_series_id= guarantees are therefore entirely out
+   of scope: nothing new is written, so nothing can disagree.
+2. *ONE FIXED SCENARIO.* =tests/fixtures/paper_town.save= with
+   =tests/golden/scripted_town_1234.tuxghost= as the ghost. No picker, no
+   file upload, no save selection.
+3. *LOCAL ONLY.* =make web= builds a directory and serves it on
+   localhost. Not hosted, not shared, no caching or versioning strategy.
+
+Everything cut here is a clean second increment, not rework. A trace
+picker, hosting, and browser-side recording each sit on top of a working
+page without changing it.
+
+* What was MEASURED before this was designed
+
+Every claim below was run in headless Chromium against real Pyodide on
+2026-08-30. Artifacts and the reproduction harness are in
+=runs/wasm-spike/= (labelled throwaway; not package code).
+
+| question | result |
+|---+---|
+| =pydantic= + =pydantic_core= under Pyodide | install via micropip, 2.10.6 |
+| =pygame-ce= | 2.5.6.dev2 — ABSENT from Pyodide 0.28.2, present in 0.29.1 |
+| the other 11 dependencies | install; only =cbor= fails |
+| =tuxemon.db= (75 pydantic models) | imports |
+| =prepare=, =session=, =client= | import |
+| =tuxghost= | imports |
+| =build_client= | boots in 6.1–7.5s, real map loaded |
+| game logic speed | *1000–9700 steps/sec* (60 needed for real time) |
+| render path | 60 blit+flip in 0.04s |
+| *the ghost* | *track built (177 frames), installed, walked its route at 1250 steps/sec* |
+| *keyboard input* | *=pygame.event= receives DOM KEYDOWN/KEYUP with correct key names* |
+| payload | 31MB with audio stubbed |
+
+Two findings shaped the design rather than merely permitting it:
+
+- *Input needs NO new code.* Emscripten's SDL delivers DOM keyboard
+  events into =pygame.event=, and Tuxemon's =default_input_map= already
+  binds arrows, =K_RETURN= → A, shift → B, =K_ESCAPE= → BACK. The game
+  reads input exactly as it does natively. An earlier draft of this
+  design had a JS→Python key bridge; the probe deleted it.
+- *The draw path needs NO new code.* =pg.display.set_mode= writes to the
+  canvas under Pyodide, so =display.blit(frames.surface(), (0,0))= then
+  =pygame.display.flip()= — the two lines =tuxghost/play.py= already runs
+  — work unchanged.
+
+* Architecture
+
+One new module, one build target, one static page. Nothing existing
+changes except the seventh patch.
+
+** =tuxghost/web.py=
+
+Owns the session and the loop. Two entry points, split so that the
+browser-only part is as small as possible:
+
+- =step_once(state) -> None= — advance one frame: =client.update=,
+  =advance_ghost=, blit, flip. Plain synchronous Python. *Runs natively
+  under =make check=.*
+- =async def main() -> None= — boot, then call =step_once= in a loop with
+  =await asyncio.sleep(0)= between frames to yield to the browser. The
+  =await= is the ONLY line that cannot run natively.
+
+Pacing reuses =tuxghost.ghost.pump.steps_owed= against
+=time.monotonic()=, exactly as =play.py= does, rather than trusting
+=requestAnimationFrame=. It already handles catch-up and already carries
+=CATCH_UP_CAP=.
+
+Boot mirrors =play.py='s ordering, which exists for reasons this project
+measured the hard way:
+
+1. =pygame_init()= FIRST, then import =tuxemon.graphics= and
+   =tuxemon.map.view=, to bind the windowed scale before anything
+   headless runs (=play.py='s "Ordering note 2").
+2. =build_track(trace, context=ctx)= — the context argument is REQUIRED.
+   Without it the ghost's own boot calls =pg.display.set_mode()= a second
+   time and invalidates every already-converted surface (commit
+   =8840756=; it holed the native windowed render for a whole session).
+3. =boot_from_save(...)=, then =install_ghost=.
+
+*The browser is a WINDOWED consumer, like =tuxghost play=, not a headless
+one.* SDL's =dummy= driver does not exist under Emscripten — measured:
+=pygame.error: dummy not available=. This is correct rather than a
+workaround, and it means =web.py= must not use =headless_context()=.
+
+** The JS shim
+
+About twenty lines, in the build output, not in the package: boot
+Pyodide, =loadPackage(["micropip","pygame-ce"])=, micropip the
+dependency list, unpack three zips into =/game=,
+=pyodide.canvas.setCanvas2D=, await =tuxghost.web.main()=.
+
+A click-to-start gate, because the canvas must hold focus for keyboard
+events to arrive, and because boot takes 6–7 seconds and needs a loading
+state regardless.
+
+** =make web=
+
+Builds =build/web/=: the shim page, =code.zip= (vendored engine +
+=tuxghost=), =mods.zip= and =fixtures.zip=. Serving is
+=python -m http.server= from that directory — Pyodide requires =http://=
+and will not run from =file://=. Built from the vendored tree so it
+cannot drift from what the native tests run against.
+
+* The seventh patch
+
+=tuxemon/base_client.py= imports =NetworkManager= at module level, which
+imports =ssl=, which browsers do not have. Measured: =ModuleNotFoundError:
+No module named 'ssl'=; with the import deferred, every remaining import
+succeeded.
+
+Deferring it is correct on its own terms — multiplayer over raw sockets
+cannot work in a browser sandbox — and the runtime half already exists:
+*patch 0006 added =start_networking: bool= to =BaseClient.__init__=*. Only
+the module-level import is left.
+
+Regenerated properly from a pristine-vs-edited diff, verified with
+=make unpatch && make patch=, and gated. NOT the in-zip hack the spike
+used; the spike never touched the vendored tree.
+
+* Assets
+
+31MB, from 194MB, and the reduction is sound rather than lossy in a way
+that matters here:
+
+- The db's pydantic validators check that music and sound records exist
+  *IN THE DB*, not that the audio files have content. Zero-byte
+  placeholders satisfy them — measured, after an earlier attempt that
+  deleted the db records by mistake and failed loudly.
+- So the 147MB of music need not ship for the game to boot and run.
+
+*UNTESTED, and it must be tested during implementation:* whether
+attempting to PLAY a zero-byte audio file raises. If it does, the options
+are shipping the music, patching the audio layer to skip empty files, or
+disabling audio in the browser build. The last is acceptable for a first
+version and should be the fallback.
+
+* Testing
+
+** What the gate covers
+
+=step_once= is synchronous and native-testable. Pinned:
+
+- a session boots with a ghost installed
+- N calls advance the ghost along its track, matching =GhostTrack=
+- the ghost still does not perturb the digest (the S4 invariant, re-run
+  in this new caller)
+- =web.py= never calls =headless_context()= — an AST or source check,
+  since using it would silently break the browser build while every
+  native test passed
+
+** What the gate CANNOT cover
+
+The Pyodide boot and the =async= wrapper. That surface is much smaller
+than S4's ghost had, but it is not zero, and this project's rule is that
+untested surface gets a named human step rather than optimism.
+
+** MANUAL ACCEPTANCE — required, and written down before implementation
+
+S4 shipped with three "demonstrated" properties, a green suite, and a
+documented claim that the ghost worked. It did not. Three defects were
+live at close-out and only a human at a screen found them.
+
+So this spec names the acceptance up front:
+
+1. =make web=, open the page, click to start.
+2. The map draws — not a fill, the actual town, with tiles and sprites.
+3. Arrow keys move the player.
+4. A translucent second character walks the ghost's route and stops at
+   its finish tile.
+5. Movement feels responsive, and the page reports a measured frame
+   rate of *at least 30fps sustained* over 10 seconds of walking. The
+   number is required because "feels fine" is exactly the judgement this
+   project has been wrong about before; the human's impression is
+   required too, because a number can be met by a build that stutters.
+
+Anything short of all five is a failure, and =docs/STATUS.org= records
+the result either way, in the human's own words.
+
+* What is NOT covered — stated plainly
+
+- *Real game frames have never been drawn to the canvas.* The spike drew
+  a =fill= and flipped it. The full renderer path in a browser is
+  unproven, and it is the largest remaining risk.
+- *Frame cost on a busy map is unmeasured.* The spike's boot lands on
+  =start_tuxemon.tmx=. A town with NPCs may be slower; the threshold
+  that matters is 60 steps/sec, and the spike measured 1000–9700, so the
+  build has to lose more than 94% of its headroom before this bites.
+- *Audio is untested*, see above.
+- *=pygame-ce= version differs*: 2.5.6.dev2 in Pyodide against the
+  =2.5.7= this project pins natively. No incompatibility observed, but
+  none looked for either.
+- *Input latency is unmeasured.* Keys arrive; how promptly is unknown.
+- *No hosting, no sharing, no trace picker, no browser-side recording.*
+
+* Invariants at close-out
+
+- =EXEMPTIONS == {}=.
+- =FORMAT_VERSION == 1=, and no trace is written by the browser at all.
+- Seven patches, the seventh regenerated and verified from pristine.
+- =make check= green, and the manual acceptance above performed and
+  recorded — passed or failed.
