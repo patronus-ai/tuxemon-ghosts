@@ -286,3 +286,61 @@ def test_optimize_refuses_rules_objective_without_rules() -> None:
             max_rejections=1,
             max_cost=10_000,
         )
+
+
+@pytest.mark.slow
+def test_one_action_beats_the_parent_from_the_hearthrock_save() -> None:
+    """END-TO-END proof that the classic campaign's gradient is live,
+    through the REAL `seal` path rather than a stubbed session.
+
+    This is the test that would have caught the dead gradient in seconds.
+    Instead it took four optimizer runs against a live model to notice
+    that `progress` was pinned at 20.0 -- `party_count * 10`, nothing
+    from the map -- because `CRITICAL_PATH` named only `spyder_*` maps
+    and then, after that was fixed, named only cities, and then omitted
+    the gyms.
+
+    The numbers are measured, not chosen: from the committed save's spawn
+    tile (23,14), holding UP for exactly 20 steps enters
+    `classic_gym_granite.tmx`. `HOLD_CAP` is 600, so ONE action expresses
+    it comfortably. The parent is 600 steps of no input at all.
+    """
+    from tuxemon.platform.const import buttons
+
+    from tuxghost.agent.types import Action
+    from tuxghost.optimize.schedule import ActionScript
+    from tuxghost.optimize.seal import seal
+    from tuxghost.rules import TuxemonFirstBattleRules
+
+    parent = read(
+        Path(__file__).parent / "golden" / "hearthrock_idle_600.tuxghost"
+    )
+
+    # `lift`, not `ActionScript(actions=())` -- an EMPTY script runs ZERO
+    # steps, so nothing is ever observed and `max_progress` comes back 0,
+    # which looks like a dead gradient but is just an empty run. This is
+    # how `optimize()` builds round 0, and getting it wrong here cost a
+    # confusing `AssertionError: 0` before the parent was lifted properly.
+    idle = seal(
+        lift(parent.inputs, parent.header.step_count),
+        parent,
+        checkpoint=64,
+        model=None,
+        rules=TuxemonFirstBattleRules(),
+    )
+    assert idle.steps == 600, idle.steps
+    assert idle.max_progress == 20, idle.max_progress  # party only
+
+    moved = seal(
+        ActionScript(
+            lead_in=0,
+            actions=(Action(button=buttons.UP, hold=40, settle=560),),
+        ),
+        parent,
+        checkpoint=64,
+        model=None,
+        rules=TuxemonFirstBattleRules(),
+    )
+    # One action, one map transition, a full rank of the critical path.
+    assert moved.max_progress == 1020, moved.max_progress
+    assert moved.max_progress > idle.max_progress

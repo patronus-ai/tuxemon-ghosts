@@ -63,6 +63,71 @@ CRITICAL_PATH: tuple[str, ...] = (
     "spyder_cotton_town.tmx",    # VERIFIED name, ORDER VERIFIED (2 hops)
 )
 
+#: The SAME shaping for the `classic_*` campaign, where the gym goal is
+#: actually reachable (`tests/fixtures/hearthrock_city.save`).
+#:
+#: THIS LIST WAS WRONG TWICE, and both errors were found by running the
+#: optimizer rather than by reading it. Recorded because each failure
+#: mode is easy to reintroduce:
+#:
+#:   1. Absent entirely. The map term was permanently 0 from that save
+#:      and `progress` collapsed to `party_count * 10` -- the identical
+#:      dead-gradient defect M1 was, relocated. Every round of the first
+#:      real run scored `[0.0, 20.0, -steps]`; that 20.0 is 2 monsters
+#:      x 10, with nothing from the map.
+#:   2. Cities only. Re-run: every round STILL scored 20.0. The nearest
+#:      credited city is two hops out, so the search faced a two-map
+#:      plateau with no signal anywhere on it. A gradient that pays only
+#:      on arrival at a city is not climbable by an editor proposing
+#:      button sequences. (The `spyder_*` path above had this right by
+#:      accident -- it lists `spyder_route1`.)
+#:
+#: GYM MAPS ARE INCLUDED, and excluding them was the second mistake's
+#: twin. They were left out as "the goal, not the path", which sounds
+#: principled and is wrong here: measured from the committed save's own
+#: spawn tile (23,14), holding UP walks the player straight into
+#: `classic_gym_granite` -- the gym door is directly above. Entering a
+#: gym is the single most reachable act of progress available, and
+#: omitting it denied credit for the only move the search can easily
+#: find. Gyms sit at their real hop distance like everything else.
+#:
+#: Ordered by measured hop distance from `classic_hearthrock_city.tmx`,
+#: every hop 0..8 populated. Equal-hop entries are real BRANCHES and are
+#: listed contiguously; `tests/test_rules_mapgraph.py` requires exactly
+#: that and re-derives every number here from the map data.
+CLASSIC_CRITICAL_PATH: tuple[str, ...] = (
+    "classic_hearthrock_city.tmx",       # 0
+    "classic_gym_granite.tmx",           # 1
+    "classic_gym_mila.tmx",              # 1
+    "classic_route_1.tmx",               # 1
+    "classic_route_8.tmx",               # 1
+    "classic_steamshore_city.tmx",       # 2
+    "classic_valorhold_city.tmx",        # 2
+    "classic_gym_bravion.tmx",           # 3
+    "classic_gym_marin.tmx",             # 3
+    "classic_gym_pyra.tmx",              # 3
+    "classic_route_2.tmx",               # 3
+    "classic_route_7.tmx",               # 3
+    "classic_thornwood_city.tmx",        # 4
+    "classic_route_3.tmx",               # 5
+    "classic_route_5.tmx",               # 5
+    "classic_aerolume_city.tmx",         # 6
+    "classic_route_4.tmx",               # 6
+    "classic_route_6.tmx",               # 7
+    "classic_stormpeak_city.tmx",        # 7
+    "classic_gym_astra.tmx",             # 8
+    "classic_gym_voltessa.tmx",          # 8
+    "classic_umbrastar_city.tmx",        # 8
+)
+
+#: Every campaign's path. The two campaigns are disjoint map components
+#: (measured), so a map name belongs to at most one of these and the
+#: lookup below cannot be ambiguous.
+CRITICAL_PATHS: tuple[tuple[str, ...], ...] = (
+    CRITICAL_PATH,
+    CLASSIC_CRITICAL_PATH,
+)
+
 #: All 13 leaders are named `classic_gym_leader_<name>`; nothing in the
 #: shipped data orders them, which is why the goal is "any gym won".
 GYM_LEADER_PREFIX = "classic_gym_leader_"
@@ -128,11 +193,20 @@ class TuxemonRules:
         return len(won)
 
     def _map_index(self, session: Any) -> int:
+        """Furthest rank reached along whichever campaign's path this run
+        is on.
+
+        Searches every path in `CRITICAL_PATHS`, not just the `spyder_*`
+        one. The campaigns are disjoint map components, so at most one
+        path can contain `name` and there is nothing to disambiguate.
+        """
         name = session.client.get_map_name()
-        if name in CRITICAL_PATH:
-            self._furthest_map = max(
-                self._furthest_map, CRITICAL_PATH.index(name)
-            )
+        for path in CRITICAL_PATHS:
+            if name in path:
+                self._furthest_map = max(
+                    self._furthest_map, path.index(name)
+                )
+                break
         return self._furthest_map
 
     def progress(self, session: Any) -> int:

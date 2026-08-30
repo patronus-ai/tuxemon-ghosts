@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tuxghost.rules import CRITICAL_PATH
+from tuxghost.rules import CLASSIC_CRITICAL_PATH, CRITICAL_PATHS
 
 MAPS = Path(__file__).resolve().parent.parent / "tuxemon/mods/tuxemon/maps"
 
@@ -58,8 +58,18 @@ def graph() -> dict[str, set[str]]:
     return g
 
 
+@pytest.mark.parametrize(
+    ("path", "start"),
+    [
+        (CRITICAL_PATHS[0], "spyder_paper_town.tmx"),
+        (CLASSIC_CRITICAL_PATH, "classic_hearthrock_city.tmx"),
+    ],
+    ids=["spyder", "classic"],
+)
 def test_critical_path_is_ordered_by_real_map_distance(
     graph: dict[str, set[str]],
+    path: tuple[str, ...],
+    start: str,
 ) -> None:
     """`CRITICAL_PATH`'s ORDER carried a VERIFY marker from S5 until now.
 
@@ -69,17 +79,27 @@ def test_critical_path_is_ordered_by_real_map_distance(
     it must be STRICTLY increasing or the map term of `progress` rewards
     the wrong direction.
     """
-    dist = _hops(graph, START)
+    dist = _hops(graph, start)
     hops = []
-    for name in CRITICAL_PATH:
-        assert name in dist, f"{name} is unreachable from {START}"
+    for name in path:
+        assert name in dist, f"{name} is unreachable from {start}"
         hops.append(dist[name])
-    assert hops == sorted(hops), dict(zip(CRITICAL_PATH, hops))
-    assert len(set(hops)) == len(hops), (
-        f"two CRITICAL_PATH maps tie at the same distance: "
-        f"{dict(zip(CRITICAL_PATH, hops))}"
-    )
+    assert hops == sorted(hops), dict(zip(path, hops))
     assert hops[0] == 0, "the path must begin at the starting map"
+
+    # Equal-hop entries are real BRANCHES -- the map genuinely forks, and
+    # dropping one fork would silently deny credit to whichever the run
+    # took. They must be CONTIGUOUS: a non-contiguous tie means the
+    # ordering is wrong, not branched.
+    seen_runs: dict[int, tuple[int, int]] = {}
+    for i, hop in enumerate(hops):
+        lo, hi = seen_runs.get(hop, (i, i))
+        seen_runs[hop] = (min(lo, i), max(hi, i))
+    for hop, (lo, hi) in seen_runs.items():
+        assert all(h == hop for h in hops[lo:hi + 1]), (
+            f"maps at {hop} hops are not contiguous in the path: "
+            f"{dict(zip(path, hops))}"
+        )
 
 
 def test_no_gym_is_reachable_from_the_starting_map(

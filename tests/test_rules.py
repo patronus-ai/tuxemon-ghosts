@@ -188,3 +188,83 @@ def test_an_empty_party_is_not_dead() -> None:
     rules = TuxemonFirstBattleRules()
     session.player.monsters.clear()
     assert rules.observe(session, 1)["dead"] is False
+
+
+def test_the_classic_campaign_has_a_live_map_gradient() -> None:
+    """The dead-gradient defect, caught by a real optimizer run.
+
+    `CRITICAL_PATH` named only `spyder_*` maps, so from
+    `hearthrock_city.save` -- the fixture that exists precisely because
+    the gym goal is reachable there -- the map term was permanently 0 and
+    `progress` collapsed to `party_count * 10`. Round 0 of the first real
+    run scored `[0.0, 20.0, -600.0]`, and that 20.0 was 2 monsters x 10
+    with nothing from the map. Identical in kind to M1, relocated to the
+    other campaign.
+
+    Pinned against `_map_index` searching `CRITICAL_PATHS` rather than
+    `CRITICAL_PATH`: restrict it to the latter and every value below
+    collapses to 20.
+    """
+    from types import SimpleNamespace
+
+    from tuxghost.rules import CLASSIC_CRITICAL_PATH, TuxemonFirstBattleRules
+
+    def session(map_name: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            client=SimpleNamespace(get_map_name=lambda: map_name),
+            player=SimpleNamespace(
+                monsters=[SimpleNamespace(current_hp=10) for _ in range(2)],
+                battle_handler=SimpleNamespace(get_battles=list),
+            ),
+        )
+
+    rules = TuxemonFirstBattleRules()
+    scores = []
+    for name in CLASSIC_CRITICAL_PATH:
+        rules.reset()
+        scores.append(rules.progress(session(name)))
+
+    # Strictly increasing: every step along the path must pay.
+    assert scores == sorted(scores), scores
+    assert len(set(scores)) == len(scores), scores
+    # The first city is rank 0, so only the party term shows there.
+    assert scores[0] == 20
+    # ...and the rest are dominated by the map term, not the party.
+    assert scores[-1] >= 1_000, scores
+
+
+def test_a_map_on_no_critical_path_scores_only_the_party() -> None:
+    """The control for the test above. Without it, a `_map_index` that
+    returned a constant would satisfy the gradient assertions.
+
+    THE PREMISE IS ASSERTED, not assumed, because this control has
+    already stopped controlling twice in one sitting: it first used
+    `classic_route_1.tmx` (which became on-path when routes were added)
+    and then `classic_gym_granite.tmx` (on-path when gyms were added).
+    Both times it failed loudly, which is the only reason it was caught.
+    A control whose premise is a bare literal is one edit away from
+    asserting nothing at all -- exactly the vacuous-test failure mode
+    this project keeps re-discovering. So the map is checked against
+    every path first.
+    """
+    from types import SimpleNamespace
+
+    from tuxghost.rules import CRITICAL_PATHS, TuxemonFirstBattleRules
+
+    off_path = "start_tuxemon.tmx"
+    for path in CRITICAL_PATHS:
+        assert off_path not in path, (
+            f"{off_path} is on a critical path now -- this control no "
+            f"longer controls anything; pick a map that is on none"
+        )
+
+    rules = TuxemonFirstBattleRules()
+    rules.reset()
+    stub = SimpleNamespace(
+        client=SimpleNamespace(get_map_name=lambda: off_path),
+        player=SimpleNamespace(
+            monsters=[SimpleNamespace(current_hp=10) for _ in range(2)],
+            battle_handler=SimpleNamespace(get_battles=list),
+        ),
+    )
+    assert rules.progress(stub) == 20

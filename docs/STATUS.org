@@ -2415,6 +2415,93 @@ each restore.
 4.61 to 6.69 across the run — the highest this session — so the figure
 measures the host, not the suite. Quote the 268.41s at load ~4 instead.
 
+* The first real optimizer run from the classic campaign — four runs, three defects
+
+The experiment the =hearthrock_city.save= fixture existed for. It found
+three defects, all in the progress SHAPING, none of which a green suite
+had noticed. Every one was found by running the thing, not reading it.
+
+** Run 1 — the map term was dead
+
+Round 0 scored =[0.0, 20.0, -600.0]=. That 20.0 is =party_count * 10=
+and nothing else: =CRITICAL_PATH= named only =spyder_*= maps, which are
+unreachable from this save, so =_map_index= returned 0 forever. The
+identical defect M1 was, relocated to the other campaign. Fixed by
+making the lookup search =CRITICAL_PATHS= (per-campaign) rather than one
+hardcoded tuple.
+
+** Run 2 — the gradient was too sparse to climb
+
+Re-ran with a =CLASSIC_CRITICAL_PATH= built from CITIES. Every round
+still scored 20.0. The nearest credited city is TWO hops from the start,
+so the search faced a two-map plateau with no signal anywhere on it. A
+gradient that pays only on arrival at a city is not climbable by an
+editor proposing button sequences. The =spyder_*= path had this right by
+accident — it lists =spyder_route1=. Fixed by including the routes.
+
+** Run 3 — gyms were excluded, and they are the nearest progress there is
+
+Still 20.0. Gyms had been left out as "the goal, not the path", which
+sounds principled and is wrong here. Measured from the save's own spawn
+tile (23,14): *holding UP for exactly 20 steps enters
+=classic_gym_granite.tmx=* — the gym door is directly above the player.
+Excluding gyms denied credit for the single most reachable act of
+progress in the whole campaign. Fixed by placing them at their real hop
+distance like everything else. =CLASSIC_CRITICAL_PATH= is now 22 entries
+over hops 0..8.
+
+** Run 4 — the pipeline is CORRECT, and the editor is searching blind
+
+Still 20.0 across 13 rounds. So the scoring path was tested directly
+rather than blamed:
+
+: seal(ActionScript(actions=(Action(UP, hold=40, settle=560),)), parent)
+:   -> max_progress = 1020
+
+*One action scores 1020 against the parent's 20.* =HOLD_CAP= is 600, so
+that action is comfortably expressible; the parent is 600 steps of no
+input. The rules, the seal wiring, the objective and the map term are
+all correct end to end.
+
+What is not correct is the editor's INFORMATION. It sees only the score
+tuple =(goal_state, max_progress, -steps)=. With =max_progress= pinned
+at 20.0 it is climbing a plateau with no signal at all, and it has no
+map name, no tile position, and no hint that UP leads anywhere. Thirteen
+rounds against a live model never proposed the one action a five-line
+probe found. *That is the next thing to fix, and it is a prompt/feedback
+problem, not a rules problem.*
+
+** The test that should have existed first
+
+=test_one_action_beats_the_parent_from_the_hearthrock_save= (slow) seals
+both the lifted parent and the one-action script through the REAL =seal=
+path and asserts 20 → 1020. Dropping =CLASSIC_CRITICAL_PATH= from
+=CRITICAL_PATHS= fails it with =AssertionError: 20= *in 3.78 seconds* —
+what four live-model runs took roughly fifteen minutes to merely hint
+at. An integration test against a real fixture would have caught all
+three shaping defects immediately.
+
+Its own first draft was wrong in an instructive way: it used
+=ActionScript(actions=())= as the idle baseline, which runs ZERO steps,
+observes nothing, and returns =max_progress = 0= — indistinguishable
+from a dead gradient. =optimize()= builds round 0 with =lift(...)=, and
+so must this. The comment in the test now says so.
+
+** A control that stopped controlling, twice, in one sitting
+
+=test_a_map_on_no_critical_path_scores_only_the_party= first used
+=classic_route_1.tmx=, which became on-path when routes were added, then
+=classic_gym_granite.tmx=, which became on-path when gyms were added.
+Both times it failed loudly, which is the only reason it was noticed. It
+now ASSERTS its premise — that its chosen map is on no path — so it
+cannot silently become vacuous a third time.
+
+*Gate:* =make check= =EXIT=0=, 472 passed / 4 skipped / 11 warnings in
+308.08s; slow 5 passed; ruff + =lint-patched= + mypy (83 files) clean.
+468 → 472 (+4). A first attempt failed =EXIT=2= on =Action= not being
+explicitly re-exported by =tuxghost.optimize.schedule= — *the third time
+this session that mypy was run before the last edit rather than after.*
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.
