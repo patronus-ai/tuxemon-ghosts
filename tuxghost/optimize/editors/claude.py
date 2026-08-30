@@ -88,8 +88,18 @@ held. Buttons: """ + _BUTTON_LEGEND + """.
 You never see the screen, but you are not blind: you see the action list,
 the map and tile the run ended on, and a checkpoint trail of the map,
 tile and facing along the way. Use them -- they are your only way to tell
-where a button actually took you. Propose
-EDITS to the action list; the trace is then re-run and scored for you.
+where a button actually took you.
+
+CROSSING INTO A NEW MAP ENDS THE MOVE THAT CARRIED YOU THERE. The button
+that walked you through a doorway stops working the moment the map
+changes, and holding it longer does nothing -- you will stand on the
+entry tile until a LATER action presses again. Expect one tile per action
+just after a transition, so crossing a room takes many short actions
+rather than one long hold. A checkpoint trail that repeats the same tile
+is what this looks like.
+
+Propose EDITS to the action list; the trace is then re-run and scored for
+you.
 
 Reply with exactly one fenced json block:
 

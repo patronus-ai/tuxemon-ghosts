@@ -497,3 +497,31 @@ def test_the_token_cap_leaves_room_for_a_grown_script() -> None:
     # reasoning; 13 actions truncated at 4096, so the floor must clear it
     # by a wide margin, not by one action.
     assert EDITOR_MAX_TOKENS >= 4 * 4096
+
+
+def test_the_system_prompt_warns_about_the_map_transition_freeze() -> None:
+    """The single mechanic that trapped all seven live runs.
+
+    Entering a map with a button still held leaves the player frozen on
+    the entry tile; only a LATER action moves them. The gym door in
+    `hearthrock_city.save` is one tile above the spawn, so `hold UP` --
+    the cheapest move available -- is exactly the move that walks in and
+    freezes. Every run found it, then spent its remaining rounds pressing
+    A at a leader thirteen tiles away.
+
+    The editor cannot discover this from anything it is shown: the
+    checkpoint trail reports a repeated tile without saying why. It is a
+    fact about the engine, so the prompt has to carry it, the same way it
+    already carries "one tile of walking takes 16 steps".
+
+    Asserts the FACTS are stated, not any particular wording, so the
+    sentence can be reworded without breaking the test.
+    """
+    from tuxghost.optimize.editors.claude import SYSTEM
+
+    lowered = SYSTEM.lower()
+    assert "new map" in lowered
+    # the mechanic itself: holding longer does not help
+    assert "holding it longer does nothing" in lowered
+    # and the consequence the editor has to act on
+    assert "one tile per action" in lowered
