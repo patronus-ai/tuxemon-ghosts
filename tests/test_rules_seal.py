@@ -1,6 +1,7 @@
 """tests/test_rules_seal.py -- seal's per-step rules observer."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -507,9 +508,16 @@ def test_walking_toward_the_goal_scores_WORSE_than_stopping_at_the_door() -> Non
     winning the battle would outrank it, and the battle cannot be reached
     without first paying those thirteen tiles.
 
-    This test states the trap as an assertion so a future objective can
-    be measured against it. It is EXPECTED TO FAIL once the shaping is
-    fixed -- that is the point of it.
+    FIXED. `RulesObjective` now applies `-steps` only once the goal is
+    reached, so the approach TIES rather than losing, and `optimize`
+    adopts a tie while the goal is unreached, so the script can grow
+    across rounds. Measured after the fix, with an editor appending one
+    UP action per round: the script reaches (10,6), the leader's own
+    tile, by round 6. Before, it never left one action.
+
+    This test was written to fail at exactly this moment and has been
+    rewritten to assert the corrected behaviour -- the trap it described
+    is in `docs/STATUS.org`, not here.
     """
     from tuxemon.platform.const import buttons
 
@@ -541,7 +549,94 @@ def test_walking_toward_the_goal_scores_WORSE_than_stopping_at_the_door() -> Non
     at_the_door = score(up)                 # steps inside, stops
     toward_leader = score(*([up] * 14))     # walks the corridor
 
-    # Identical progress: the whole gym is one rank.
+    # Identical progress: the whole gym is one rank. That much was never
+    # the defect and has not changed.
     assert at_the_door[1] == toward_leader[1] == 1020
-    # And the approach is scored WORSE, purely for its length.
-    assert toward_leader < at_the_door, (toward_leader, at_the_door)
+
+    # The approach is no longer scored WORSE for its length. Both step
+    # terms are a flat 0.0 because neither candidate reached the goal.
+    assert at_the_door[2] == toward_leader[2] == 0.0
+    assert toward_leader == at_the_door, (toward_leader, at_the_door)
+
+    # And the penalty still exists where it belongs. A candidate that HAD
+    # reached the goal would carry a real `-steps`; this asserts the
+    # branch is on `goal_step` and not simply deleted.
+    from dataclasses import replace
+
+    reached = replace(
+        seal(
+            ActionScript(lead_in=0, actions=(up,)),
+            parent,
+            checkpoint=64,
+            model=None,
+            rules=TuxemonFirstBattleRules(),
+        ),
+        goal_step=42,
+    )
+    assert tuple(objective.score(reached))[2] < 0.0
+
+
+@pytest.mark.slow
+def test_the_script_can_grow_toward_the_goal() -> None:
+    """The other half of the `-steps` fix, and the half that does the work.
+
+    Neutralising `-steps` before the goal stops the objective PUNISHING
+    an approach to it, but strict `>` acceptance then discards the
+    approach anyway for merely tying -- measured: an editor appending one
+    UP action per round proposed against a ONE-action script eight times
+    running, every longer candidate tying at `(0.0, 1020.0, 0.0)`. The
+    script could not grow, the thirteen tiles to the gym leader could
+    never be walked, and the goal that would break the tie was
+    unreachable.
+
+    `optimize` now adopts a tie while `goal_step` is None. With that, an
+    editor that only knows how to append UP walks the corridor and stands
+    on (10,6) -- the leader's own tile, where `start_battle` fires.
+
+    Pinned against the `explores` branch: restore strict `>` and the
+    script stays at one action and the walk never happens.
+    """
+    from tuxemon.platform.const import buttons
+
+    from tuxghost.agent.types import Action
+    from tuxghost.optimize.edits import Edit, Insert
+    from tuxghost.optimize.objective import RulesObjective
+    from tuxghost.optimize.runner import optimize
+    from tuxghost.optimize.schedule import ActionScript
+    from tuxghost.rules import TuxemonFirstBattleRules
+
+    class _WalkUp:
+        def propose(
+            self,
+            script: ActionScript,
+            candidate: CandidateResult,
+            score: tuple[float, ...],
+        ) -> Sequence[Edit]:
+            return (
+                Insert(
+                    len(script.actions),
+                    Action(button=buttons.UP, hold=40, settle=20),
+                ),
+            )
+
+    parent = read(
+        Path(__file__).parent / "golden" / "hearthrock_idle_600.tuxghost"
+    )
+    result = optimize(
+        parent,
+        _WalkUp(),
+        RulesObjective(),
+        rounds=10,
+        patience=10,
+        max_rejections=10,
+        max_cost=20_000,
+        checkpoint=1000,
+        rules=TuxemonFirstBattleRules(),
+    )
+
+    # The script GREW -- one action per round, all of them ties.
+    assert len(result.best_script.actions) >= 8, result.best_script
+    # ...and the walk actually arrived. (10,6) is the leader's tile and
+    # the `start_battle` trigger; the entry tile is (10,19).
+    assert result.best.final_state.get("map") == "classic_gym_granite.tmx"
+    assert list(result.best.final_state.get("tile_pos") or []) == [10, 6]

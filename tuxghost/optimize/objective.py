@@ -105,7 +105,24 @@ class RulesObjective:
       * a goal-reaching candidate beats any non-goal candidate;
       * among non-goal candidates, more progress wins -- this is what
         gives the search a gradient before the goal is reachable at all;
-      * among goal-reaching candidates, fewer steps wins.
+      * among goal-reaching candidates, fewer steps wins -- and ONLY
+        among those. Before the goal is reached the step term is a flat
+        0.0.
+
+    That last clause is the fix for a measured defect, not a nicety.
+    `-steps` used to apply unconditionally, and the docstring above has
+    always claimed otherwise. The consequence: every tile inside
+    `classic_gym_granite` is one rank of the critical path, so walking
+    its thirteen-tile corridor toward the leader left `max_progress`
+    unchanged at 1020 and `-steps` strictly worse. The objective
+    therefore preferred the candidate that stepped through the door and
+    STOPPED, and `run13` shows it plainly: rounds 6 through 19, fourteen
+    consecutive candidates all scoring 1020, all rejected for length,
+    while the model walked deeper each time. The only route to the goal
+    was a region of pure cost, and the score forbade crossing it.
+
+    Shortening pressure belongs on a run that has already WON, which is
+    what the docstring said all along.
 
     A dead candidate scores (-1.0, ...), below every live one.
 
@@ -126,4 +143,15 @@ class RulesObjective:
             first = 0.0
         else:
             first = 1.0
-        return (first, float(candidate.max_progress), -float(candidate.steps))
+        # Flat 0.0 until the goal is reached: see the class docstring.
+        # Written against `goal_step` rather than `first` so a DEAD
+        # candidate is also spared the penalty -- it already loses on
+        # term 0 against everything alive, and letting length break ties
+        # among corpses would rank one failure above another for a
+        # reason nothing here cares about.
+        steps = (
+            0.0
+            if candidate.goal_step is None
+            else -float(candidate.steps)
+        )
+        return (first, float(candidate.max_progress), steps)

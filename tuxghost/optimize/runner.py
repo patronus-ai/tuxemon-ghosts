@@ -317,7 +317,31 @@ def optimize(
         entry.steps = candidate.steps
         entry.digest = candidate.trace.header.final_digest
 
-        if score > best_score:
+        improved = score > best_score
+        # A TIE is ADOPTED while the goal is unreached, and this is the
+        # other half of `RulesObjective`'s `-steps` fix rather than a
+        # separate idea. Neutralising `-steps` before the goal stops the
+        # objective PUNISHING an approach to it, but strict `>` then
+        # rejects the approach anyway for merely tying -- measured: an
+        # editor appending one UP action per round against
+        # `hearthrock_idle_600` proposes on a 1-action script eight
+        # times running, because every 2-action candidate ties at
+        # `(0.0, 1020.0, 0.0)` and never displaces it. The script cannot
+        # grow, so the thirteen tiles to the gym leader can never be
+        # walked, so the goal that would finally break the tie is
+        # unreachable.
+        #
+        # Scoped tightly: only for `RulesObjective`, and only while
+        # `goal_step` is None. `ReachTile` scores `-steps`
+        # unconditionally and is untouched. Once the goal IS reached,
+        # `-steps` applies again and strict `>` resumes, so shortening a
+        # winning run still requires a real improvement.
+        explores = (
+            score == best_score
+            and isinstance(objective, RulesObjective)
+            and candidate.goal_step is None
+        )
+        if improved or explores:
             best, best_score, best_script, best_round = (
                 candidate,
                 score,
@@ -325,8 +349,12 @@ def optimize(
                 index,
             )
             entry.accepted = True
+        if improved:
             stale = 0
         else:
+            # A tie is adopted but is NOT progress: it still counts
+            # toward patience, so an exploring run terminates on the same
+            # bound as any other rather than wandering for `rounds`.
             stale += 1
             if stale >= patience:
                 stop_reason = "patience exhausted"

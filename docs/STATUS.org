@@ -2890,6 +2890,101 @@ The second looks right to me and is nearly as small as the first, but
 this is a decision about what the benchmark rewards, so it is the
 human's.
 
+* Option 2 implemented — and it needed a second half to work at all
+
+The human chose "apply =-steps= only once =goal_state= is reached" from
+the three options. Implemented, plus one companion change that was NOT
+in the option as offered, because option 2 alone is *inert*.
+
+** Half one: =RulesObjective= stops punishing the approach
+
+=score= now returns a flat =0.0= for the step term while =goal_step= is
+None, and =-steps= only once the goal is reached. The class docstring has
+claimed exactly this since it was written ("among goal-reaching
+candidates, fewer steps wins"); the code applied =-steps= to everything.
+*The intent was already right and the implementation never matched it.*
+
+Written against =goal_step= rather than the score's first term so a DEAD
+candidate is also spared: it already loses on term 0 to everything alive,
+and ranking one corpse above another by length answers a question nobody
+asked.
+
+** Half two: =optimize= adopts a TIE while the goal is unreached
+
+Measured immediately after half one, with an editor appending one UP
+action per round:
+
+: ROUND proposing on a 0-action script, score=(0.0,   20.0, 0.0)
+: ROUND proposing on a 1-action script, score=(0.0, 1020.0, 0.0)
+: ROUND proposing on a 1-action script, score=(0.0, 1020.0, 0.0)
+: ... eight rounds, never past ONE action ...
+: RESULT best_round=1 best actions=1
+
+Neutralising =-steps= stops the objective PUNISHING an approach, but
+strict =>= then discards it for merely TYING. The script cannot grow, so
+the thirteen tiles to the leader are never walked, so the goal that would
+break the tie stays unreachable. *Option 2 as offered would have shipped
+inert*, and that is worth recording: the option was mine to describe and
+I described it without checking the acceptance rule.
+
+=optimize= now adopts a tie when the objective is a =RulesObjective= and
+=goal_step= is None. Scoped deliberately: =ReachTile= scores =-steps=
+unconditionally and keeps strict =>=. A tie still counts toward
+=patience=, so an exploring run terminates on the same bound as any
+other.
+
+** After both halves, the walk happens
+
+Same appending editor, after the fix:
+
+| round | tile |
+|---+---|
+| 1 | (10,19) — the entry, where nine runs stopped |
+| 2 | (10,18) |
+| 3 | (10,15) |
+| 4 | (10,12) |
+| 5 | (10,9) |
+| 6 | *(10,6)* — the leader's tile, where =start_battle= fires |
+
+** A vacuous test, caught by its own demonstration
+
+The first runner test for half two asserted that a NON-=RulesObjective=
+run does not grow. Reverting the =explores= branch left it *passing* —
+because that case does not grow either way. It pinned the scoping and
+nothing else, while being named for the adoption.
+
+Renamed to =test_tie_adoption_is_scoped_to_RulesObjective=, and the
+adoption is now pinned by
+=test_the_script_can_grow_toward_the_goal= (slow), which needs a real
+=goal_step= and so runs a real seal. Reverting the branch fails it.
+That makes seven vacuous tests this project has caught by demonstrating
+them rather than trusting them.
+
+** Still not a win, and a new engine defect
+
+=goal_step= remains None. The battle DOES begin — the engine logs
+=add_monster= for the gym leader — but it also logs, repeatedly:
+
+: Error in event listener for 'monster_added' (_on_monster_added):
+: Missing layout key 'monster_box_home' for NPC Gym Leader Granite
+
+An upstream defect in the vendored tree, unrelated to anything this
+project changed, and a plausible reason a completed battle is never
+recorded through =record_battle=. NOT investigated further. It is the
+next thread, and it is an engine question rather than a search one.
+
+*Gate:* =make check= =EXIT=0=, 485 passed / 4 skipped / 11 warnings in
+319.62s; slow 9 passed; ruff + =lint-patched= + mypy (83 files) clean.
+Load ~4.1.
+
+*Demonstrations:* =-steps= made unconditional again → =assert -60.0 ==
+-840.0=; strict => restored → the growth test fails on a one-action
+script. =objective.py= and =runner.py= byte-identical after each restore.
+
+*Untested against a live model.* The nine-run baseline all stalled at
+1020 with zero battles; whether a real editor now walks the corridor is
+unmeasured.
+
 * Next subsystem
 
 *S5* (finish lines / rewards) follows S4.

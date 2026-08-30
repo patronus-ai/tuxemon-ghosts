@@ -651,3 +651,65 @@ def test_checkpoint_and_model_reach_seal() -> None:
         16, 32, 48, 64, 80, 96, 112, 128, 144, 160,
     ]
     assert result.best.trace.provenance.model == "a-model-1"
+
+
+def test_tie_adoption_is_scoped_to_RulesObjective() -> None:
+    """Without this the `-steps` fix is INERT, which was measured.
+
+    Neutralising `-steps` before the goal stops the objective punishing
+    an approach to it, but strict `>` then discards the approach anyway
+    for merely tying. Measured before this change: an editor appending
+    one UP action per round proposed against a ONE-action script eight
+    times running, because every longer candidate tied at
+    `(0.0, 1020.0, 0.0)` and never displaced it. The script could not
+    grow, so the thirteen tiles to the gym leader could never be walked,
+    so the goal that would break the tie was unreachable.
+
+    THIS TEST ONLY PINS THE SCOPING, and is named for that after an
+    earlier version claimed to pin the adoption itself and did not:
+    reverting the `explores` branch left it PASSING, because a
+    non-`RulesObjective` run does not grow either way. The adoption is
+    pinned by
+    `tests/test_rules_seal.py::test_the_script_can_grow_toward_the_goal`,
+    which needs a real `goal_step` and so must run a real seal.
+    """
+    class _Appender:
+        """Appends an action every round. Every candidate ties."""
+
+        def propose(
+            self,
+            script: ActionScript,
+            candidate: CandidateResult,
+            score: tuple[float, ...],
+        ) -> Sequence[Edit]:
+            return (Insert(len(script.actions), Action(1, 4, 4)),)
+
+    seen: list[int] = []
+
+    class _TieObjective:
+        """Every candidate scores identically -- the situation inside a
+        single map rank, reduced to its essentials."""
+
+        TERMS = ("goal_state", "max_progress", "-steps")
+
+        def score(self, candidate: CandidateResult) -> tuple[float, ...]:
+            seen.append(len(seen))
+            return (0.0, 1020.0, 0.0)
+
+    parent = _parent()
+    base = len(lift(parent.inputs, parent.header.step_count).actions)
+    result = optimize(
+        parent,
+        _Appender(),
+        _TieObjective(),
+        rounds=6,
+        patience=6,
+        max_rejections=6,
+        max_cost=100_000,
+    )
+    # NOT a `RulesObjective`, so ties are not adopted and the script
+    # never grows past round 0's lifted parent. This pins that the new
+    # branch is SCOPED -- `ReachTile` runs, which score `-steps`
+    # unconditionally, keep their strict `>` acceptance untouched.
+    assert len(result.best_script.actions) == base, result.best_script
+    assert result.best_round == 0, result.best_round
