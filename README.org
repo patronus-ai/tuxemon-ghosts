@@ -1,0 +1,122 @@
+#+TITLE: tuxemon-ghosts
+#+OPTIONS: toc:nil
+
+[[https://github.com/Tuxemon/Tuxemon][Tuxemon]] in a browser tab. Pyodide runs the real Python engine — the same
+one the native test suite runs — and you play it with your arrow keys.
+
+=docs/STATUS.org= is the authority on what is actually true of the tree
+right now, measured; =CLAUDE.md= is the working agreement. Where this
+file and =docs/STATUS.org= disagree, =docs/STATUS.org= wins and this file
+is stale.
+
+* Running it
+
+#+begin_src bash
+make serve
+#+end_src
+
+Then open http://localhost:8777 and click *Click to start*.
+
+=make serve= builds first, so you never serve a stale bundle. Port 8777
+rather than 8000 on purpose: another project on this machine was already
+serving a different site on 8000, and browsing there made this build look
+broken. If something already holds 8777 the target refuses loudly rather
+than showing you somebody else's pages — use =make serve PORT=9001=.
+
+=make web= alone writes the bundle to =build/web/= without serving it.
+That directory is git-ignored and rebuildable; it is not something anyone
+should commit.
+
+A server is *mandatory*. Pyodide refuses to run from a =file://= URL, so
+double-clicking =build/web/index.html= will not work.
+
+* YOU WILL GET A GREY SCREEN. THIS IS NORMAL.
+
+The single most confusing thing about this build, so it is documented
+before anything else: *after you click start, there is a long stretch
+where the page looks broken and is not.*
+
+Here is the whole sequence, in order:
+
+| what you see | what is happening |
+|---+---|
+| Dark page, =Click to start= | Nothing yet. Pyodide will not auto-start. |
+| =loading pyodide...= | The runtime downloads from the jsDelivr CDN. |
+| =loading pygame...= | =micropip= fetches =pygame-ce=. |
+| =installing dependencies...= | Twelve wheels, one at a time. |
+| =unpacking game...= | ~33 MB of zips unpack into the virtual filesystem. |
+| *A BLANK GREY CANVAS* | *← this is the part that looks broken* |
+| The map draws, and you can move | Done. |
+
+*The grey canvas is the honest one to explain.* By that point the status
+line already says "arrow keys to move · Enter to interact" and the canvas
+is visible and focused — so the page is telling you it is ready while
+showing you nothing. It is not ready. The canvas is unhidden *before*
+Python's =boot()= runs, and =boot()= is what initialises pygame, loads
+the save, and builds the world. Nothing is painted onto that canvas until
+the first frame of the game loop blits to it, which is after all of that
+finishes.
+
+So: an empty grey rectangle means the map is still loading. Wait.
+
+*How long is "wait"?* The page's own text says Pyodide takes about seven
+seconds, and that is about right for the *first* status line only. Total
+time from click to a drawn map was measured at *over a minute*
+(=docs/STATUS.org=). The split between the unpack and the grey-canvas
+=boot()= specifically has not been measured separately — if you want a
+number for the grey phase alone, measure it, do not trust this paragraph.
+Reloads are faster than the first load, because the browser caches the
+CDN wheels and the zips.
+
+If it is genuinely broken you will know: the status line turns into
+=failed: ...= with the exception, and the canvas never appears at all.
+
+* Controls
+
+Arrow keys move. Enter interacts. Click the canvas first if keys do not
+register — Emscripten's SDL delivers DOM key events straight into
+=pygame.event=, so the canvas must hold focus. There is no input-handling
+code anywhere in this build; that is why.
+
+The readout under the canvas is *steps/sec of the game loop itself*, not
+the browser's frame rate. It reads ~60 on a healthy build and drops to 0
+the moment the Python loop stalls. An earlier version counted
+=requestAnimationFrame= instead, which would have kept reporting a
+healthy 60 on a completely frozen build.
+
+* What the browser build does NOT do
+
+Deliberate scope, not missing work:
+
+- *No ghost.* The page boots plain play. =tuxghost.web.boot= still takes
+  a =ghost: Path | None=, every ghost path still exists and is still
+  tested, and passing one turns it back on — see =docs/STATUS.org=, "And
+  then the human turned the ghost OFF". Restoring it in the shipped page
+  is two lines, =web/index.html= and =scripts/build_web.py=.
+- *Play only.* The browser writes nothing to disk.
+- *One fixed scenario*: =paper_town.save=.
+- *Audio is stubbed to zero bytes* — 143 music files ship empty so 147 MB
+  of audio need not download. Whether *playing* one raises is untested.
+- *Version gap*: Pyodide ships =pygame-ce= 2.5.6.dev2 against the 2.5.7
+  pinned natively.
+
+* Working on it
+
+#+begin_src bash
+make patch        # apply patches/*.patch to the vendored tuxemon/ clone
+make check-fast   # lint, lint-patched, mypy --strict, fast tests
+make check        # the above plus the slow suite
+#+end_src
+
+=tuxemon/= is a vendored clone and is *git-ignored*. Every engine change
+lives as a patch file under =patches/= — never edit =tuxemon/= directly,
+because =make unpatch= destroys it without recovery and the patch files
+are the sole durable record. A fresh clone needs =make patch= before
+anything runs.
+
+Everything except the browser build must run with =SDL_VIDEODRIVER=dummy=
+and =SDL_AUDIODRIVER=dummy=. =tuxghost play= and =make serve= are the
+only consumers that get a real window.
+
+Read =CLAUDE.md= before changing anything, and =docs/STATUS.org= before
+believing anything.
