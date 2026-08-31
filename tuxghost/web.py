@@ -1,5 +1,10 @@
-"""The browser entry point: a windowed session with a ghost, advanced one
-frame at a time so the browser stays responsive.
+"""The browser entry point: a windowed session -- optionally with a ghost
+-- advanced one frame at a time so the browser stays responsive.
+
+THE SHIPPED PAGE PASSES NO GHOST. `boot`/`main` still take one and every
+ghost path here is still exercised by `tests/test_web.py`; the page just
+does not use it, because the ghost as built reads as "a random ghost"
+rather than as another you. See `boot`'s docstring and docs/STATUS.org.
 
 `step_once` is synchronous and runs natively under `make check`; only
 `main`'s `await` is browser-only. That split is the whole reason this
@@ -32,7 +37,10 @@ BOOT ORDER is `tuxghost.play`'s, and each step of it was paid for:
   2. `build_track(..., context=ctx)` -- the context argument is REQUIRED.
      Without it the ghost's own boot calls `pg.display.set_mode()` a
      second time and invalidates every already-converted surface. That
-     cost a whole session; see commit 8840756.
+     cost a whole session; see commit 8840756. Skipped entirely when
+     `boot` is given no ghost, which is the SHIPPED page's case; the
+     order below is unaffected because a step that never runs cannot
+     run late.
   3. Seed, pin the clock, THEN boot the live session -- `boot_from_save`
      resets the `local_session` singleton, so the track must already
      exist (play.py's "Ordering note 1").
@@ -88,8 +96,11 @@ class WebSession:
 
     client: Any
     session: Any
-    npc: Any
-    track: GhostTrack
+    #: `None` on a ghostless session -- see `boot`'s `ghost` argument.
+    #: `npc` and `track` are set and cleared together; `step_once` reads
+    #: `npc` to decide whether there is a ghost to advance at all.
+    npc: Any | None
+    track: GhostTrack | None
     frames: Any
     display: Any
     step: int = 0
@@ -97,10 +108,25 @@ class WebSession:
 
 
 def boot(
-    save: Path, ghost: Path, *, seed: int, clock_epoch: int
+    save: Path,
+    ghost: Path | None = None,
+    *,
+    seed: int,
+    clock_epoch: int,
 ) -> WebSession:
     """Open a window, build the ghost's track, boot the save, install the
     ghost. See the module docstring for why this order is not negotiable.
+
+    `ghost` is OPTIONAL. Passing `None` (the default) boots the same
+    session with no ghost at all: no track is built, `install_ghost` is
+    never called, and `npc`/`track` come back `None`. That is what the
+    shipped page does -- the first human to see the ghost asked "why is
+    there a random ghost there?", and until it reads as a ghost rather
+    than a second copy of you, plain play is the honest default (see
+    docs/STATUS.org, "The two human checks").
+
+    Not a deletion: every ghost path here still works and is still
+    tested. Hand this a trace and the ghost comes back.
     """
     try:
         import ssl  # noqa: F401
@@ -119,7 +145,12 @@ def boot(
     from tuxghost.determinism import pin_clock, seed_all
     from tuxghost.observe import FrameRenderer
 
-    track = build_track(read(ghost), context=context)
+    # Still BEFORE `boot_from_save`, exactly as the module docstring's
+    # ordering note 1 requires -- skipped entirely when there is no
+    # ghost, which cannot disturb an order it never participates in.
+    track = (
+        None if ghost is None else build_track(read(ghost), context=context)
+    )
 
     seed_all(seed)
     pin_clock(clock_epoch)
@@ -127,7 +158,7 @@ def boot(
     _client, session = boot_from_save(
         save_data, seed=seed, clock_epoch=clock_epoch, context=context
     )
-    npc = install_ghost(session, track)
+    npc = None if track is None else install_ghost(session, track)
     return WebSession(
         client=session.client,
         session=session,
@@ -152,28 +183,36 @@ def step_once(state: WebSession, elapsed: float) -> int:
     for _ in range(steps):
         run_steps(state.client, 1)
         state.step += 1
-        advance_ghost(
-            state.client,
-            state.npc,
-            state.track,
-            state.step,
-            state.client.get_map_name(),
-            # The browser boots for over a minute while the ghost's walk
-            # lasts seconds, so a viewer reliably arrives after it has
-            # finished. Lingering was measured to read as "a random
-            # ghost" to the first human who saw it; looping keeps the
-            # ghost legible as something that MOVES.
-            loop=True,
-        )
+        # `npc is None` is a ghostless session (`boot(save)` with no
+        # trace), not an error: the player still moves, the frame is
+        # still drawn, there is simply nothing to advance.
+        if state.npc is not None and state.track is not None:
+            advance_ghost(
+                state.client,
+                state.npc,
+                state.track,
+                state.step,
+                state.client.get_map_name(),
+                # The browser boots for over a minute while the ghost's
+                # walk lasts seconds, so a viewer reliably arrives after
+                # it has finished. Lingering was measured to read as "a
+                # random ghost" to the first human who saw it; looping
+                # keeps the ghost legible as something that MOVES.
+                loop=True,
+            )
     state.display.blit(state.frames.surface(), (0, 0))
     pg.display.flip()
     return steps
 
 
 async def main(
-    save: Path, ghost: Path, *, seed: int, clock_epoch: int
+    save: Path,
+    ghost: Path | None = None,
+    *,
+    seed: int,
+    clock_epoch: int,
 ) -> None:
-    """The browser's entry point.
+    """The browser's entry point. `ghost` is optional -- see `boot`.
 
     `await asyncio.sleep(0)` is the ONLY browser-specific line in this
     module. Without it the loop never returns control at all and the

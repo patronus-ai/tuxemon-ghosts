@@ -117,7 +117,7 @@ def test_zip_python_arcnames_match_the_shims_sys_path(
 def test_zip_fixtures_arcnames_match_what_index_html_passes_to_main(
     tmp_path: Path,
 ) -> None:
-    """`web/index.html`'s `runPythonAsync` script passes two literal
+    """`web/index.html`'s `runPythonAsync` script passes its
     `Path(...)` arguments to `web.main` -- extracted here from the real
     page text, not re-typed, so this test cannot drift out of sync with
     the page on its own. `_zip_fixtures`'s arcnames must equal those
@@ -132,7 +132,11 @@ def test_zip_fixtures_arcnames_match_what_index_html_passes_to_main(
     literals = re.findall(
         r'Path\("([^"]+)"\)', INDEX_HTML_PATH.read_text()
     )
-    assert len(literals) == 2, literals
+    # ONE, not two: the page passes a save and no ghost. The count is
+    # asserted rather than left implicit so that adding a `Path(...)` to
+    # the page without packing the file it names fails HERE, natively,
+    # instead of as a `FileNotFoundError` in somebody's browser.
+    assert len(literals) == 1, literals
 
     module = _load_build_web()
     target = tmp_path / "fixtures.zip"

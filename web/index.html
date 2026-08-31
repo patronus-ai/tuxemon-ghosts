@@ -89,7 +89,6 @@ sys.path.insert(0, "/game"); os.chdir("/game")
 from pathlib import Path
 import tuxghost.web as web
 await web.main(Path("fixtures/paper_town.save"),
-               Path("fixtures/ghost.tuxghost"),
                seed=1234, clock_epoch=1787659200)
 `);
   } catch (e) { status("failed: " + e); throw e; }

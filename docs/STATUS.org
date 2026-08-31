@@ -2992,6 +2992,13 @@ human played it. The ghost is drawn, in the right place, and provably
 does not perturb the digest — and it FAILED to communicate anything to
 the first human who saw it. See "The two human checks" below.
 
+*AS OF 2026-08-31 THE SHIPPED PAGE HAS NO GHOST.* It is plain play. The
+ghost is off by DEFAULT, not removed: every ghost path still exists and
+is still tested, and one argument turns it back on. See "And then the
+human turned the ghost OFF" below. Everything between here and there
+describes the ghost as it was accepted, which is still what you get if
+you pass one.
+
 A local browser build: Pyodide runs the real engine, a human plays with
 their arrow keys, and a ghost — a previously recorded run replayed as a
 translucent NPC — walks beside them.
@@ -3153,6 +3160,49 @@ Both behaviours are pinned: removing the loop branch fails
 *Still unimplemented:* a marker or distinct sprite, so the ghost reads as
 A GHOST rather than a second you. That was the other half of the
 complaint and nothing here touches it.
+
+*** And then the human turned the ghost OFF, 2026-08-31
+
+Asked for, and done: =web/index.html= now calls =web.main= with a save
+and no trace at all. The shipped page is plain play.
+
+*This is a default change, not a deletion, and the distinction is the
+whole point.* =boot= and =main= still take a =ghost: Path | None=;
+=build_track=, =install_ghost= and =advance_ghost= are all still there,
+still reached, and still pinned by the same four ghost tests in
+=tests/test_web.py= that passed before this change. Hand =boot= a trace
+and the ghost is back, looping, exactly as it was. What changed is which
+behaviour a person gets when nobody asks for one.
+
+Why that is the honest default *for now*: the ghost's own acceptance
+above records a human, on first sight, asking "why is there a random
+ghost there?" Two of the three identified fixes shipped and the third —
+a marker or distinct sprite — did not. Showing a figure nobody can
+interpret is worse than showing none, and leaving it on by default while
+the STATUS entry says it is illegible would be the same kind of
+optimistic green mark S4 already cost a session for.
+
+*What it costs, stated rather than hidden:* the ghost is now the least
+exercised part of this subsystem at the only place it was ever seen
+running — a real browser. The native tests do not notice, which is
+exactly the shape of gap this project keeps finding.
+
+Three defects, each demonstrated failing before the fix was trusted:
+- =step_once= without the =npc is None= guard →
+  =AttributeError: 'NoneType' object has no attribute 'at'=.
+- =boot= with a default ghost path restored →
+  =AssertionError: <tuxemon.entity.npc.NPC object at 0x11013af60> is None=.
+- =web/index.html= naming a fixture =_zip_fixtures= no longer packs →
+  =AssertionError: assert 2 == 1=, in =tests/test_build_web.py=.
+
+That last one is why the ghost trace is no longer packed into
+=fixtures.zip= at all: the page's =Path(...)= literals and the zip's
+arcnames are pinned EQUAL, so a fixture the page never names is not
+harmless dead weight, it is a failing test. Putting the ghost back is
+two lines — =web/index.html= and =scripts/build_web.py= — and nothing
+under =tuxghost/=.
+
+=make check=: 504 passed fast, 9 slow, ruff + lint-patched + mypy clean.
 
 ** What is NOT covered — stated plainly
 

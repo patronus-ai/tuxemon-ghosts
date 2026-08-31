@@ -12,6 +12,14 @@ does, disable audio in the browser build (see the spec).
 Filter on the audio DIRECTORY, never on `"music" in parts`: the db's own
 records live under `mods/tuxemon/db/music/`, and an earlier attempt
 zeroed those by mistake and failed loudly.
+
+NO GHOST TRACE IS PACKED. The page calls `web.main` without one (see
+`tuxghost/web.py`'s `boot`), and `_zip_fixtures`'s arcnames are pinned
+EQUAL to the `Path(...)` literals the page passes -- so shipping a
+fixture the page never names would not be harmless dead weight, it
+would fail `tests/test_build_web.py`. Putting the ghost back is two
+lines, here and in `web/index.html`, and neither file is the one that
+would have to change in `tuxghost/`: the ghost code is all still there.
 """
 
 from __future__ import annotations
@@ -55,22 +63,6 @@ def _zip_fixtures(target: Path) -> None:
         z.write(
             ROOT / "tests" / "fixtures" / "paper_town.save",
             "fixtures/paper_town.save",
-        )
-        z.write(
-            # `claude_town_1234`, not `scripted_town_1234`: 442 steps
-            # against 176, and it WANDERS -- (12,12) -> (14,12) -> ... ->
-            # (11,14) -- where the shorter fixture walks six tiles in a
-            # straight-ish line and stops. The first human to see the
-            # short one asked "why is there a random ghost there?"
-            #
-            # This does NOT fix the underlying problem, and pretending
-            # otherwise would be worse than leaving it: the ghost still
-            # stops moving around step 200 (~3.3s, the recorded run
-            # enters NPC dialogue there and stands still), while boot
-            # takes over a minute. A watcher still arrives after the
-            # motion. See docs/STATUS.org, "The two human checks".
-            ROOT / "tests" / "golden" / "claude_town_1234.tuxghost",
-            "fixtures/ghost.tuxghost",
         )
 
 

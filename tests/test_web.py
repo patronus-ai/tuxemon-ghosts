@@ -39,8 +39,10 @@ import pytest
 FIXTURES = Path(__file__).parent / "fixtures"
 GOLDEN = Path(__file__).parent / "golden"
 SAVE = FIXTURES / "paper_town.save"
-# The SHIPPED ghost -- keep this in step with `scripts/build_web.py`'s
-# `_zip_fixtures`, or these tests stop exercising what the page loads.
+# No longer shipped -- the page passes no ghost (see `tuxghost/web.py`).
+# Kept, and every ghost test below kept with it, because `boot`/`main`
+# still ACCEPT one: this is the trace that comes back if anybody turns
+# the ghost on again, so the path stays exercised rather than rotting.
 GHOST = GOLDEN / "claude_town_1234.tuxghost"
 SEED = 1234
 CLOCK_EPOCH = 1787659200
@@ -117,6 +119,70 @@ def test_the_ghost_does_not_perturb_the_digest() -> None:
     with_ghost = _booted()
     step_once_many(with_ghost, 60)
     a = digest_of(with_ghost.session)
+
+    seed_all(SEED)
+    pin_clock(CLOCK_EPOCH)
+    save_data = SaveData.model_validate(json.loads(SAVE.read_text()))
+    _c, plain = boot_from_save(
+        save_data, seed=SEED, clock_epoch=CLOCK_EPOCH
+    )
+    run_steps(plain.client, 60)
+    b = digest_of(plain)
+    assert a == b, (a, b)
+
+
+def _booted_without_a_ghost() -> Any:
+    """`boot` with no trace at all -- what `web/index.html` now does."""
+    from tuxghost.web import boot
+
+    return boot(SAVE, seed=SEED, clock_epoch=CLOCK_EPOCH)
+
+
+def test_boot_without_a_ghost_installs_no_ghost() -> None:
+    """The shipped page passes no trace, so nothing may be installed.
+
+    All three assertions, not just the first: `npc`/`track` coming back
+    `None` is what `step_once` branches on, while `GHOST_SLUG` being
+    absent from `npc_manager` is what a human actually sees. A defect
+    that installed the ghost but forgot to record it on the session
+    would satisfy either check alone.
+    """
+    from tuxghost.ghost.entity import GHOST_SLUG
+
+    state = _booted_without_a_ghost()
+    assert state.npc is None, state.npc
+    assert state.track is None, state.track
+    assert GHOST_SLUG not in state.client.npc_manager.npcs, sorted(
+        state.client.npc_manager.npcs
+    )
+
+
+def test_step_once_without_a_ghost_matches_a_plain_session() -> None:
+    """A ghostless boot must be a REAL session, not merely a
+    non-crashing one.
+
+    Compared against the same hand-built control
+    `test_the_ghost_does_not_perturb_the_digest` uses -- a session that
+    never went near `tuxghost.web` -- so this pins the whole ghostless
+    path (skipped `build_track`, skipped `install_ghost`, skipped
+    `advance_ghost`) as equivalent to plain play, rather than just
+    asserting that `step_once` returned a number. Sixty steps, so the
+    comparison is against a session that has actually run.
+    """
+    import json
+
+    from tuxemon.save_system.save_state import SaveData
+
+    from tuxghost.boot import boot_from_save
+    from tuxghost.determinism import pin_clock, seed_all
+    from tuxghost.digest import digest_of
+    from tuxghost.loop import run_steps
+
+    ghostless = _booted_without_a_ghost()
+    taken = step_once_many(ghostless, 60)
+    assert taken == 60, taken
+    assert ghostless.step == 60, ghostless.step
+    a = digest_of(ghostless.session)
 
     seed_all(SEED)
     pin_clock(CLOCK_EPOCH)
