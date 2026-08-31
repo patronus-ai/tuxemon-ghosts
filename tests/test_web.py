@@ -39,7 +39,9 @@ import pytest
 FIXTURES = Path(__file__).parent / "fixtures"
 GOLDEN = Path(__file__).parent / "golden"
 SAVE = FIXTURES / "paper_town.save"
-GHOST = GOLDEN / "scripted_town_1234.tuxghost"
+# The SHIPPED ghost -- keep this in step with `scripts/build_web.py`'s
+# `_zip_fixtures`, or these tests stop exercising what the page loads.
+GHOST = GOLDEN / "claude_town_1234.tuxghost"
 SEED = 1234
 CLOCK_EPOCH = 1787659200
 
@@ -57,7 +59,7 @@ def test_boot_installs_the_ghost_on_the_players_map() -> None:
     state = _booted()
     assert GHOST_SLUG in state.client.npc_manager.npcs
     assert state.client.get_map_name() == "spyder_paper_town.tmx"
-    assert len(state.track.frames) == 177
+    assert len(state.track.frames) == 443
 
 
 def test_step_once_walks_the_ghost_along_its_track() -> None:

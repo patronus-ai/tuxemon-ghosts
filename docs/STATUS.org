@@ -3104,11 +3104,27 @@ green mark here for a feature the human could not interpret would be the
 same mistake in a new place.
 
 *What would actually fix it, in the order likely to help most:* a longer,
-purposeful ghost trace (the 442-step =claude_town_1234= is already in the
-tree and triggers NPC dialogue); a visual marker or distinct sprite so it
-reads as A GHOST rather than a clone; and a start delay or replay loop so
-the walk happens while somebody is watching. None of these are
-implemented and none are scheduled.
+purposeful ghost trace; a visual marker or distinct sprite so it reads as
+A GHOST rather than a clone; and a start delay or replay loop so the walk
+happens while somebody is watching.
+
+*** The first of those is DONE, and it is not enough
+
+The shipped ghost is now =claude_town_1234= (442 steps) rather than
+=scripted_town_1234= (176). It wanders — (12,12) → (14,12) → … → (11,14)
+— where the old one walked a short, near-straight line.
+
+*It does not solve the problem, and saying so plainly matters more than
+the improvement.* Measured on the new trace: the ghost stops moving
+around *step 200*, roughly 3.3 seconds in, because the recorded run
+entered NPC dialogue there and stood still. Boot still takes over a
+minute. A human still arrives after the motion has ended and still finds
+a stationary figure.
+
+So this bought richer movement for whoever happens to be watching in the
+first few seconds, and nothing at all for anyone who is not. The
+remaining two fixes — a marker, and a delay or loop — are the ones that
+would actually change what a human sees, and neither is implemented.
 
 ** What is NOT covered — stated plainly
 
