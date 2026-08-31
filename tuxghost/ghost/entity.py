@@ -142,7 +142,13 @@ def show_ghost(client: Any, npc: Any) -> None:
 
 
 def advance_ghost(
-    client: Any, npc: Any, track: GhostTrack, step: int, player_map: str
+    client: Any,
+    npc: Any,
+    track: GhostTrack,
+    step: int,
+    player_map: str,
+    *,
+    loop: bool = False,
 ) -> None:
     """Place the ghost for `step`, or hide it when it cannot be placed
     honestly -- on a different map.
@@ -169,6 +175,28 @@ def advance_ghost(
     Still hidden, never teleported, on a DIFFERENT MAP: a ghost standing
     motionless on the wrong map is drawing a position the trace never had.
 
+    `loop` REPLAYS the track from the top instead of lingering, and it is
+    opt-in because the two behaviours say different things and the right
+    answer depends on when the watcher arrives.
+
+    Lingering is honest: the ghost walked its route once and stopped where
+    it stopped. Looping shows a run repeating that happened once — a
+    presentational liberty, the same one a racing game takes when a ghost
+    car reappears each lap.
+
+    It exists because lingering was measured to fail with a real human.
+    The browser build boots for over a minute while the ghost's whole walk
+    is a few seconds, so a viewer reliably arrives after the motion and
+    finds a stationary figure. Asked what they saw, the first person to
+    look said: "why is there a random ghost there?"
+
+    `tuxghost.play` still lingers, deliberately, because changing a
+    documented behaviour by side effect is how the reversal this function
+    already carries got expensive. A native window plausibly has the same
+    problem — its user also arrives after boot — and adopting `loop=True`
+    there should be a decision somebody makes on purpose, not one they
+    inherit from this parameter's default.
+
     Also drives ANIMATION STATE, not just position -- this is the part
     the brief's original sketch got wrong, per Task 1's probe 2
     (`docs/2026-08-27-ghost-probes.org`). Measured there: assigning
@@ -188,11 +216,16 @@ def advance_ghost(
     """
     frame = track.at(step)
     if frame is None and track.frames:
-        # Past the end: linger at the finish line rather than vanish.
-        # An EMPTY track still falls through to `hide_ghost` below --
-        # there is no final tile to stand on, and inventing one would be
-        # exactly the stale position this function refuses to draw.
-        frame = track.frames[-1]
+        if loop:
+            # Replay from the top. See the `loop` note in the docstring
+            # for why this is opt-in rather than the default.
+            frame = track.frames[step % len(track.frames)]
+        else:
+            # Past the end: linger at the finish line rather than vanish.
+            # An EMPTY track still falls through to `hide_ghost` below --
+            # there is no final tile to stand on, and inventing one would
+            # be exactly the stale position this function refuses to draw.
+            frame = track.frames[-1]
     if frame is None or frame.map_name != player_map:
         hide_ghost(client, npc)
         return

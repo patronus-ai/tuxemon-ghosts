@@ -3122,9 +3122,37 @@ minute. A human still arrives after the motion has ended and still finds
 a stationary figure.
 
 So this bought richer movement for whoever happens to be watching in the
-first few seconds, and nothing at all for anyone who is not. The
-remaining two fixes — a marker, and a delay or loop — are the ones that
-would actually change what a human sees, and neither is implemented.
+first few seconds, and nothing at all for anyone who is not.
+
+*** The loop is DONE, and this one should actually work
+
+=advance_ghost= gained =loop: bool = False=, and the browser passes
+=loop=True=. Past the end of its track the ghost now replays from the top
+instead of standing still, so it is moving whenever anybody looks —
+which is the first change here that addresses the actual complaint rather
+than an adjacent one.
+
+*OPT-IN, not the default, and deliberately so.* =tuxghost.play= still
+lingers. A native window plausibly has the same problem — its user also
+arrives after boot — but this function has already carried one reversal
+(hide → linger, S4's acceptance), and changing a documented behaviour by
+side effect is exactly how that one got expensive. Adopting =loop=True=
+for =play= should be a decision somebody makes on purpose.
+
+*What looping costs, stated rather than hidden:* lingering is honest —
+the ghost walked its route once and stopped where it stopped. Looping
+shows a run repeating that happened once. That is a presentational
+liberty, the same one a racing game takes when a ghost car reappears each
+lap, and it is a liberty rather than a fact.
+
+Both behaviours are pinned: removing the loop branch fails
+=test_loop_replays_the_track_instead_of_lingering= with
+=assert (16, 14) == (12, 12)=, and flipping the default fails
+=test_lingering_is_still_the_default= with =assert (12, 14) == (16, 14)=.
+
+*Still unimplemented:* a marker or distinct sprite, so the ghost reads as
+A GHOST rather than a second you. That was the other half of the
+complaint and nothing here touches it.
 
 ** What is NOT covered — stated plainly
 

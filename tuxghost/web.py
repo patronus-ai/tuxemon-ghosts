@@ -158,6 +158,12 @@ def step_once(state: WebSession, elapsed: float) -> int:
             state.track,
             state.step,
             state.client.get_map_name(),
+            # The browser boots for over a minute while the ghost's walk
+            # lasts seconds, so a viewer reliably arrives after it has
+            # finished. Lingering was measured to read as "a random
+            # ghost" to the first human who saw it; looping keeps the
+            # ghost legible as something that MOVES.
+            loop=True,
         )
     state.display.blit(state.frames.surface(), (0, 0))
     pg.display.flip()

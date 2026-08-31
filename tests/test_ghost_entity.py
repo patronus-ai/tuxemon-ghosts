@@ -492,3 +492,63 @@ def test_the_player_walks_through_the_ghost() -> None:
         return (int(session.player.tile_pos[0]), int(session.player.tile_pos[1]))
 
     assert end_tile(with_ghost=True) == end_tile(with_ghost=False) == (16, 14)
+
+
+def test_loop_replays_the_track_instead_of_lingering() -> None:
+    """`loop=True` is what the browser build uses, and it exists because
+    lingering was measured to fail with a real human.
+
+    The browser boots for over a minute while the ghost's whole walk
+    lasts seconds, so a viewer reliably arrives after the motion and
+    finds a stationary figure. The first person to see it asked "why is
+    there a random ghost there?" -- see docs/STATUS.org, "The two human
+    checks".
+
+    Pinned against the `loop` branch: with it removed the ghost stays on
+    its final tile forever and the assertion below fails.
+
+    `track` is built BEFORE `_session()` -- see the matching comment on
+    `test_install_refuses_when_the_reserved_slug_is_taken`.
+    """
+    from tuxghost.ghost.entity import advance_ghost
+
+    track = build_track(read(PARENT))
+    session = _session()
+    client = session.client
+    npc = install_ghost(session, track)
+    n = len(track.frames)
+
+    # One full track-length past the end lands back on frame 0.
+    advance_ghost(client, npc, track, n, "spyder_paper_town.tmx", loop=True)
+    assert GHOST_SLUG in client.npc_manager.npcs
+    assert (int(npc.tile_pos[0]), int(npc.tile_pos[1])) == track.frames[0].tile
+
+    # ...and it keeps moving rather than parking: a step partway into the
+    # second lap sits where that step sits on the first.
+    mid = n + 60
+    advance_ghost(client, npc, track, mid, "spyder_paper_town.tmx", loop=True)
+    expected = track.frames[mid % n].tile
+    assert (int(npc.tile_pos[0]), int(npc.tile_pos[1])) == expected
+    assert expected != track.frames[-1].tile, (
+        "this fixture's frame 60 coincides with its last frame, so the "
+        "assertion above cannot tell looping from lingering -- pick "
+        "another offset"
+    )
+
+
+def test_lingering_is_still_the_default() -> None:
+    """The control. `tuxghost.play` relies on the default, and changing a
+    documented behaviour by side effect is how this function's earlier
+    reversal got expensive.
+    """
+    from tuxghost.ghost.entity import advance_ghost
+
+    track = build_track(read(PARENT))
+    session = _session()
+    client = session.client
+    npc = install_ghost(session, track)
+
+    advance_ghost(
+        client, npc, track, len(track.frames) + 60, "spyder_paper_town.tmx"
+    )
+    assert (int(npc.tile_pos[0]), int(npc.tile_pos[1])) == track.frames[-1].tile
