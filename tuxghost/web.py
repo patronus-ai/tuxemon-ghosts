@@ -205,6 +205,47 @@ def step_once(state: WebSession, elapsed: float) -> int:
     return steps
 
 
+def first_battle_won(state: WebSession) -> bool:
+    """Return whether this session has recorded its first battle win."""
+    from tuxghost.rules import TuxemonFirstBattleRules
+
+    return TuxemonFirstBattleRules().at_goal(state.session)
+
+
+async def run(
+    state: WebSession,
+    *,
+    stop_on_first_win: bool = False,
+) -> float | None:
+    """Advance an already-booted browser session.
+
+    Keeping boot separate lets an embedding page draw the saved first frame,
+    announce that it is ready, and wait for a synchronized host start.  When
+    requested, the loop returns active elapsed seconds at the first battle
+    win; standalone play retains the original run-until-quit behavior.
+    """
+    import asyncio
+
+    global measured_rate
+
+    started = time.monotonic()
+    last = started
+    window_start = last
+    window_steps = 0
+    while state.client.is_running:
+        now = time.monotonic()
+        window_steps += step_once(state, now - last)
+        last = now
+        if stop_on_first_win and first_battle_won(state):
+            return now - started
+        if now - window_start >= RATE_WINDOW:
+            measured_rate = window_steps / (now - window_start)
+            window_start = now
+            window_steps = 0
+        await asyncio.sleep(0)
+    return None
+
+
 async def main(
     save: Path,
     ghost: Path | None = None,
@@ -237,20 +278,5 @@ async def main(
     variables and one `if`, no new control flow, no change to
     `step_once`'s own synchronous, natively-testable signature.
     """
-    import asyncio
-
-    global measured_rate
-
     state = boot(save, ghost, seed=seed, clock_epoch=clock_epoch)
-    last = time.monotonic()
-    window_start = last
-    window_steps = 0
-    while state.client.is_running:
-        now = time.monotonic()
-        window_steps += step_once(state, now - last)
-        last = now
-        if now - window_start >= RATE_WINDOW:
-            measured_rate = window_steps / (now - window_start)
-            window_start = now
-            window_steps = 0
-        await asyncio.sleep(0)
+    await run(state)

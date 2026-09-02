@@ -32,6 +32,7 @@ os.environ["SDL_AUDIODRIVER"] = "dummy"
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -398,6 +399,49 @@ def test_main_yields_between_frames() -> None:
 
     assert calls["yields"] == 3, calls
     assert calls["steps"] == 3, calls
+
+
+def test_run_stops_at_the_first_battle_win() -> None:
+    """The embed owns boot separately from play, then ends this benchmark
+    as soon as the first battle is won.  This pins that split without a
+    browser or a real battle: the rule probe becomes true after two frames.
+    """
+    import asyncio
+
+    from tuxghost import web
+
+    state: Any = SimpleNamespace(client=SimpleNamespace(is_running=True))
+    calls = {"steps": 0, "yields": 0}
+    times = iter([0.0, 0.1, 0.2])
+
+    def fake_step_once(_state: Any, _elapsed: float) -> int:
+        calls["steps"] += 1
+        return 1
+
+    def fake_goal(_state: Any) -> bool:
+        return calls["steps"] >= 2
+
+    async def fake_sleep(_delay: float) -> None:
+        calls["yields"] += 1
+
+    original_step = web.step_once
+    original_goal = web.first_battle_won
+    original_time = web.time  # type: ignore[attr-defined]
+    original_sleep = asyncio.sleep
+    web.step_once = fake_step_once  # type: ignore[assignment]
+    web.first_battle_won = fake_goal  # type: ignore[assignment]
+    web.time = SimpleNamespace(monotonic=lambda: next(times))  # type: ignore[attr-defined, assignment]
+    asyncio.sleep = fake_sleep  # type: ignore[assignment]
+    try:
+        elapsed = asyncio.run(web.run(state, stop_on_first_win=True))
+    finally:
+        web.step_once = original_step
+        web.first_battle_won = original_goal
+        web.time = original_time  # type: ignore[attr-defined]
+        asyncio.sleep = original_sleep
+
+    assert elapsed == pytest.approx(0.2)
+    assert calls == {"steps": 2, "yields": 1}
 
 
 def test_measured_rate_reflects_the_loops_own_throughput_and_drops_on_stall() -> (

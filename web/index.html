@@ -9,9 +9,12 @@
   #start { padding:.8rem 1.6rem; font:inherit; cursor:pointer }
   #status { font-family:ui-monospace, monospace; font-size:.8rem;
             color:#93a2a8 }
+  body.embed #shell { width:100vw; height:100vh }
+  body.embed #start, body.embed #status, body.embed #fps { display:none }
+  body.embed canvas { width:100%; height:100%; border:0; display:block }
 </style></head>
 <body>
-<div>
+<div id="shell">
   <button id="start">Click to start</button>
   <p id="status">Pyodide takes about 7 seconds to boot.</p>
   <p id="fps"></p>
@@ -24,6 +27,15 @@
 // Emscripten's SDL delivers DOM key events into pygame.event directly,
 // which is why there is no input code anywhere in this build.
 const status = (t) => document.getElementById("status").textContent = t;
+const embed = new URLSearchParams(location.search).get("embed") === "1";
+if (embed) document.body.classList.add("embed");
+const postToHost = (type, detail = {}) => {
+  if (!embed) return;
+  parent.postMessage({ source: "tuxemon-pyodide", type, ...detail }, location.origin);
+};
+let pyodide = null;
+let prepared = false;
+let running = false;
 
 // The manual acceptance requires a MEASURED, READABLE frame rate ("at
 // least 30fps sustained over 10 seconds of walking"). ROUND 1 of this
@@ -58,11 +70,11 @@ function startFpsPoller(pyodide) {
   }, 1000);
 }
 
-document.getElementById("start").onclick = async (ev) => {
-  ev.target.disabled = true;
+async function prepare() {
+  if (prepared) return;
   try {
     status("loading pyodide...");
-    const pyodide = await loadPyodide();
+    pyodide = await loadPyodide();
     status("loading pygame...");
     await pyodide.loadPackage(["micropip", "pygame-ce"]);
     const mp = pyodide.pyimport("micropip");
@@ -83,14 +95,59 @@ document.getElementById("start").onclick = async (ev) => {
     canvas.focus();
     status("arrow keys to move · Enter to interact");
     startFpsPoller(pyodide);
+    console.time("tuxemon-save-boot");
     await pyodide.runPythonAsync(`
 import sys, os
 sys.path.insert(0, "/game"); os.chdir("/game")
 from pathlib import Path
 import tuxghost.web as web
-await web.main(Path("fixtures/paper_town.save"),
-               seed=1234, clock_epoch=1787659200)
+_speedrun_state = web.boot(Path("fixtures/paper_town.save"),
+                           seed=1234, clock_epoch=1787659200)
+web.step_once(_speedrun_state, 0)
 `);
-  } catch (e) { status("failed: " + e); throw e; }
+    console.timeEnd("tuxemon-save-boot");
+    prepared = true;
+    postToHost("ready");
+  } catch (e) {
+    status("failed: " + e);
+    postToHost("failed", { reason: String(e) });
+    throw e;
+  }
+}
+
+async function startRun() {
+  if (!prepared || running) return;
+  running = true;
+  const canvas = document.getElementById("canvas");
+  canvas.focus();
+  postToHost("started");
+  try {
+    const elapsed = await pyodide.runPythonAsync(`
+await web.run(_speedrun_state, stop_on_first_win=True)
+`);
+    if (elapsed !== null && elapsed !== undefined) {
+      postToHost("completed", { elapsedMs: Number(elapsed) * 1000 });
+    } else {
+      postToHost("failed", { reason: "Tuxemon stopped before the first battle was won" });
+    }
+  } catch (e) {
+    postToHost("failed", { reason: String(e) });
+    throw e;
+  }
+}
+
+document.getElementById("start").onclick = async (ev) => {
+  ev.target.disabled = true;
+  await prepare();
+  await startRun();
 };
+
+window.addEventListener("message", (event) => {
+  if (!embed || event.source !== parent || event.origin !== location.origin) return;
+  if (event.data?.source === "speedrunbench-host" && event.data?.type === "start") {
+    void startRun();
+  }
+});
+
+if (embed) void prepare();
 </script></body></html>
