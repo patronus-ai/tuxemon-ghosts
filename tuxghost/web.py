@@ -169,6 +169,40 @@ def boot(
     )
 
 
+def boot_cold(*, seed: int, clock_epoch: int) -> WebSession:
+    """Start the browser from the same fresh-game state as agent runs."""
+    try:
+        import ssl  # noqa: F401
+    except ImportError:
+        sys.modules["ssl"] = types.ModuleType("ssl")
+
+    from tuxemon.prepare import pygame_init
+
+    context = pygame_init()
+
+    import tuxemon.graphics
+    import tuxemon.map.view  # noqa: F401
+
+    from tuxghost.boot import build_client
+    from tuxghost.determinism import seed_all
+    from tuxghost.observe import FrameRenderer
+
+    seed_all(seed)
+    client, session = build_client(
+        seed=seed,
+        clock_epoch=clock_epoch,
+        context=context,
+    )
+    return WebSession(
+        client=client,
+        session=session,
+        npc=None,
+        track=None,
+        frames=FrameRenderer(client, upscale=1),
+        display=context.screen,
+    )
+
+
 def step_once(state: WebSession, elapsed: float) -> int:
     """Advance by however many fixed steps `elapsed` owes, then draw.
 
@@ -205,24 +239,23 @@ def step_once(state: WebSession, elapsed: float) -> int:
     return steps
 
 
-def first_battle_won(state: WebSession) -> bool:
-    """Return whether this session has recorded its first battle win."""
-    from tuxghost.rules import TuxemonFirstBattleRules
-
-    return TuxemonFirstBattleRules().at_goal(state.session)
+def first_gym_entered(state: WebSession) -> bool:
+    """Return whether the player entered the benchmark's first gym."""
+    return bool(state.client.get_map_name() == "spyder_leather_gym.tmx")
 
 
 async def run(
     state: WebSession,
     *,
-    stop_on_first_win: bool = False,
+    stop_on_gym_entry: bool = False,
 ) -> float | None:
     """Advance an already-booted browser session.
 
-    Keeping boot separate lets an embedding page draw the saved first frame,
+    Keeping boot separate lets an embedding page draw the prepared first frame,
     announce that it is ready, and wait for a synchronized host start.  When
-    requested, the loop returns active elapsed seconds at the first battle
-    win; standalone play retains the original run-until-quit behavior.
+    requested, the loop returns active elapsed seconds when the player enters
+    the first gym; standalone play retains the original run-until-quit
+    behavior.
     """
     import asyncio
 
@@ -236,7 +269,7 @@ async def run(
         now = time.monotonic()
         window_steps += step_once(state, now - last)
         last = now
-        if stop_on_first_win and first_battle_won(state):
+        if stop_on_gym_entry and first_gym_entered(state):
             return now - started
         if now - window_start >= RATE_WINDOW:
             measured_rate = window_steps / (now - window_start)

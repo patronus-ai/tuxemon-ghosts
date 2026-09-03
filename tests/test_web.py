@@ -139,6 +139,16 @@ def _booted_without_a_ghost() -> Any:
     return boot(SAVE, seed=SEED, clock_epoch=CLOCK_EPOCH)
 
 
+def test_cold_boot_starts_at_the_campaign_entry() -> None:
+    from tuxghost.web import boot_cold
+
+    state = boot_cold(seed=SEED, clock_epoch=CLOCK_EPOCH)
+    assert state.client.get_map_name() == "start_tuxemon.tmx"
+    assert state.session.player.slug == "npc_red"
+    assert state.npc is None
+    assert state.track is None
+
+
 def test_boot_without_a_ghost_installs_no_ghost() -> None:
     """The shipped page passes no trace, so nothing may be installed.
 
@@ -401,10 +411,10 @@ def test_main_yields_between_frames() -> None:
     assert calls["steps"] == 3, calls
 
 
-def test_run_stops_at_the_first_battle_win() -> None:
+def test_run_stops_when_the_first_gym_is_entered() -> None:
     """The embed owns boot separately from play, then ends this benchmark
-    as soon as the first battle is won.  This pins that split without a
-    browser or a real battle: the rule probe becomes true after two frames.
+    as soon as the first gym map loads. This pins that split without a
+    browser: the map probe becomes true after two frames.
     """
     import asyncio
 
@@ -425,23 +435,40 @@ def test_run_stops_at_the_first_battle_win() -> None:
         calls["yields"] += 1
 
     original_step = web.step_once
-    original_goal = web.first_battle_won
+    original_goal = web.first_gym_entered
     original_time = web.time  # type: ignore[attr-defined]
     original_sleep = asyncio.sleep
     web.step_once = fake_step_once  # type: ignore[assignment]
-    web.first_battle_won = fake_goal  # type: ignore[assignment]
+    web.first_gym_entered = fake_goal  # type: ignore[assignment]
     web.time = SimpleNamespace(monotonic=lambda: next(times))  # type: ignore[attr-defined, assignment]
     asyncio.sleep = fake_sleep  # type: ignore[assignment]
     try:
-        elapsed = asyncio.run(web.run(state, stop_on_first_win=True))
+        elapsed = asyncio.run(web.run(state, stop_on_gym_entry=True))
     finally:
         web.step_once = original_step
-        web.first_battle_won = original_goal
+        web.first_gym_entered = original_goal
         web.time = original_time  # type: ignore[attr-defined]
         asyncio.sleep = original_sleep
 
     assert elapsed == pytest.approx(0.2)
     assert calls == {"steps": 2, "yields": 1}
+
+
+def test_first_gym_probe_is_exact() -> None:
+    from tuxghost.web import first_gym_entered
+
+    gym = SimpleNamespace(
+        client=SimpleNamespace(
+            get_map_name=lambda: "spyder_leather_gym.tmx"
+        )
+    )
+    town = SimpleNamespace(
+        client=SimpleNamespace(
+            get_map_name=lambda: "spyder_leather_town.tmx"
+        )
+    )
+    assert first_gym_entered(gym)  # type: ignore[arg-type]
+    assert not first_gym_entered(town)  # type: ignore[arg-type]
 
 
 def test_measured_rate_reflects_the_loops_own_throughput_and_drops_on_stall() -> (

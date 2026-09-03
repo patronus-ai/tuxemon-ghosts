@@ -85,7 +85,7 @@ async function prepare() {
       await mp.install(d);
     }
     status("unpacking game...");
-    for (const f of ["code.zip", "mods.zip", "fixtures.zip"]) {
+    for (const f of ["code.zip", "mods.zip"]) {
       const buf = await (await fetch(f)).arrayBuffer();
       await pyodide.unpackArchive(buf, "zip", { extractDir: "/game" });
     }
@@ -95,17 +95,15 @@ async function prepare() {
     canvas.focus();
     status("arrow keys to move · Enter to interact");
     startFpsPoller(pyodide);
-    console.time("tuxemon-save-boot");
+    console.time("tuxemon-cold-boot");
     await pyodide.runPythonAsync(`
 import sys, os
 sys.path.insert(0, "/game"); os.chdir("/game")
-from pathlib import Path
 import tuxghost.web as web
-_speedrun_state = web.boot(Path("fixtures/paper_town.save"),
-                           seed=1234, clock_epoch=1787659200)
+_speedrun_state = web.boot_cold(seed=1234, clock_epoch=1787659200)
 web.step_once(_speedrun_state, 0)
 `);
-    console.timeEnd("tuxemon-save-boot");
+    console.timeEnd("tuxemon-cold-boot");
     prepared = true;
     postToHost("ready");
   } catch (e) {
@@ -123,12 +121,12 @@ async function startRun() {
   postToHost("started");
   try {
     const elapsed = await pyodide.runPythonAsync(`
-await web.run(_speedrun_state, stop_on_first_win=True)
+await web.run(_speedrun_state, stop_on_gym_entry=True)
 `);
     if (elapsed !== null && elapsed !== undefined) {
       postToHost("completed", { elapsedMs: Number(elapsed) * 1000 });
     } else {
-      postToHost("failed", { reason: "Tuxemon stopped before the first battle was won" });
+      postToHost("failed", { reason: "Tuxemon stopped before the first gym was entered" });
     }
   } catch (e) {
     postToHost("failed", { reason: String(e) });
