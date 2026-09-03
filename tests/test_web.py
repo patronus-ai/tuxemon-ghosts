@@ -32,6 +32,7 @@ os.environ["SDL_AUDIODRIVER"] = "dummy"
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -136,6 +137,71 @@ def _booted_without_a_ghost() -> Any:
     from tuxghost.web import boot
 
     return boot(SAVE, seed=SEED, clock_epoch=CLOCK_EPOCH)
+
+
+def test_cold_boot_starts_at_the_campaign_entry() -> None:
+    from tuxghost.web import boot_cold
+
+    state = boot_cold(seed=SEED, clock_epoch=CLOCK_EPOCH)
+    assert state.client.get_map_name() == "start_tuxemon.tmx"
+    assert state.session.player.slug == "npc_red"
+    assert state.npc is None
+    assert state.track is None
+
+
+def test_finished_intro_background_is_removed_before_free_play() -> None:
+    """The setup background must not cover the world after starter choice."""
+    from tuxghost.web import clear_finished_intro_background
+
+    removed: list[str] = []
+    state: Any = SimpleNamespace(
+        client=SimpleNamespace(
+            active_state_names=("ImageState", "WorldState"),
+            get_map_name=lambda: "spyder_bedroom.tmx",
+            remove_state_by_name=removed.append,
+        ),
+        session=SimpleNamespace(
+            player=SimpleNamespace(
+                game_variables={"intro_scoop": "done"},
+            )
+        ),
+    )
+
+    assert clear_finished_intro_background(state)
+    assert removed == ["ImageState"]
+
+
+@pytest.mark.parametrize(
+    ("map_name", "intro", "states"),
+    [
+        ("spyder_bedroom.tmx", None, ("ImageState", "WorldState")),
+        ("spyder_bedroom.tmx", "done", ("DialogState", "ImageState", "WorldState")),
+        ("spyder_paper_scoop.tmx", "done", ("ImageState", "WorldState")),
+    ],
+)
+def test_intro_background_cleanup_leaves_active_scenes_alone(
+    map_name: str,
+    intro: str | None,
+    states: tuple[str, ...],
+) -> None:
+    from tuxghost.web import clear_finished_intro_background
+
+    removed: list[str] = []
+    state: Any = SimpleNamespace(
+        client=SimpleNamespace(
+            active_state_names=states,
+            get_map_name=lambda: map_name,
+            remove_state_by_name=removed.append,
+        ),
+        session=SimpleNamespace(
+            player=SimpleNamespace(
+                game_variables={"intro_scoop": intro},
+            )
+        ),
+    )
+
+    assert not clear_finished_intro_background(state)
+    assert removed == []
 
 
 def test_boot_without_a_ghost_installs_no_ghost() -> None:
@@ -398,6 +464,66 @@ def test_main_yields_between_frames() -> None:
 
     assert calls["yields"] == 3, calls
     assert calls["steps"] == 3, calls
+
+
+def test_run_stops_when_the_first_gym_is_entered() -> None:
+    """The embed owns boot separately from play, then ends this benchmark
+    as soon as the first gym map loads. This pins that split without a
+    browser: the map probe becomes true after two frames.
+    """
+    import asyncio
+
+    from tuxghost import web
+
+    state: Any = SimpleNamespace(client=SimpleNamespace(is_running=True))
+    calls = {"steps": 0, "yields": 0}
+    times = iter([0.0, 0.1, 0.2])
+
+    def fake_step_once(_state: Any, _elapsed: float) -> int:
+        calls["steps"] += 1
+        return 1
+
+    def fake_goal(_state: Any) -> bool:
+        return calls["steps"] >= 2
+
+    async def fake_sleep(_delay: float) -> None:
+        calls["yields"] += 1
+
+    original_step = web.step_once
+    original_goal = web.first_gym_entered
+    original_time = web.time  # type: ignore[attr-defined]
+    original_sleep = asyncio.sleep
+    web.step_once = fake_step_once  # type: ignore[assignment]
+    web.first_gym_entered = fake_goal  # type: ignore[assignment]
+    web.time = SimpleNamespace(monotonic=lambda: next(times))  # type: ignore[attr-defined, assignment]
+    asyncio.sleep = fake_sleep  # type: ignore[assignment]
+    try:
+        elapsed = asyncio.run(web.run(state, stop_on_gym_entry=True))
+    finally:
+        web.step_once = original_step
+        web.first_gym_entered = original_goal
+        web.time = original_time  # type: ignore[attr-defined]
+        asyncio.sleep = original_sleep
+
+    assert elapsed == pytest.approx(0.2)
+    assert calls == {"steps": 2, "yields": 1}
+
+
+def test_first_gym_probe_is_exact() -> None:
+    from tuxghost.web import first_gym_entered
+
+    gym = SimpleNamespace(
+        client=SimpleNamespace(
+            get_map_name=lambda: "spyder_leather_gym.tmx"
+        )
+    )
+    town = SimpleNamespace(
+        client=SimpleNamespace(
+            get_map_name=lambda: "spyder_leather_town.tmx"
+        )
+    )
+    assert first_gym_entered(gym)  # type: ignore[arg-type]
+    assert not first_gym_entered(town)  # type: ignore[arg-type]
 
 
 def test_measured_rate_reflects_the_loops_own_throughput_and_drops_on_stall() -> (

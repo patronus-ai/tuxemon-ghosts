@@ -169,6 +169,67 @@ def boot(
     )
 
 
+def boot_cold(*, seed: int, clock_epoch: int) -> WebSession:
+    """Start the browser from the same fresh-game state as agent runs."""
+    try:
+        import ssl  # noqa: F401
+    except ImportError:
+        sys.modules["ssl"] = types.ModuleType("ssl")
+
+    from tuxemon.prepare import pygame_init
+
+    context = pygame_init()
+
+    import tuxemon.graphics
+    import tuxemon.map.view  # noqa: F401
+
+    from tuxghost.boot import build_client
+    from tuxghost.determinism import seed_all
+    from tuxghost.observe import FrameRenderer
+
+    seed_all(seed)
+    client, session = build_client(
+        seed=seed,
+        clock_epoch=clock_epoch,
+        context=context,
+    )
+    return WebSession(
+        client=client,
+        session=session,
+        npc=None,
+        track=None,
+        frames=FrameRenderer(client, upscale=1),
+        display=context.screen,
+    )
+
+
+def clear_finished_intro_background(state: WebSession) -> bool:
+    """Remove the setup-screen background after the Spyder intro ends.
+
+    ``start_tuxemon`` installs a full-screen ``ImageState`` behind its
+    campaign, appearance, and pronoun menus.  In the browser loop that state
+    can survive both transitions used by the shortened intro.  Once the
+    starter sequence returns the player to the bedroom, it then covers the
+    world and consumes every movement input even though the game is still
+    running.
+
+    Keep the repair deliberately narrow: only the exact idle stack left by
+    the completed intro is changed.  Dialogs, transitions, and every other
+    use of ``ImageState`` are left alone.
+    """
+    variables = state.session.player.game_variables
+    names = tuple(state.client.active_state_names)
+    if (
+        state.client.get_map_name() != "spyder_bedroom.tmx"
+        or variables.get("intro_scoop") != "done"
+        or names != ("ImageState", "WorldState")
+    ):
+        return False
+
+    state.client.remove_state_by_name("ImageState")
+    return True
+
+
 def step_once(state: WebSession, elapsed: float) -> int:
     """Advance by however many fixed steps `elapsed` owes, then draw.
 
@@ -200,9 +261,50 @@ def step_once(state: WebSession, elapsed: float) -> int:
                 # keeps the ghost legible as something that MOVES.
                 loop=True,
             )
+    clear_finished_intro_background(state)
     state.display.blit(state.frames.surface(), (0, 0))
     pg.display.flip()
     return steps
+
+
+def first_gym_entered(state: WebSession) -> bool:
+    """Return whether the player entered the benchmark's first gym."""
+    return bool(state.client.get_map_name() == "spyder_leather_gym.tmx")
+
+
+async def run(
+    state: WebSession,
+    *,
+    stop_on_gym_entry: bool = False,
+) -> float | None:
+    """Advance an already-booted browser session.
+
+    Keeping boot separate lets an embedding page draw the prepared first frame,
+    announce that it is ready, and wait for a synchronized host start.  When
+    requested, the loop returns active elapsed seconds when the player enters
+    the first gym; standalone play retains the original run-until-quit
+    behavior.
+    """
+    import asyncio
+
+    global measured_rate
+
+    started = time.monotonic()
+    last = started
+    window_start = last
+    window_steps = 0
+    while state.client.is_running:
+        now = time.monotonic()
+        window_steps += step_once(state, now - last)
+        last = now
+        if stop_on_gym_entry and first_gym_entered(state):
+            return now - started
+        if now - window_start >= RATE_WINDOW:
+            measured_rate = window_steps / (now - window_start)
+            window_start = now
+            window_steps = 0
+        await asyncio.sleep(0)
+    return None
 
 
 async def main(
@@ -237,20 +339,5 @@ async def main(
     variables and one `if`, no new control flow, no change to
     `step_once`'s own synchronous, natively-testable signature.
     """
-    import asyncio
-
-    global measured_rate
-
     state = boot(save, ghost, seed=seed, clock_epoch=clock_epoch)
-    last = time.monotonic()
-    window_start = last
-    window_steps = 0
-    while state.client.is_running:
-        now = time.monotonic()
-        window_steps += step_once(state, now - last)
-        last = now
-        if now - window_start >= RATE_WINDOW:
-            measured_rate = window_steps / (now - window_start)
-            window_start = now
-            window_steps = 0
-        await asyncio.sleep(0)
+    await run(state)

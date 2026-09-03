@@ -24,7 +24,6 @@ never imports pygame or tuxemon.
 from __future__ import annotations
 
 import importlib.util
-import re
 import types
 import zipfile
 from pathlib import Path
@@ -114,35 +113,8 @@ def test_zip_python_arcnames_match_the_shims_sys_path(
     assert names == {"tuxemon/foo.py", "tuxghost/bar.py"}, names
 
 
-def test_zip_fixtures_arcnames_match_what_index_html_passes_to_main(
-    tmp_path: Path,
-) -> None:
-    """`web/index.html`'s `runPythonAsync` script passes its
-    `Path(...)` arguments to `web.main` -- extracted here from the real
-    page text, not re-typed, so this test cannot drift out of sync with
-    the page on its own. `_zip_fixtures`'s arcnames must equal those
-    literals exactly, or the unpacked archive won't have a file where
-    the page looks for one.
-
-    `_zip_fixtures` reads the real, small, committed fixture files (via
-    the module's real `ROOT`) but writes its output zip under `tmp_path`
-    -- reading them is cheap and SDL-free; there is no reason to fake
-    them, only to avoid littering the repo with the output.
-    """
-    literals = re.findall(
-        r'Path\("([^"]+)"\)', INDEX_HTML_PATH.read_text()
-    )
-    # ONE, not two: the page passes a save and no ghost. The count is
-    # asserted rather than left implicit so that adding a `Path(...)` to
-    # the page without packing the file it names fails HERE, natively,
-    # instead of as a `FileNotFoundError` in somebody's browser.
-    assert len(literals) == 1, literals
-
-    module = _load_build_web()
-    target = tmp_path / "fixtures.zip"
-    module._zip_fixtures(target)
-
-    with zipfile.ZipFile(target) as z:
-        names = set(z.namelist())
-
-    assert names == set(literals), (names, literals)
+def test_index_cold_boots_without_a_save_archive() -> None:
+    page = INDEX_HTML_PATH.read_text()
+    assert "web.boot_cold(" in page
+    assert "fixtures.zip" not in page
+    assert "Path(" not in page
