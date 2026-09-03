@@ -98,6 +98,7 @@ async function prepare() {
     console.time("tuxemon-cold-boot");
     await pyodide.runPythonAsync(`
 import sys, os
+os.environ["SDL_AUDIODRIVER"] = "dummy"
 sys.path.insert(0, "/game"); os.chdir("/game")
 import tuxghost.web as web
 _speedrun_state = web.boot_cold(seed=1234, clock_epoch=1787659200)
