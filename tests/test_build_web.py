@@ -116,5 +116,6 @@ def test_zip_python_arcnames_match_the_shims_sys_path(
 def test_index_cold_boots_without_a_save_archive() -> None:
     page = INDEX_HTML_PATH.read_text()
     assert "web.boot_cold(" in page
+    assert 'os.environ["SDL_AUDIODRIVER"] = "dummy"' in page
     assert "fixtures.zip" not in page
     assert "Path(" not in page
