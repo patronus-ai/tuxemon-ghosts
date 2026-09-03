@@ -149,6 +149,61 @@ def test_cold_boot_starts_at_the_campaign_entry() -> None:
     assert state.track is None
 
 
+def test_finished_intro_background_is_removed_before_free_play() -> None:
+    """The setup background must not cover the world after starter choice."""
+    from tuxghost.web import clear_finished_intro_background
+
+    removed: list[str] = []
+    state: Any = SimpleNamespace(
+        client=SimpleNamespace(
+            active_state_names=("ImageState", "WorldState"),
+            get_map_name=lambda: "spyder_bedroom.tmx",
+            remove_state_by_name=removed.append,
+        ),
+        session=SimpleNamespace(
+            player=SimpleNamespace(
+                game_variables={"intro_scoop": "done"},
+            )
+        ),
+    )
+
+    assert clear_finished_intro_background(state)
+    assert removed == ["ImageState"]
+
+
+@pytest.mark.parametrize(
+    ("map_name", "intro", "states"),
+    [
+        ("spyder_bedroom.tmx", None, ("ImageState", "WorldState")),
+        ("spyder_bedroom.tmx", "done", ("DialogState", "ImageState", "WorldState")),
+        ("spyder_paper_scoop.tmx", "done", ("ImageState", "WorldState")),
+    ],
+)
+def test_intro_background_cleanup_leaves_active_scenes_alone(
+    map_name: str,
+    intro: str | None,
+    states: tuple[str, ...],
+) -> None:
+    from tuxghost.web import clear_finished_intro_background
+
+    removed: list[str] = []
+    state: Any = SimpleNamespace(
+        client=SimpleNamespace(
+            active_state_names=states,
+            get_map_name=lambda: map_name,
+            remove_state_by_name=removed.append,
+        ),
+        session=SimpleNamespace(
+            player=SimpleNamespace(
+                game_variables={"intro_scoop": intro},
+            )
+        ),
+    )
+
+    assert not clear_finished_intro_background(state)
+    assert removed == []
+
+
 def test_boot_without_a_ghost_installs_no_ghost() -> None:
     """The shipped page passes no trace, so nothing may be installed.
 

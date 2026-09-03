@@ -203,6 +203,33 @@ def boot_cold(*, seed: int, clock_epoch: int) -> WebSession:
     )
 
 
+def clear_finished_intro_background(state: WebSession) -> bool:
+    """Remove the setup-screen background after the Spyder intro ends.
+
+    ``start_tuxemon`` installs a full-screen ``ImageState`` behind its
+    campaign, appearance, and pronoun menus.  In the browser loop that state
+    can survive both transitions used by the shortened intro.  Once the
+    starter sequence returns the player to the bedroom, it then covers the
+    world and consumes every movement input even though the game is still
+    running.
+
+    Keep the repair deliberately narrow: only the exact idle stack left by
+    the completed intro is changed.  Dialogs, transitions, and every other
+    use of ``ImageState`` are left alone.
+    """
+    variables = state.session.player.game_variables
+    names = tuple(state.client.active_state_names)
+    if (
+        state.client.get_map_name() != "spyder_bedroom.tmx"
+        or variables.get("intro_scoop") != "done"
+        or names != ("ImageState", "WorldState")
+    ):
+        return False
+
+    state.client.remove_state_by_name("ImageState")
+    return True
+
+
 def step_once(state: WebSession, elapsed: float) -> int:
     """Advance by however many fixed steps `elapsed` owes, then draw.
 
@@ -234,6 +261,7 @@ def step_once(state: WebSession, elapsed: float) -> int:
                 # keeps the ghost legible as something that MOVES.
                 loop=True,
             )
+    clear_finished_intro_background(state)
     state.display.blit(state.frames.surface(), (0, 0))
     pg.display.flip()
     return steps
