@@ -149,22 +149,35 @@ def test_cold_boot_starts_at_the_campaign_entry() -> None:
     assert state.track is None
 
 
+def _intro_state(
+    *,
+    states: tuple[str, ...],
+    map_name: str = "spyder_bedroom.tmx",
+    intro: str | None = None,
+    can_move: bool = False,
+) -> Any:
+    removed: list[str] = []
+    player = SimpleNamespace(game_variables={"intro_scoop": intro})
+    state = SimpleNamespace(
+        client=SimpleNamespace(
+            active_state_names=states,
+            get_map_name=lambda: map_name,
+            remove_state_by_name=removed.append,
+            movement_manager=SimpleNamespace(
+                is_movement_allowed=lambda char: can_move,
+            ),
+        ),
+        session=SimpleNamespace(player=player),
+    )
+    return state, removed
+
+
 def test_finished_intro_background_is_removed_before_free_play() -> None:
     """The setup background must not cover the world after starter choice."""
     from tuxghost.web import clear_finished_intro_background
 
-    removed: list[str] = []
-    state: Any = SimpleNamespace(
-        client=SimpleNamespace(
-            active_state_names=("ImageState", "WorldState"),
-            get_map_name=lambda: "spyder_bedroom.tmx",
-            remove_state_by_name=removed.append,
-        ),
-        session=SimpleNamespace(
-            player=SimpleNamespace(
-                game_variables={"intro_scoop": "done"},
-            )
-        ),
+    state, removed = _intro_state(
+        states=("ImageState", "WorldState"), intro="done"
     )
 
     assert clear_finished_intro_background(state)
@@ -172,32 +185,64 @@ def test_finished_intro_background_is_removed_before_free_play() -> None:
 
 
 @pytest.mark.parametrize(
-    ("map_name", "intro", "states"),
+    ("map_name", "intro", "can_move", "states"),
     [
-        ("spyder_bedroom.tmx", None, ("ImageState", "WorldState")),
-        ("spyder_bedroom.tmx", "done", ("DialogState", "ImageState", "WorldState")),
-        ("spyder_paper_scoop.tmx", "done", ("ImageState", "WorldState")),
+        # Handed control back on a map the intro walked on to.
+        ("spyder_paper_scoop.tmx", None, True, ("ImageState", "WorldState")),
+        # Intro flagged done, background still up, even off the bedroom.
+        ("spyder_paper_town.tmx", "done", False, ("ImageState", "WorldState")),
+        # More than one background stacked over the world.
+        (
+            "spyder_bedroom.tmx",
+            "done",
+            False,
+            ("ImageState", "ImageState", "WorldState"),
+        ),
+    ],
+)
+def test_stuck_intro_background_is_cleared_once_control_returns(
+    map_name: str,
+    intro: str | None,
+    can_move: bool,
+    states: tuple[str, ...],
+) -> None:
+    from tuxghost.web import clear_finished_intro_background
+
+    state, removed = _intro_state(
+        states=states, map_name=map_name, intro=intro, can_move=can_move
+    )
+
+    assert clear_finished_intro_background(state)
+    assert removed == ["ImageState"] * (len(states) - 1)
+
+
+@pytest.mark.parametrize(
+    ("map_name", "intro", "can_move", "states"),
+    [
+        # A scene is still playing: something interactive sits on top.
+        (
+            "spyder_bedroom.tmx",
+            "done",
+            True,
+            ("DialogState", "ImageState", "WorldState"),
+        ),
+        # An intentional image-only cutscene beat: intro unfinished and
+        # controls still locked -- must be left on screen.
+        ("spyder_bedroom.tmx", None, False, ("ImageState", "WorldState")),
+        # No background over the world at all.
+        ("spyder_bedroom.tmx", "done", True, ("WorldState",)),
     ],
 )
 def test_intro_background_cleanup_leaves_active_scenes_alone(
     map_name: str,
     intro: str | None,
+    can_move: bool,
     states: tuple[str, ...],
 ) -> None:
     from tuxghost.web import clear_finished_intro_background
 
-    removed: list[str] = []
-    state: Any = SimpleNamespace(
-        client=SimpleNamespace(
-            active_state_names=states,
-            get_map_name=lambda: map_name,
-            remove_state_by_name=removed.append,
-        ),
-        session=SimpleNamespace(
-            player=SimpleNamespace(
-                game_variables={"intro_scoop": intro},
-            )
-        ),
+    state, removed = _intro_state(
+        states=states, map_name=map_name, intro=intro, can_move=can_move
     )
 
     assert not clear_finished_intro_background(state)
