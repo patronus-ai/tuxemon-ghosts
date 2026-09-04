@@ -203,30 +203,63 @@ def boot_cold(*, seed: int, clock_epoch: int) -> WebSession:
     )
 
 
-def clear_finished_intro_background(state: WebSession) -> bool:
-    """Remove the setup-screen background after the Spyder intro ends.
-
-    ``start_tuxemon`` installs a full-screen ``ImageState`` behind its
-    campaign, appearance, and pronoun menus.  In the browser loop that state
-    can survive both transitions used by the shortened intro.  Once the
-    starter sequence returns the player to the bedroom, it then covers the
-    world and consumes every movement input even though the game is still
-    running.
-
-    Keep the repair deliberately narrow: only the exact idle stack left by
-    the completed intro is changed.  Dialogs, transitions, and every other
-    use of ``ImageState`` are left alone.
-    """
-    variables = state.session.player.game_variables
-    names = tuple(state.client.active_state_names)
-    if (
-        state.client.get_map_name() != "spyder_bedroom.tmx"
-        or variables.get("intro_scoop") != "done"
-        or names != ("ImageState", "WorldState")
-    ):
+def _player_can_move(state: WebSession) -> bool:
+    """Whether the intro has handed real-time control back to the player."""
+    try:
+        return bool(
+            state.client.movement_manager.is_movement_allowed(
+                state.session.player
+            )
+        )
+    except AttributeError:
+        # An engine build without this movement API: fall back to the
+        # intro-finished flag alone rather than crash the draw loop.
         return False
 
-    state.client.remove_state_by_name("ImageState")
+
+def clear_finished_intro_background(state: WebSession) -> bool:
+    """Remove a full-screen setup background left covering the world.
+
+    ``start_tuxemon``'s campaign, appearance, pronoun, and starter menus each
+    sit in front of a full-screen ``ImageState`` background. In the browser
+    loop one of those backgrounds can outlive the scene that pushed it: after
+    the intro hands control back it keeps covering the world and swallows every
+    movement input, so the game looks frozen on the last intro image and never
+    appears to start. Measured symptom: a stuck intro picture with no player or
+    map behind it.
+
+    Clear it only when it is unambiguously stuck, so live scenes are never cut
+    short:
+
+    * Every state above the base ``WorldState`` must be an ``ImageState``. A
+      dialog, choice, menu, or transition on top means a scene is still
+      playing, so the whole stack is left alone. This also leaves the entire
+      intro untouched while its menus and dialogs are up.
+    * The player must actually have control -- movement is allowed, or the
+      intro has flagged itself finished (``intro_scoop`` is ``done``). During a
+      real cutscene beat controls are locked and this flag is unset, so an
+      intentional image-only frame is preserved.
+
+    Neither the map nor the exact stack depth is fixed, so this also covers the
+    background lingering after the player walks on past the bedroom, and more
+    than one stacked background.
+    """
+    names = tuple(state.client.active_state_names)
+    if len(names) < 2 or names[-1] != "WorldState":
+        return False
+
+    backgrounds = names[:-1]
+    if any(name != "ImageState" for name in backgrounds):
+        return False
+
+    intro_done = (
+        state.session.player.game_variables.get("intro_scoop") == "done"
+    )
+    if not intro_done and not _player_can_move(state):
+        return False
+
+    for _ in backgrounds:
+        state.client.remove_state_by_name("ImageState")
     return True
 
 
